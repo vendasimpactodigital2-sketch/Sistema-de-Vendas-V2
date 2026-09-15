@@ -2583,6 +2583,17 @@ ${JSON.stringify(sales, null, 2)}
       // Synchronize auxiliary fluxo_caixa table if present
       if (state.currentSession && state.currentSession.status === "aberto") {
         upsertPromises.push(
+          supabase.from("sessoes_caixa").upsert({
+            id: state.currentSession.id,
+            user_id: canonicalOwnerId,
+            status: "aberto",
+            valor_abertura: state.currentSession.valorAbertura || 0,
+            data_abertura: state.currentSession.dataAbertura || nowISO,
+            operador: state.currentSession.operador || "Operador",
+            updated_at: nowISO
+          })
+        );
+        upsertPromises.push(
           supabase.from("fluxo_caixa").upsert({
             user_id: canonicalOwnerId,
             data: todayStr,
@@ -2595,6 +2606,13 @@ ${JSON.stringify(sales, null, 2)}
           }, { onConflict: "user_id,data" })
         );
       } else if (!state.currentSession) {
+        upsertPromises.push(
+          supabase.from("sessoes_caixa").update({
+            status: "fechado",
+            data_fechamento: nowISO,
+            updated_at: nowISO
+          }).or("status.ilike.%abert%,status.ilike.%ativ%,data_fechamento.is.null")
+        );
         upsertPromises.push(
           supabase.from("fluxo_caixa").update({
             status: "fechado",
@@ -2671,6 +2689,62 @@ ${JSON.stringify(sales, null, 2)}
           state: itemsObj as any
         };
       }).filter(c => c.state && typeof c.state === "object");
+
+      // 0. TOP PRIORITY: Real table sessoes_caixa check
+      try {
+        const { data: sessRows } = await supabase
+          .from("sessoes_caixa")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(10);
+
+        if (sessRows && sessRows.length > 0) {
+          const openSess = sessRows.find((s: any) => {
+            const st = String(s.status || s.situacao || "").toLowerCase().trim();
+            if (st === "fechado" || st === "fechada" || st === "closed" || st === "encerrado" || st === "encerrada") return false;
+            if (st.includes("abert") || st.includes("ativ") || st.includes("open") || s.aberto === true) return true;
+            return !s.data_fechamento && !s.fechado_em;
+          });
+
+          if (openSess) {
+            let histItems: any[] = [];
+            try {
+              const { data: hRows } = await supabase
+                .from("historico_caixas")
+                .select("*")
+                .order("created_at", { ascending: false })
+                .limit(50);
+              if (hRows && hRows.length > 0) {
+                histItems = hRows.map((h: any) => ({
+                  id: h.session_id || h.id,
+                  status: "fechado",
+                  valorAbertura: Number(h.valor_abertura ?? h.valor_inicial ?? h.fundo_troco) || 0,
+                  dataAbertura: h.data_abertura || h.created_at,
+                  operador: h.operador || "Operador",
+                  dataFechamento: h.data_fechamento || h.created_at,
+                  valorFechamentoReal: Number(h.valor_fechamento_real) || 0,
+                  valorFechamentoEsperado: Number(h.valor_fechamento_esperado) || 0,
+                  observacoes: h.observacoes || ""
+                }));
+              }
+            } catch (hErr) {}
+
+            const reconstructedState = {
+              currentSession: {
+                id: openSess.id || openSess.session_id || `session_${Date.now()}`,
+                status: "aberto",
+                valorAbertura: Number(openSess.valor_abertura ?? openSess.valor_inicial ?? openSess.fundo_troco) || 0,
+                dataAbertura: openSess.data_abertura || openSess.created_at || new Date().toISOString(),
+                operador: openSess.operador || openSess.usuario || "Operador"
+              },
+              history: histItems.length > 0 ? histItems : (parsedCandidates[0]?.state?.history || [])
+            };
+            return res.json({ success: true, data: reconstructedState, date: openSess.data_abertura || openSess.created_at });
+          }
+        }
+      } catch (sessErr) {
+        console.warn("[/api/cash-register GET] sessoes_caixa check notice:", sessErr);
+      }
 
       // 1. TOP PRIORITY: If ANY candidate row has an active OPEN session, that MUST take precedence!
       const openCandidate = parsedCandidates.find(

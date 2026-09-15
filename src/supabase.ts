@@ -2800,6 +2800,84 @@ export async function dbUpdateProductStock(ownerId: string, productId: string, n
   }
 }
 
+export function isCashSessionActiveOrOpen(row: any): boolean {
+  if (!row || typeof row !== "object") return false;
+
+  const statusRaw = String(row.status || row.situacao || row.estado || "").toLowerCase().trim();
+
+  // Explicit closed / finished indicators
+  if (
+    statusRaw === "fechado" ||
+    statusRaw === "fechada" ||
+    statusRaw === "closed" ||
+    statusRaw === "encerrado" ||
+    statusRaw === "encerrada" ||
+    statusRaw === "finalizado" ||
+    statusRaw === "finalizada" ||
+    statusRaw === "inativo" ||
+    statusRaw === "cancelado" ||
+    statusRaw === "cancelada"
+  ) {
+    return false;
+  }
+
+  // Explicit open / active indicators
+  if (
+    statusRaw === "aberto" ||
+    statusRaw === "aberta" ||
+    statusRaw === "ativo" ||
+    statusRaw === "ativa" ||
+    statusRaw === "open" ||
+    statusRaw === "em_aberto" ||
+    statusRaw === "em aberto" ||
+    statusRaw === "abertos" ||
+    statusRaw.includes("abert") ||
+    statusRaw.includes("ativ")
+  ) {
+    return true;
+  }
+
+  // Explicit boolean indicators
+  if (row.aberto === true || row.ativo === true || row.is_open === true) {
+    return true;
+  }
+
+  // If no closing date is present, and there is an opening date or opening value or id, it is an open session
+  if (!row.data_fechamento && !row.fechado_em && !row.closed_at) {
+    if (row.data_abertura || row.valor_abertura !== undefined || row.id || row.created_at) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function isCashSessionExplicitlyClosed(row: any): boolean {
+  if (!row || typeof row !== "object") return false;
+  const statusRaw = String(row.status || row.situacao || row.estado || "").toLowerCase().trim();
+  if (
+    statusRaw === "fechado" ||
+    statusRaw === "fechada" ||
+    statusRaw === "closed" ||
+    statusRaw === "encerrado" ||
+    statusRaw === "encerrada" ||
+    statusRaw === "finalizado" ||
+    statusRaw === "finalizada" ||
+    statusRaw === "inativo" ||
+    statusRaw === "cancelado" ||
+    statusRaw === "cancelada"
+  ) {
+    return true;
+  }
+  if (row.aberto === false || row.ativo === false || row.is_open === false) {
+    return true;
+  }
+  if (row.data_fechamento || row.fechado_em || row.closed_at) {
+    return true;
+  }
+  return false;
+}
+
 export async function dbGetCashRegister(userId: string): Promise<CashRegisterState | null> {
   const supabase = getSupabase();
   let effectiveUserId = userId;
@@ -2818,46 +2896,47 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
       const { data: openSessions, error: sessErr } = await supabase
         .from("sessoes_caixa")
         .select("*")
-        .eq("status", "aberto")
         .order("created_at", { ascending: false })
-        .limit(1);
+        .limit(10);
 
       if (!sessErr && openSessions && openSessions.length > 0) {
-        const sessRow = openSessions[0];
-        // Fetch history from public.historico_caixas
-        let historyItems: CashRegisterSession[] = [];
-        try {
-          const { data: histRows } = await supabase
-            .from("historico_caixas")
-            .select("*")
-            .order("created_at", { ascending: false })
-            .limit(50);
-          if (histRows && histRows.length > 0) {
-            historyItems = histRows.map((h: any) => ({
-              id: h.session_id || h.id,
-              status: "fechado",
-              valorAbertura: Number(h.valor_abertura) || 0,
-              dataAbertura: h.data_abertura || h.created_at,
-              operador: h.operador || "Operador",
-              dataFechamento: h.data_fechamento || h.created_at,
-              valorFechamentoReal: Number(h.valor_fechamento_real) || 0,
-              valorFechamentoEsperado: Number(h.valor_fechamento_esperado) || 0,
-              observacoes: h.observacoes || ""
-            }));
-          }
-        } catch (hErr) {}
+        const sessRow = openSessions.find((s: any) => isCashSessionActiveOrOpen(s));
+        if (sessRow) {
+          // Fetch history from public.historico_caixas
+          let historyItems: CashRegisterSession[] = [];
+          try {
+            const { data: histRows } = await supabase
+              .from("historico_caixas")
+              .select("*")
+              .order("created_at", { ascending: false })
+              .limit(50);
+            if (histRows && histRows.length > 0) {
+              historyItems = histRows.map((h: any) => ({
+                id: h.session_id || h.id,
+                status: "fechado",
+                valorAbertura: Number(h.valor_abertura ?? h.valor_inicial ?? h.fundo_troco) || 0,
+                dataAbertura: h.data_abertura || h.created_at,
+                operador: h.operador || h.usuario || "Operador",
+                dataFechamento: h.data_fechamento || h.created_at,
+                valorFechamentoReal: Number(h.valor_fechamento_real) || 0,
+                valorFechamentoEsperado: Number(h.valor_fechamento_esperado) || 0,
+                observacoes: h.observacoes || ""
+              }));
+            }
+          } catch (hErr) {}
 
-        const openState: CashRegisterState = {
-          currentSession: {
-            id: sessRow.id || sessRow.session_id || `session_${Date.now()}`,
-            status: "aberto",
-            valorAbertura: Number(sessRow.valor_abertura) || 0,
-            dataAbertura: sessRow.data_abertura || sessRow.created_at || new Date().toISOString(),
-            operador: sessRow.operador || "Operador"
-          },
-          history: historyItems
-        };
-        return openState;
+          const openState: CashRegisterState = {
+            currentSession: {
+              id: sessRow.id || sessRow.session_id || `session_${Date.now()}`,
+              status: "aberto",
+              valorAbertura: Number(sessRow.valor_abertura ?? sessRow.valor_inicial ?? sessRow.fundo_troco) || 0,
+              dataAbertura: sessRow.data_abertura || sessRow.created_at || new Date().toISOString(),
+              operador: sessRow.operador || sessRow.usuario || "Operador"
+            },
+            history: historyItems
+          };
+          return openState;
+        }
       }
     } catch (sessEx) {
       console.warn("Notice: sessoes_caixa query in dbGetCashRegister:", sessEx);
@@ -3355,34 +3434,46 @@ export async function dbCheckGlobalCashRegister(userId: string): Promise<boolean
     try {
       const { data: sessData, error: sessErr } = await supabase
         .from("sessoes_caixa")
-        .select("id, status")
-        .eq("status", "aberto")
-        .limit(1);
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(10);
+
       if (!sessErr && sessData && sessData.length > 0) {
-        console.log(`[dbCheckGlobalCashRegister] Open session found in sessoes_caixa`);
+        const openItem = sessData.find((s: any) => isCashSessionActiveOrOpen(s));
+        if (openItem) {
+          console.log(`[dbCheckGlobalCashRegister] Open/active session found in sessoes_caixa:`, openItem.id);
+          return true;
+        }
+      }
+    } catch (err) {
+      console.warn("[dbCheckGlobalCashRegister] sessoes_caixa check notice:", err);
+    }
+
+    // 2. Secondary check: fetch canonical cash register state
+    try {
+      const state = await dbGetCashRegister(effectiveUserId);
+      if (state?.currentSession && isCashSessionActiveOrOpen(state.currentSession)) {
+        console.log(`[dbCheckGlobalCashRegister] Open session active in cash_register_state for user ${effectiveUserId}`);
         return true;
       }
     } catch (err) {}
 
-    // 2. Secondary check: fetch canonical cash register state from sales table
-    const state = await dbGetCashRegister(effectiveUserId);
-    if (state?.currentSession && state.currentSession.status === "aberto") {
-      console.log(`[dbCheckGlobalCashRegister] Open session active in cash_register_state for user ${effectiveUserId}`);
-      return true;
-    }
-
-    // 3. Auxiliary tables check
+    // 3. Auxiliary tables check (fluxo_caixa, etc.)
     const tableNames = ["fluxo_caixa", "fluxo_de_caixa", "fluxo_caixas", "fluxo_de_caixas"];
     for (const tableName of tableNames) {
       try {
         const { data, error } = await supabase
           .from(tableName)
-          .select("status")
-          .eq("status", "aberto");
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(5);
 
         if (!error && data && data.length > 0) {
-          console.log(`[dbCheckGlobalCashRegister] Open session found in secondary table ${tableName}`);
-          return true;
+          const hasOpen = data.some((r: any) => isCashSessionActiveOrOpen(r));
+          if (hasOpen) {
+            console.log(`[dbCheckGlobalCashRegister] Open session found in secondary table ${tableName}`);
+            return true;
+          }
         }
       } catch (err) {
         // Continue
