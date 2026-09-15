@@ -2107,6 +2107,60 @@ export default function App() {
       )
       .on(
         "postgres_changes",
+        { event: "*", schema: "public", table: "produtos" },
+        (payload) => {
+          console.log("[Supabase Realtime] Mudança detectada na tabela real 'produtos':", payload.eventType);
+          // 1. Atualização instantânea em memória se for inserção ou atualização
+          if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") {
+            if (payload.new) {
+              const row = payload.new as any;
+              const mappedProduct = {
+                id: row.id,
+                name: row.nome || row.name || row.descricao || "Produto",
+                description: row.descricao || row.description || "",
+                costPrice: Number(row.preco_custo ?? row.cost_price ?? row.preco_compra) || 0,
+                salePrice: Number(row.preco_venda ?? row.sale_price ?? row.preco) || 0,
+                currentStock: Number(row.estoque_atual ?? row.current_stock ?? row.estoque) || 0,
+                minStock: Number(row.estoque_minimo ?? row.min_stock) || 0,
+                unit: row.unidade || row.unit || "un",
+                category: row.categoria || row.category || "Geral",
+                isCatalogItem: true
+              };
+
+              setCatalogProducts((prev) => {
+                const existingIndex = prev.findIndex((p) => p.id === mappedProduct.id);
+                let updated: any[];
+                if (existingIndex >= 0) {
+                  updated = [...prev];
+                  updated[existingIndex] = { ...updated[existingIndex], ...mappedProduct };
+                } else {
+                  updated = [mappedProduct, ...prev];
+                }
+                try {
+                  localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(updated));
+                } catch (e) {}
+                return updated;
+              });
+            }
+          } else if (payload.eventType === "DELETE" && payload.old && (payload.old as any).id) {
+            const delId = (payload.old as any).id;
+            setCatalogProducts((prev) => {
+              const updated = prev.filter((p) => p.id !== delId);
+              try {
+                localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(updated));
+              } catch (e) {}
+              return updated;
+            });
+          }
+
+          // 2. Dispara eventos e recarrega produtos para garantir consistência
+          window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: payload }));
+          window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: { table: "produtos", payload } }));
+          triggerRemoteSync(currentUser, true, true);
+        }
+      )
+      .on(
+        "postgres_changes",
         { event: "*", schema: "public", table: "expenses" },
         (payload) => {
           console.log("[Supabase Realtime] Mudança detectada na tabela 'expenses':", payload.eventType);
@@ -2134,10 +2188,10 @@ export default function App() {
             const row = payload.new as any;
             if (row.status === "aberto") {
               const openSession: CashRegisterSession = {
-                id: row.id || ("session_" + Date.now()),
+                id: row.id || row.session_id || ("session_" + Date.now()),
                 status: "aberto",
                 valorAbertura: Number(row.valor_abertura) || 0,
-                dataAbertura: row.data_abertura || new Date().toISOString(),
+                dataAbertura: row.data_abertura || row.created_at || new Date().toISOString(),
                 operador: row.operador || "Operador"
               };
               setCashRegister((prev) => {
@@ -2177,6 +2231,29 @@ export default function App() {
           }
           fetchSales();
           triggerRemoteSync(currentUser, true);
+          window.dispatchEvent(new CustomEvent("cash_register_remote_sync", { detail: payload }));
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "historico_caixas" },
+        (payload) => {
+          console.log("[Supabase Realtime] Mudança detectada na tabela 'historico_caixas':", payload.eventType);
+          const companyOwnerId = currentUser?.owner_id || currentUser?.id;
+          if (companyOwnerId) {
+            checkGlobalRegisterStatus(companyOwnerId);
+            dbGetCashRegister(companyOwnerId).then((latestState) => {
+              if (latestState) {
+                setCashRegister(latestState);
+                cashRegisterRef.current = latestState;
+                try {
+                  localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(latestState));
+                } catch (e) {}
+              }
+            }).catch(console.error);
+          }
+          triggerRemoteSync(currentUser, true);
+          window.dispatchEvent(new CustomEvent("cash_register_remote_sync", { detail: payload }));
         }
       )
       .on(

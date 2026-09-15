@@ -129,21 +129,41 @@ export async function dbSignIn(usernameOrEmail: string, password: string): Promi
     const name = data.user.user_metadata?.name || data.user.user_metadata?.fullName || email.split("@")[0];
     const username = data.user.user_metadata?.username || email.split("@")[0];
 
-    // Try to check if user already exists in public table to preserve their owner_id and role metadata!
+    // Check if user already exists in public table to preserve role metadata and avoid duplication
     let realOwnerId = data.user.id;
     let existingRole = "";
     let existingStatus = "trial";
     let existingCreatedAt = new Date().toISOString();
     let existingIsAdmin = false;
     try {
-      const { data: dbUser } = await supabase
+      let dbUser: any = null;
+      const { data: exactUser } = await supabase
         .from("users")
         .select("*")
         .eq("id", data.user.id)
         .maybeSingle();
+      if (exactUser) {
+        dbUser = exactUser;
+      } else if (data.user.email) {
+        const { data: emailUser } = await supabase
+          .from("users")
+          .select("*")
+          .eq("email", data.user.email)
+          .maybeSingle();
+        if (emailUser) {
+          dbUser = emailUser;
+          // Update id on matching email record to avoid duplicate rows
+          try {
+            await supabase.from("users").update({ id: data.user.id }).eq("email", data.user.email);
+          } catch (e) {}
+        }
+      }
+
       if (dbUser) {
-        if (dbUser.owner_id) {
+        if (dbUser.owner_id && dbUser.owner_id !== data.user.id && (dbUser.role === "atendente" || dbUser.role === "vendedor")) {
           realOwnerId = dbUser.owner_id;
+        } else {
+          realOwnerId = data.user.id;
         }
         existingRole = dbUser.role || dbUser.cargo || dbUser.tipo || "";
         existingStatus = dbUser.status_assinatura || "trial";
@@ -287,45 +307,77 @@ export async function dbLoadSessionUser(): Promise<User | null> {
   if (!supabase) return null;
 
   try {
-    const { data, error } = await supabase.auth.getSession();
-    if (error) {
-      console.warn("Supabase session error, clearing stale auth data:", error.message);
-      
-      // Clear manual local storage keys starting with supabase prefix to resolve refresh token mismatch
-      try {
-        const keys = Object.keys(localStorage);
-        for (const key of keys) {
-          if (key.startsWith("sb-")) {
-            localStorage.removeItem(key);
-          }
-        }
-        await supabase.auth.signOut().catch(() => {});
-      } catch (cleanErr) {
-        console.error("Failed to clean up storage keys:", cleanErr);
+    // 1. Prioritize supabase.auth.getUser() to get fresh authoritative authenticated user directly
+    let u: any = null;
+    try {
+      const { data: userData, error: userError } = await supabase.auth.getUser();
+      if (!userError && userData?.user) {
+        u = userData.user;
       }
-      return null;
+    } catch (e) {}
+
+    // Fallback to getSession if getUser didn't return
+    if (!u) {
+      const { data, error } = await supabase.auth.getSession();
+      if (error) {
+        console.warn("Supabase session error, clearing stale auth data:", error.message);
+        try {
+          const keys = Object.keys(localStorage);
+          for (const key of keys) {
+            if (key.startsWith("sb-")) {
+              localStorage.removeItem(key);
+            }
+          }
+          await supabase.auth.signOut().catch(() => {});
+        } catch (cleanErr) {
+          console.error("Failed to clean up storage keys:", cleanErr);
+        }
+        return null;
+      }
+      u = data?.session?.user || null;
     }
 
-    if (data?.session?.user) {
-      const u = data.session.user;
+    if (u) {
       const name = u.user_metadata?.name || u.user_metadata?.fullName || u.email?.split("@")[0] || "Usuário";
       const username = u.user_metadata?.username || u.email?.split("@")[0] || "usuario";
 
+      // By default, the owner_id MUST BE the Auth UID to guarantee multi-terminal parity
       let realOwnerId = u.id;
       let createdAt = u.created_at;
       let statusAssinatura = "trial";
       let isAdmin = false;
       let userRole = "";
       try {
-        const { data: dbUser } = await supabase
+        let dbUser: any = null;
+        const { data: exactUser } = await supabase
           .from("users")
           .select("*")
           .eq("id", u.id)
           .maybeSingle();
+
+        if (exactUser) {
+          dbUser = exactUser;
+        } else if (u.email) {
+          const { data: emailUser } = await supabase
+            .from("users")
+            .select("*")
+            .eq("email", u.email)
+            .maybeSingle();
+          if (emailUser) {
+            dbUser = emailUser;
+            // Unify id with Auth UID to prevent duplicate user rows
+            try {
+              await supabase.from("users").update({ id: u.id }).eq("email", u.email);
+            } catch (e) {}
+          }
+        }
+
         if (dbUser) {
-          console.log("[dbLoadSessionUser] SUPABASE FETCH SUCCESSFUL. User ID:", u.id, "Raw columns:", JSON.stringify(dbUser));
-          if (dbUser.owner_id) {
+          console.log("[dbLoadSessionUser] SUPABASE FETCH SUCCESSFUL. User ID:", u.id);
+          if (dbUser.owner_id && dbUser.owner_id !== u.id && (dbUser.role === "atendente" || dbUser.role === "vendedor")) {
             realOwnerId = dbUser.owner_id;
+          } else {
+            realOwnerId = u.id;
           }
           if (dbUser.created_at) {
             createdAt = dbUser.created_at;
@@ -336,7 +388,20 @@ export async function dbLoadSessionUser(): Promise<User | null> {
           isAdmin = !!dbUser.is_admin || dbUser.role === "admin" || dbUser.role === "administrador" || dbUser.cargo === "administrador" || !dbUser.owner_id || dbUser.owner_id === dbUser.id || u.email === "vendas.impactodigital2@gmail.com" || u.email === "sistemavendaadm@gmail.com" || u.email === "sistemadevendaadm@gmail.com";
           userRole = dbUser.role || dbUser.cargo || dbUser.tipo || "";
         } else {
-          console.warn("[dbLoadSessionUser] No user record found in 'users' table for:", u.id);
+          // Record doesn't exist yet in public.users, create it with u.id to prevent duplication
+          try {
+            await supabase.from("users").upsert({
+              id: u.id,
+              name,
+              username,
+              email: u.email,
+              owner_id: u.id,
+              status_assinatura: "trial",
+              created_at: createdAt || new Date().toISOString()
+            });
+          } catch (upsertErr) {
+            console.warn("Notice: could not insert user record into public.users:", upsertErr);
+          }
         }
       } catch (err) {
         console.warn("Could not query existing user record in users table during session load:", err);
@@ -355,7 +420,7 @@ export async function dbLoadSessionUser(): Promise<User | null> {
         role: userRole
       };
 
-      console.log("[dbLoadSessionUser] Mapped User Object:", JSON.stringify(mappedUser));
+      console.log("[dbLoadSessionUser] Mapped User Object with Auth ID:", JSON.stringify(mappedUser));
       return mappedUser;
     }
   } catch (e: any) {
@@ -2736,9 +2801,72 @@ export async function dbUpdateProductStock(ownerId: string, productId: string, n
 }
 
 export async function dbGetCashRegister(userId: string): Promise<CashRegisterState | null> {
-  // 1. Primary: fetch through secure server API with service_role to avoid RLS 42501
+  const supabase = getSupabase();
+  let effectiveUserId = userId;
+  if (supabase?.auth) {
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      if (authData?.user?.id) {
+        effectiveUserId = authData.user.id;
+      }
+    } catch (e) {}
+  }
+
+  // 1. Real table: check public.sessoes_caixa for any active open session
+  if (supabase) {
+    try {
+      const { data: openSessions, error: sessErr } = await supabase
+        .from("sessoes_caixa")
+        .select("*")
+        .eq("status", "aberto")
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      if (!sessErr && openSessions && openSessions.length > 0) {
+        const sessRow = openSessions[0];
+        // Fetch history from public.historico_caixas
+        let historyItems: CashRegisterSession[] = [];
+        try {
+          const { data: histRows } = await supabase
+            .from("historico_caixas")
+            .select("*")
+            .order("created_at", { ascending: false })
+            .limit(50);
+          if (histRows && histRows.length > 0) {
+            historyItems = histRows.map((h: any) => ({
+              id: h.session_id || h.id,
+              status: "fechado",
+              valorAbertura: Number(h.valor_abertura) || 0,
+              dataAbertura: h.data_abertura || h.created_at,
+              operador: h.operador || "Operador",
+              dataFechamento: h.data_fechamento || h.created_at,
+              valorFechamentoReal: Number(h.valor_fechamento_real) || 0,
+              valorFechamentoEsperado: Number(h.valor_fechamento_esperado) || 0,
+              observacoes: h.observacoes || ""
+            }));
+          }
+        } catch (hErr) {}
+
+        const openState: CashRegisterState = {
+          currentSession: {
+            id: sessRow.id || sessRow.session_id || `session_${Date.now()}`,
+            status: "aberto",
+            valorAbertura: Number(sessRow.valor_abertura) || 0,
+            dataAbertura: sessRow.data_abertura || sessRow.created_at || new Date().toISOString(),
+            operador: sessRow.operador || "Operador"
+          },
+          history: historyItems
+        };
+        return openState;
+      }
+    } catch (sessEx) {
+      console.warn("Notice: sessoes_caixa query in dbGetCashRegister:", sessEx);
+    }
+  }
+
+  // 2. Fetch through secure server API with service_role to avoid RLS 42501
   try {
-    const res = await fetch(`/api/cash-register?userId=${encodeURIComponent(userId)}`);
+    const res = await fetch(`/api/cash-register?userId=${encodeURIComponent(effectiveUserId)}`);
     if (res.ok) {
       const json = await res.json();
       if (json.success && json.data) {
@@ -2753,25 +2881,22 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
     console.warn("Direct /api/cash-register GET error, falling back to direct client:", apiErr);
   }
 
-  // 2. Fallback: direct Supabase client
-  const supabase = getSupabase();
+  // 3. Fallback: direct Supabase client sales table
   if (!supabase) return null;
 
   try {
-    // 1. Primary check: check user-scoped row cash_register_state_${userId}
     let { data, error } = await supabase
       .from("sales")
       .select("items")
-      .eq("id", `cash_register_state_${userId}`)
+      .eq("id", `cash_register_state_${effectiveUserId}`)
       .maybeSingle();
 
-    // 2. Secondary check: check legacy row with static id: cash_register_state
     if (!data?.items) {
       const { data: legacyData, error: legacyErr } = await supabase
         .from("sales")
         .select("items")
         .eq("id", "cash_register_state")
-        .eq("user_id", userId)
+        .eq("user_id", effectiveUserId)
         .maybeSingle();
       if (legacyData?.items) {
         data = legacyData;
@@ -2890,6 +3015,7 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
 
 export async function dbSaveCashRegister(userId: string, state: CashRegisterState): Promise<boolean> {
   const nowISO = new Date().toISOString();
+  const supabase = getSupabase();
 
   // Instant local persist as immediate source-of-truth protection
   try {
@@ -2899,12 +3025,65 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
     console.warn("Storage write failed:", e);
   }
 
-  // 1. Primary: save through secure server API with service_role to avoid RLS 42501
+  // Determine authoritative Auth UID
+  let effectiveUserId = userId;
+  if (supabase?.auth) {
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      if (authData?.user?.id) {
+        effectiveUserId = authData.user.id;
+      }
+    } catch (e) {}
+  }
+
+  // 1. Real table: synchronize public.sessoes_caixa and public.historico_caixas
+  if (supabase) {
+    try {
+      if (state.currentSession && state.currentSession.status === "aberto") {
+        await supabase.from("sessoes_caixa").upsert({
+          id: state.currentSession.id,
+          user_id: effectiveUserId,
+          status: "aberto",
+          valor_abertura: state.currentSession.valorAbertura || 0,
+          data_abertura: state.currentSession.dataAbertura || nowISO,
+          operador: state.currentSession.operador || "Operador",
+          updated_at: nowISO
+        });
+      } else if (!state.currentSession) {
+        await supabase.from("sessoes_caixa").update({
+          status: "fechado",
+          updated_at: nowISO
+        }).eq("status", "aberto");
+
+        if (state.history && state.history.length > 0) {
+          const lastClosed = state.history[0];
+          await supabase.from("historico_caixas").upsert({
+            id: lastClosed.id,
+            session_id: lastClosed.id,
+            user_id: effectiveUserId,
+            status: "fechado",
+            valor_abertura: lastClosed.valorAbertura || 0,
+            data_abertura: lastClosed.dataAbertura || nowISO,
+            operador: lastClosed.operador || "Operador",
+            data_fechamento: lastClosed.dataFechamento || nowISO,
+            valor_fechamento_real: lastClosed.valorFechamentoReal || 0,
+            valor_fechamento_esperado: lastClosed.valorFechamentoEsperado || 0,
+            observacoes: lastClosed.observacoes || "",
+            created_at: lastClosed.dataFechamento || nowISO
+          });
+        }
+      }
+    } catch (sessErr) {
+      console.warn("Notice: syncing sessoes_caixa/historico_caixas:", sessErr);
+    }
+  }
+
+  // 2. Primary: save through secure server API with service_role to avoid RLS 42501
   try {
     const res = await fetch("/api/cash-register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, state })
+      body: JSON.stringify({ userId: effectiveUserId, state })
     });
     if (res.ok) {
       const json = await res.json();
@@ -2919,20 +3098,8 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
     console.warn("Direct /api/cash-register POST error, falling back to direct client:", apiErr);
   }
 
-  // 2. Fallback: direct Supabase client
-  const supabase = getSupabase();
+  // 3. Fallback: direct Supabase client sales row
   if (!supabase) return false;
-
-  // Try to inspect authenticated user ID
-  let authUserId: string | null = null;
-  if (supabase.auth) {
-    try {
-      const { data: authData } = await supabase.auth.getUser();
-      authUserId = authData?.user?.id || null;
-    } catch (e) {
-      // ignore
-    }
-  }
 
   const createPayload = (rowId: string, uid: string) => ({
     id: rowId,
@@ -2953,64 +3120,16 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
 
   let saved = false;
 
-  // 1. Primary: upsert to user-scoped row cash_register_state_${userId}
   try {
-    const scopedPayload = createPayload(`cash_register_state_${userId}`, userId);
+    const scopedPayload = createPayload(`cash_register_state_${effectiveUserId}`, effectiveUserId);
     const { error: scopedError } = await supabase
       .from("sales")
       .upsert(scopedPayload);
 
     if (!scopedError) {
       saved = true;
-    } else if (scopedError.code === "42501" && authUserId && authUserId !== userId) {
-      // RLS policy requires auth.uid() = user_id. Use authUserId to satisfy RLS!
-      const authScopedPayload = createPayload(`cash_register_state_${authUserId}`, authUserId);
-      const { error: authError } = await supabase
-        .from("sales")
-        .upsert(authScopedPayload);
-      if (!authError) {
-        saved = true;
-      }
-    } else if (scopedError) {
-      console.warn("Notice: Scoped cash register upsert returned:", scopedError.message || scopedError);
     }
-  } catch (err) {
-    // Continue
-  }
-
-  // 2. Secondary: also try updating legacy static id "cash_register_state" if permissible
-  try {
-    const effectiveUserId = (authUserId && authUserId !== userId) ? authUserId : userId;
-    const legacyPayload = createPayload("cash_register_state", effectiveUserId);
-    const { error: legacyErr } = await supabase
-      .from("sales")
-      .upsert(legacyPayload);
-    if (!legacyErr) {
-      saved = true;
-    }
-  } catch (err) {
-    // Ignore legacy conflict
-  }
-
-  // 3. Redundancy: if attendant is authenticated with authUserId different from company userId, ensure attendant's scoped row is also updated
-  if (authUserId && authUserId !== userId) {
-    try {
-      const authScopedPayload = createPayload(`cash_register_state_${authUserId}`, authUserId);
-      const { error: dualErr } = await supabase
-        .from("sales")
-        .upsert(authScopedPayload);
-      if (!dualErr) {
-        saved = true;
-      }
-    } catch (e) {}
-  }
-
-  try {
-    localStorage.setItem("NUCLEO_LAST_CASH_REGISTER_SYNCED_DATE", nowISO);
-    localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(state));
-  } catch (e) {
-    console.warn("Storage write failed:", e);
-  }
+  } catch (err) {}
 
   return saved;
 }
@@ -3222,21 +3341,43 @@ export async function dbCheckGlobalCashRegister(userId: string): Promise<boolean
   if (!supabase) return false;
 
   try {
-    // 1. Primary check: fetch canonical cash register state from sales table
-    const state = await dbGetCashRegister(userId);
+    let effectiveUserId = userId;
+    if (supabase.auth) {
+      try {
+        const { data: authData } = await supabase.auth.getUser();
+        if (authData?.user?.id) {
+          effectiveUserId = authData.user.id;
+        }
+      } catch (e) {}
+    }
+
+    // 1. Primary check on public.sessoes_caixa for any active session
+    try {
+      const { data: sessData, error: sessErr } = await supabase
+        .from("sessoes_caixa")
+        .select("id, status")
+        .eq("status", "aberto")
+        .limit(1);
+      if (!sessErr && sessData && sessData.length > 0) {
+        console.log(`[dbCheckGlobalCashRegister] Open session found in sessoes_caixa`);
+        return true;
+      }
+    } catch (err) {}
+
+    // 2. Secondary check: fetch canonical cash register state from sales table
+    const state = await dbGetCashRegister(effectiveUserId);
     if (state?.currentSession && state.currentSession.status === "aberto") {
-      console.log(`[dbCheckGlobalCashRegister] Open session active in cash_register_state for user ${userId}`);
+      console.log(`[dbCheckGlobalCashRegister] Open session active in cash_register_state for user ${effectiveUserId}`);
       return true;
     }
 
-    // 2. Secondary fallback: check legacy or auxiliary tables if configured
+    // 3. Auxiliary tables check
     const tableNames = ["fluxo_caixa", "fluxo_de_caixa", "fluxo_caixas", "fluxo_de_caixas"];
     for (const tableName of tableNames) {
       try {
         const { data, error } = await supabase
           .from(tableName)
           .select("status")
-          .eq("user_id", userId)
           .eq("status", "aberto");
 
         if (!error && data && data.length > 0) {
@@ -3260,6 +3401,36 @@ export async function dbOpenGlobalCashRegister(userId: string, session: any): Pr
   if (!supabase) return false;
 
   try {
+    let effectiveUserId = userId;
+    if (supabase.auth) {
+      try {
+        const { data: authData } = await supabase.auth.getUser();
+        if (authData?.user?.id) {
+          effectiveUserId = authData.user.id;
+        }
+      } catch (e) {}
+    }
+
+    const nowISO = new Date().toISOString();
+
+    // 1. Primary: upsert into public.sessoes_caixa
+    try {
+      const { error: sessErr } = await supabase
+        .from("sessoes_caixa")
+        .upsert({
+          id: session.id || `session_${Date.now()}`,
+          user_id: effectiveUserId,
+          status: "aberto",
+          valor_abertura: session.valorAbertura || 0,
+          data_abertura: session.dataAbertura || nowISO,
+          operador: session.operador || "Operador",
+          updated_at: nowISO
+        });
+      if (!sessErr) {
+        console.log("[dbOpenGlobalCashRegister] Successfully opened register in sessoes_caixa");
+      }
+    } catch (e) {}
+
     const today = new Date();
     const yyyy = today.getFullYear();
     const mm = String(today.getMonth() + 1).padStart(2, '0');
@@ -3267,14 +3438,14 @@ export async function dbOpenGlobalCashRegister(userId: string, session: any): Pr
     const todayStr = `${yyyy}-${mm}-${dd}`;
 
     const payload = {
-      user_id: userId,
+      user_id: effectiveUserId,
       data: todayStr,
-      data_abertura: session.dataAbertura || new Date().toISOString(),
+      data_abertura: session.dataAbertura || nowISO,
       valor_abertura: session.valorAbertura || 0,
       operador: session.operador || "Operador",
       status: "aberto",
       session_id: session.id,
-      updated_at: new Date().toISOString()
+      updated_at: nowISO
     };
 
     const tableNames = ["fluxo_caixa", "fluxo_de_caixa", "fluxo_caixas", "fluxo_de_caixas"];
@@ -3304,19 +3475,62 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
   if (!supabase) return false;
 
   try {
-    const today = new Date();
-    const yyyy = today.getFullYear();
-    const mm = String(today.getMonth() + 1).padStart(2, '0');
-    const dd = String(today.getDate()).padStart(2, '0');
-    const todayStr = `${yyyy}-${mm}-${dd}`;
+    let effectiveUserId = userId;
+    if (supabase.auth) {
+      try {
+        const { data: authData } = await supabase.auth.getUser();
+        if (authData?.user?.id) {
+          effectiveUserId = authData.user.id;
+        }
+      } catch (e) {}
+    }
+
+    const nowISO = new Date().toISOString();
+
+    // 1. Primary: update public.sessoes_caixa
+    try {
+      await supabase
+        .from("sessoes_caixa")
+        .update({
+          status: "fechado",
+          data_fechamento: closingData.dataFechamento || nowISO,
+          valor_fechamento_real: closingData.valorFechamentoReal || 0,
+          valor_fechamento_esperado: closingData.valorFechamentoEsperado || 0,
+          observacoes: closingData.observacoes || "",
+          updated_at: nowISO
+        })
+        .eq("status", "aberto");
+      console.log("[dbCloseGlobalCashRegister] Successfully marked sessoes_caixa as fechado");
+    } catch (e) {}
+
+    // 2. Primary: record in public.historico_caixas
+    try {
+      await supabase
+        .from("historico_caixas")
+        .upsert({
+          id: sessionId || `hist_${Date.now()}`,
+          session_id: sessionId,
+          user_id: effectiveUserId,
+          status: "fechado",
+          valor_abertura: closingData.valorAbertura || 0,
+          data_abertura: closingData.dataAbertura || nowISO,
+          operador: closingData.operador || "Operador",
+          data_fechamento: closingData.dataFechamento || nowISO,
+          valor_fechamento_real: closingData.valorFechamentoReal || 0,
+          valor_fechamento_esperado: closingData.valorFechamentoEsperado || 0,
+          observacoes: closingData.observacoes || "",
+          created_at: nowISO
+        });
+      console.log("[dbCloseGlobalCashRegister] Successfully logged closing to historico_caixas");
+    } catch (e) {}
 
     const payload = {
       status: "fechado",
       valor_fechamento_esperado: closingData.valorFechamentoEsperado || 0,
       valor_fechamento_real: closingData.valorFechamentoReal || 0,
-      data_fechamento: closingData.dataFechamento || new Date().toISOString(),
+      data_fechamento: closingData.dataFechamento || nowISO,
       observacoes: closingData.observacoes || "",
-      updated_at: new Date().toISOString()
+      updated_at: nowISO
     };
 
     const tableNames = ["fluxo_caixa", "fluxo_de_caixa", "fluxo_caixas", "fluxo_de_caixas"];
@@ -3325,7 +3539,6 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
         const { error } = await supabase
           .from(tableName)
           .update(payload)
-          .eq("user_id", userId)
           .eq("status", "aberto");
 
         if (!error) {
