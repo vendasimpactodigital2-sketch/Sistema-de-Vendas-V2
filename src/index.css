@@ -171,19 +171,41 @@ body.light .recharts-legend-item-text {
   color: #334155 !important;
 }
 
-/* Regras de impressão para A4 e Térmica / Cupom */
+/* Regras de impressão para Cupom Térmico 80mm e A4 */
 @media print {
-  body.print-a4 {
+  body {
     background: #ffffff !important;
     color: #000000 !important;
   }
+
+  /* Esconde menus, botões, cabeçalhos e todo o resto da página */
+  body * {
+    visibility: hidden;
+  }
+
+  /* Foca apenas no cupom térmico e seus elementos filhos */
+  #thermal-receipt-print,
+  #thermal-receipt-print * {
+    visibility: visible;
+  }
+
+  #thermal-receipt-print {
+    display: block !important;
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 78mm !important;
+    max-width: 80mm !important;
+    margin: 0 !important;
+    padding: 4mm !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    box-shadow: none !important;
+  }
+
   @page {
-    margin: 10mm;
-  }
-  body.print-cupom {
-    background: #ffffff !important;
-    color: #000000 !important;
-    width: 80mm !important;
+    size: 80mm auto;
+    margin: 0mm;
   }
 }
 

@@ -28,7 +28,8 @@ import {
   Layers,
   Zap,
   Settings,
-  Wallet
+  Wallet,
+  Printer
 } from "lucide-react";
 import React, { useState, useEffect, useRef } from "react";
 import { ProductSaleItem, Sale, CompanyProfile, CostItem, CatalogProduct, User, CashRegisterState, SaleAuditEntry } from "../types";
@@ -1874,11 +1875,27 @@ export function SaleForm({
     // Draw Bottom Half - VIA DA EMPRESA
     drawReceiptCopy(153.5, "VIA DA EMPRESA");
 
-    // Save PDF file
+    // Save PDF file and open preview in screen
     const docName = isActuallyBudget 
       ? `Orcamento_${finalClient.replace(/\s+/g, "_")}_${docId}.pdf`
       : `Recibo_${finalClient.replace(/\s+/g, "_")}_${docId}.pdf`;
+    
+    try {
+      const blobUrl = doc.output("bloburl");
+      window.open(blobUrl, "_blank");
+    } catch (e) {
+      console.warn("Aviso ao abrir visualização do PDF:", e);
+    }
     doc.save(docName);
+  };
+
+  // Impressão nativa do Cupom Não Fiscal (Térmica 80mm)
+  const handlePrintThermalReceipt = () => {
+    if (items.length === 0 && finalTotalValue <= 0) {
+      alert("Por favor, adicione itens ou valor à venda antes de imprimir o cupom.");
+      return;
+    }
+    window.print();
   };
 
   return (
@@ -3076,15 +3093,25 @@ export function SaleForm({
                   </div>
                 )}
 
-                <div className="grid grid-cols-3 gap-1.5">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                   <button
                     type="button"
                     onClick={() => generatePDF()}
-                    className="flex-1 flex items-center justify-center gap-1.5 py-2.5 px-1.5 rounded-xl font-bold text-slate-200 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-850 cursor-pointer transition-colors text-[10px] md:text-xs"
-                    title="Baixar em PDF"
+                    className="flex-1 flex items-center justify-center gap-1.5 py-2.5 px-1.5 rounded-xl font-bold text-slate-200 bg-slate-900 border border-slate-800 hover:border-brand-cyan/40 hover:bg-slate-850 cursor-pointer transition-colors text-[10px] md:text-xs"
+                    title="Gerar e abrir PDF do cupom A4 na tela para download"
                   >
                     <FileDown className="h-4 w-4 text-brand-cyan shrink-0" />
                     <span>Emissão PDF</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handlePrintThermalReceipt}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-2.5 px-1.5 rounded-xl font-bold text-amber-400 bg-slate-900 border border-slate-800 hover:border-amber-500/40 hover:bg-slate-850 cursor-pointer transition-colors text-[10px] md:text-xs"
+                    title="Imprimir Cupom Não Fiscal (Térmica 80mm)"
+                  >
+                    <Printer className="h-4 w-4 text-amber-400 shrink-0" />
+                    <span>Imprimir Cupom</span>
                   </button>
 
                   <button
@@ -3238,6 +3265,118 @@ export function SaleForm({
           </div>
         </div>
       )}
+
+      {/* 
+        =========================================
+        THERMAL RECEIPT PRINT CONTAINER (80mm)
+        =========================================
+      */}
+      <div id="thermal-receipt-print" className="hidden print:block bg-white text-black p-2 max-w-[80mm] font-mono text-[11px] leading-tight">
+        <div className="text-center mb-2">
+          <div className="font-bold text-sm uppercase tracking-wide">
+            {company?.tradingName || "NEXVOLT GESTÃO"}
+          </div>
+          {company?.cnpjCpf && <div className="text-[10px]">CNPJ/CPF: {company.cnpjCpf}</div>}
+          {company?.phone && <div className="text-[10px]">Fone: {company.phone}</div>}
+          {company?.address && (
+            <div className="text-[9px]">
+              {[company.address, company.number, company.neighborhood, company.city].filter(Boolean).join(", ")}
+            </div>
+          )}
+          <div className="my-1.5 border-b border-dashed border-black" />
+          <div className="font-bold text-xs uppercase">
+            {activeEditingSale?.isBudget ? "*** ORÇAMENTO NÃO FISCAL ***" : "*** COMPROVANTE NÃO FISCAL ***"}
+          </div>
+          <div className="text-[10px]">
+            Doc: #{activeEditingSale?.id ? activeEditingSale.id.slice(0, 8).toUpperCase() : "NOVA"} | Data: {new Date().toLocaleDateString("pt-BR")} {new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+          </div>
+        </div>
+
+        <div className="text-[10px] text-left mb-1.5">
+          <div><span className="font-bold">Cliente:</span> {clientName.trim() || "Consumidor"}</div>
+          {clientPhone && <div><span className="font-bold">Contato:</span> {clientPhone}</div>}
+        </div>
+
+        <div className="border-b border-dashed border-black my-1" />
+
+        {/* Itens da Venda */}
+        <div className="mb-2">
+          <div className="flex justify-between font-bold text-[10px] border-b border-black pb-0.5 mb-1">
+            <span>Item / Qtd</span>
+            <span>Total</span>
+          </div>
+          {items.map((it, idx) => (
+            <div key={idx} className="flex justify-between text-[10px] py-0.5">
+              <span className="max-w-[70%] truncate">
+                {it.quantity}x {it.description}
+              </span>
+              <span className="font-semibold">
+                R$ {(it.total || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="border-b border-dashed border-black my-1.5" />
+
+        {/* Dados Essenciais da Venda */}
+        <div className="text-[11px] space-y-1">
+          <div className="flex justify-between">
+            <span>Soma Itens:</span>
+            <span className="font-semibold">
+              R$ {subtotalProducts.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+            </span>
+          </div>
+
+          {activeMotoboyCost > 0 && (
+            <div className="flex justify-between text-[10px]">
+              <span>Taxa Entrega / Motoboy:</span>
+              <span>R$ {activeMotoboyCost.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</span>
+            </div>
+          )}
+
+          {discount > 0 && (
+            <div className="flex justify-between text-[10px]">
+              <span>Desconto:</span>
+              <span>- R$ {discount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</span>
+            </div>
+          )}
+
+          <div className="flex justify-between font-bold text-xs border-t border-black pt-1 mt-1">
+            <span>Total Cobrado:</span>
+            <span>R$ {finalTotalValue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}</span>
+          </div>
+
+          <div className="flex justify-between">
+            <span>Valor Pago:</span>
+            <span className="font-semibold">
+              R$ {downPayment.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+            </span>
+          </div>
+
+          <div className="flex justify-between font-bold">
+            <span>Saldo a Receber:</span>
+            <span>
+              R$ {balanceDueValue.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+            </span>
+          </div>
+        </div>
+
+        <div className="border-b border-dashed border-black my-2" />
+
+        {paymentMethod && (
+          <div className="text-[10px] uppercase mb-2">
+            Forma de Pagto: <span className="font-bold">{paymentMethod}</span>
+          </div>
+        )}
+
+        <div className="text-center text-[9px] pt-1">
+          Obrigado pela preferência e confiança!
+        </div>
+        <div className="text-center text-[8px] text-gray-600 mt-0.5">
+          Documento Auxiliar de Venda
+        </div>
+      </div>
     </div>
   );
 }
