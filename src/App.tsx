@@ -69,6 +69,9 @@ import {
   dbGetClientes,
   dbSaveCliente,
   dbDeleteCliente,
+  dbGetCatalogProducts,
+  dbSaveCatalogProduct,
+  dbDeleteCatalogProduct,
   dbUpdateSubscriptionStatus
 } from "./supabase";
 
@@ -1570,7 +1573,7 @@ export default function App() {
             dbGetCompanyProfile(companyOwnerId),
             dbGetGoals(companyOwnerId),
             supabase ? supabase.from("gastos_mensais").select("*").eq("user_id", companyOwnerId) : Promise.resolve({ data: [], error: null }),
-            supabase ? supabase.from("produtos").select("*").eq("user_id", companyOwnerId) : Promise.resolve({ data: [], error: null }),
+            dbGetCatalogProducts(companyOwnerId),
           ])
         );
       }
@@ -1722,7 +1725,10 @@ export default function App() {
           }
 
           // 2.4 Product Catalog
-          if (staticProductsRes && !staticProductsRes.error && staticProductsRes.data) {
+          if (staticProductsRes && Array.isArray(staticProductsRes) && staticProductsRes.length > 0) {
+            setCatalogProducts(staticProductsRes);
+            try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(staticProductsRes)); } catch (e) {}
+          } else if (staticProductsRes && !staticProductsRes.error && staticProductsRes.data) {
             const mappedProducts: CatalogProduct[] = staticProductsRes.data.map((d: any) => {
               const cost = Number(d.cost_price ?? d.costPrice ?? d.preco_custo ?? d.valor_custo ?? 0);
               const sale = Number(d.sale_price ?? d.salePrice ?? d.preco_venda ?? d.valor_venda ?? 0);
@@ -1737,6 +1743,7 @@ export default function App() {
               };
             });
             setCatalogProducts(mappedProducts);
+            try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(mappedProducts)); } catch (e) {}
           }
         }
       }
@@ -2188,12 +2195,19 @@ export default function App() {
 
           const isStaticTable =
             payload.table === "produtos" ||
+            payload.table === "clientes" ||
             payload.table === "goals" ||
             payload.table === "gastos_mensais" ||
             payload.table === "company_profile";
 
           if (isStaticTable) {
             triggerRemoteSync(currentUser, true, true);
+            if (payload.table === "produtos") {
+              window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: payload }));
+            }
+            if (payload.table === "clientes") {
+              window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: payload }));
+            }
           }
         }
       )
@@ -2214,10 +2228,19 @@ export default function App() {
       .on("broadcast", { event: "sales_broadcast" }, () => {
         fetchSales();
         triggerRemoteSync(currentUser, true);
+        window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: {} }));
+        window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: {} }));
       })
       .on("broadcast", { event: "expenses_broadcast" }, () => {
         fetchExpenses();
         triggerRemoteSync(currentUser, true);
+        window.dispatchEvent(new CustomEvent("expenses_remote_sync", { detail: {} }));
+      })
+      .on("broadcast", { event: "products_broadcast" }, () => {
+        window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: {} }));
+      })
+      .on("broadcast", { event: "clients_broadcast" }, () => {
+        window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: {} }));
       })
       .subscribe((status, err) => {
         if (status === "SUBSCRIBED") {
@@ -2300,8 +2323,62 @@ export default function App() {
               }
             } else if (parsed.event === "sales_updated") {
               triggerRemoteSync(currentUser, true, false);
+              window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: parsed }));
+              window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: parsed }));
             } else if (parsed.event === "expenses_updated") {
               triggerRemoteSync(currentUser, true, false);
+              window.dispatchEvent(new CustomEvent("expenses_remote_sync", { detail: parsed }));
+            } else if (parsed.event === "products_updated") {
+              window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: parsed }));
+              window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: parsed }));
+              // Update local state if a single product payload is present
+              if (parsed.data?.product) {
+                const prod = parsed.data.product;
+                setCatalogProducts(prev => {
+                  const idx = prev.findIndex(p => p.id === prod.id);
+                  if (idx >= 0) {
+                    const next = [...prev];
+                    next[idx] = prod;
+                    return next;
+                  }
+                  return [prod, ...prev];
+                });
+              } else if (parsed.data?.deletedId) {
+                const delId = parsed.data.deletedId;
+                setCatalogProducts(prev => prev.filter(p => p.id !== delId));
+              } else {
+                if (companyOwnerId) {
+                  dbGetCatalogProducts(companyOwnerId).then(list => {
+                    if (list && list.length > 0) setCatalogProducts(list);
+                  });
+                }
+              }
+            } else if (parsed.event === "clients_updated") {
+              window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: parsed }));
+              window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: parsed }));
+            } else if (parsed.event === "backup_restored") {
+              triggerRemoteSync(currentUser, true, true);
+              window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: parsed }));
+              window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: parsed }));
+              window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: parsed }));
+              window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: parsed }));
+              window.dispatchEvent(new CustomEvent("expenses_remote_sync", { detail: parsed }));
+              window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: parsed }));
+              if (companyOwnerId) {
+                dbGetCashRegister(companyOwnerId).then(remote => {
+                  if (remote) {
+                    setCashRegister(remote);
+                    cashRegisterRef.current = remote;
+                    setIsGlobalRegisterOpen(!!remote.currentSession && remote.currentSession.status === "aberto");
+                  }
+                });
+                dbGetCatalogProducts(companyOwnerId).then(list => {
+                  if (list && list.length > 0) setCatalogProducts(list);
+                });
+              }
+            } else if (parsed.event === "gastos_mensais_updated" || parsed.event === "goals_updated" || parsed.event === "company_updated" || parsed.event === "sync") {
+              triggerRemoteSync(currentUser, true, false);
+              window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: parsed }));
             }
           } catch (e) {
             console.error("[Realtime SSE] Error parsing event:", e);

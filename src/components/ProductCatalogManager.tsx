@@ -18,7 +18,7 @@ import {
   Minus
 } from "lucide-react";
 import { CatalogProduct, User } from "../types";
-import { getSupabase, notifyRealtimeSync } from "../supabase";
+import { getSupabase, notifyRealtimeSync, dbGetCatalogProducts, dbSaveCatalogProduct as apiSaveCatalogProduct, dbDeleteCatalogProduct } from "../supabase";
 
 // Helper to generate a valid RFC4122 v4 UUID
 const generateProductUUID = (): string => {
@@ -145,134 +145,33 @@ export function ProductCatalogManager({
     return num.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   };
 
-    // Helper to save a single product in an isolated, schema-safe way
-    const dbSaveCatalogProduct = async (prod: CatalogProduct, userId: string): Promise<boolean> => {
-      const supabase = getSupabase();
-      if (!supabase) return false;
-
-      // Ensure 'id' is a valid UUID to avoid PostgreSQL 22P02 database error (invalid input syntax for type uuid)
-      let cleanId = prod.id;
-      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (!uuidRegex.test(cleanId)) {
-        cleanId = generateProductUUID();
-        // Synchronize back to the react state reference so that state matches DB
-        prod.id = cleanId;
-      }
-
-      // Ensure 'userId' is a valid UUID to avoid PostgreSQL 22P02 database error
-      let cleanUserId = userId;
-      if (!uuidRegex.test(cleanUserId)) {
-        let hex = "";
-        for (let i = 0; i < cleanUserId.length; i++) {
-          hex += cleanUserId.charCodeAt(i).toString(16);
-        }
-        hex = hex.padEnd(32, "0").toLowerCase();
-        cleanUserId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
-      }
-
-      // 1. CAPTURA E CONVERSÃO DE TIPOS (HTML/Campos para Banco de Dados)
-      const descriptionText = String(prod.description).trim();
-      const costValue = parseFloat(String(prod.costPrice)) || 0;
-      const saleValue = parseFloat(String(prod.salePrice)) || 0;
-      const minStockVal = parseInt(String(prod.minStock)) || 0;
-      const currentStockVal = parseInt(String(prod.currentStock)) || 0;
-      const calculatedProfit = saleValue - costValue;
-
-      // A. PT-Snake payload (Active standard scheme for Portuguese columns)
-      const ptPayload = {
-        id: cleanId,
-        user_id: cleanUserId,
-        nome: descriptionText, // Correto mapeamento: descrição do formulário gravada na coluna 'nome'
-        preco_custo: costValue,
-        preco_venda: saleValue,
-        lucro: calculatedProfit,
-        estoque_minimo: minStockVal,
-        estoque_atual: currentStockVal
-      };
-
-      // 2. Tentar salvar no formato PT primeiro do banco de dados real
-      let ptErrorMsg = "";
-      try {
-        const { error } = await supabase
-          .from("produtos")
-          .upsert(ptPayload); // upsert triggers either insert or update safely based on primary key ID
-
-        if (!error) {
-          console.log("Produto salvo com sucesso no Supabase (formato PT usando coluna 'nome')!");
-          return true;
-        }
-
-        ptErrorMsg = error.message;
-        console.warn("Erro ao salvar produto com payload PT. Tentando formato secundário EN...", error.message);
-      } catch (err: any) {
-        ptErrorMsg = err.message || String(err);
-        console.warn("Exceção ocorrida ao salvar payload PT:", err);
-      }
-
-      // B. EN-Snake payload (Fallback para formato inglês)
-      const enPayload = {
-        id: cleanId,
-        user_id: cleanUserId,
-        description: descriptionText,
-        name: descriptionText,
-        cost_price: costValue,
-        sale_price: saleValue,
-        profit: calculatedProfit,
-        min_stock: minStockVal,
-        current_stock: currentStockVal
-      };
-
-      try {
-        const { error } = await supabase
-          .from("produtos")
-          .upsert(enPayload);
-
-        if (!error) {
-          console.log("Produto salvo com sucesso no Supabase (formato fallback EN)!");
-          return true;
-        }
-
-        // Se falhar também no formato EN, gera o alerta visual conforme solicitado
-        alert(`⚠️ Falha ao salvar produto no Supabase!\n\nErro Formato PT: ${ptErrorMsg}\nErro Formato EN: ${error.message}\nDetalhes: ${error.details || "Nenhum"}\nCódigo: ${error.code}`);
-      } catch (err: any) {
-        alert(`💥 Exceção Fatal no Aplicativo ao gravar o produto:\n${err.message || err}`);
-      }
-
-    return false;
+  // Helper to save a single product with high reliability across server and multi-terminal sync
+  const dbSaveCatalogProduct = async (prod: CatalogProduct, userId: string): Promise<boolean> => {
+    try {
+      const ok = await apiSaveCatalogProduct(userId, prod);
+      return ok;
+    } catch (err: any) {
+      console.warn("dbSaveCatalogProduct notice:", err);
+      return false;
+    }
   };
 
   const companyOwnerId = currentUser?.owner_id || currentUser?.id || "";
 
   const loadProducts = async () => {
-    const supabase = getSupabase();
-    if (!supabase || !companyOwnerId) return;
+    if (!companyOwnerId) return;
 
     try {
-      const { data, error } = await supabase
-        .from("produtos")
-        .select("*")
-        .eq("user_id", companyOwnerId);
-
-      if (error) {
-        console.error("Erro ao carregar produtos:", error);
-      } else if (data) {
-        const mappedProducts: CatalogProduct[] = data.map((d: any) => {
-          const cost = Number(d.cost_price ?? d.costPrice ?? d.preco_custo ?? d.valor_custo ?? 0);
-          const sale = Number(d.sale_price ?? d.salePrice ?? d.preco_venda ?? d.valor_venda ?? 0);
-          return {
-            id: d.id,
-            description: d.description || d.name || d.nome || d.descricao || "",
-            costPrice: cost,
-            salePrice: sale,
-            profit: sale - cost,
-            minStock: Number(d.min_stock ?? d.minStock ?? d.estoque_minimo ?? 0),
-            currentStock: Number(d.current_stock ?? d.currentStock ?? d.estoque_atual ?? 0)
-          };
-        });
+      const mappedProducts = await dbGetCatalogProducts(companyOwnerId);
+      if (mappedProducts && mappedProducts.length > 0) {
         setCatalogProducts(mappedProducts);
-        try {
-          localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(mappedProducts));
-        } catch (e) {}
+      } else {
+        const localStr = localStorage.getItem("NUCLEO_PRODUCTS");
+        if (localStr) {
+          try {
+            setCatalogProducts(JSON.parse(localStr));
+          } catch (e) {}
+        }
       }
     } catch (err) {
       console.error("Erro ao sincronizar produtos:", err);
@@ -1246,21 +1145,7 @@ export function ProductCatalogManager({
 
                                     // Delete remotely from Supabase
                                     if (companyOwnerId) {
-                                      const supabase = getSupabase();
-                                      if (supabase) {
-                                        supabase
-                                          .from("produtos")
-                                          .delete()
-                                          .eq("id", deletedId)
-                                          .eq("user_id", companyOwnerId)
-                                          .then(({ error }) => {
-                                            if (error) {
-                                              console.error("Erro ao deletar produto do Supabase:", error);
-                                            } else {
-                                              notifyRealtimeSync(companyOwnerId, "products_updated", { deletedId });
-                                            }
-                                          });
-                                      }
+                                      dbDeleteCatalogProduct(companyOwnerId, deletedId);
                                     }
 
                                     addToast("Produto movido para itens excluídos.", "info");

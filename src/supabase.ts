@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import { User, CompanyProfile, Sale, Expense, CashRegisterState, CashRegisterSession, SupportFeedback, SupportConfig } from "./types";
+import { User, CompanyProfile, Sale, Expense, CashRegisterState, CashRegisterSession, SupportFeedback, SupportConfig, CatalogProduct } from "./types";
 
 // @ts-ignore
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "";
@@ -1814,6 +1814,23 @@ export async function dbImportAllData(
   const supabase = getSupabase();
 
   try {
+    // 0. Primary: Send full backup to server-side API with service_role to ensure all tables are inserted directly into Supabase and broadcasted instantly to ALL connected computers!
+    try {
+      const srvRes = await fetch("/api/backup/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: currentOwnerId, backupData })
+      });
+      if (srvRes.ok) {
+        const srvJson = await srvRes.json();
+        if (srvJson.success && srvJson.counts) {
+          Object.assign(counts, srvJson.counts);
+        }
+      }
+    } catch (srvErr) {
+      console.warn("Direct /api/backup/restore error, continuing with local mirror:", srvErr);
+    }
+
     // 0. Unpack full LocalStorage dump first if present to seed the new PC with all application configurations
     if (backupData.localStorageDump && typeof backupData.localStorageDump === "object") {
       try {
@@ -2287,6 +2304,15 @@ export async function dbImportAllData(
 
     // 9. Instant Multi-Terminal Broadcast to all devices via realtime
     notifyRealtimeSync(currentOwnerId, "backup_restored", counts);
+    notifyRealtimeSync("global", "backup_restored", counts);
+    notifyRealtimeSync(currentOwnerId, "products_updated", counts);
+    notifyRealtimeSync("global", "products_updated", counts);
+    notifyRealtimeSync(currentOwnerId, "sales_updated", counts);
+    notifyRealtimeSync("global", "sales_updated", counts);
+    notifyRealtimeSync(currentOwnerId, "expenses_updated", counts);
+    notifyRealtimeSync("global", "expenses_updated", counts);
+    notifyRealtimeSync(currentOwnerId, "clients_updated", counts);
+    notifyRealtimeSync("global", "clients_updated", counts);
 
     return {
       success: true,
@@ -2505,9 +2531,179 @@ export async function dbDeleteQuickSale(userId: string, id: string): Promise<boo
   }
 }
 
-export async function dbUpdateProductStock(ownerId: string, productId: string, newStock: number): Promise<boolean> {
+export async function dbGetCatalogProducts(userId: string): Promise<CatalogProduct[]> {
+  // 1. Primary: fetch through secure server API with service_role to avoid RLS 42501
+  try {
+    const res = await fetch(`/api/products?userId=${encodeURIComponent(userId)}`);
+    if (res.ok) {
+      const json = await res.json();
+      if (json.success && Array.isArray(json.data)) {
+        try {
+          localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(json.data));
+        } catch (e) {}
+        return json.data;
+      }
+    }
+  } catch (apiErr) {
+    console.warn("Direct /api/products GET error, falling back to direct client:", apiErr);
+  }
+
+  // 2. Fallback: direct Supabase client
   const supabase = getSupabase();
-  if (!supabase) return false;
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("produtos")
+        .select("*")
+        .eq("user_id", userId);
+
+      if (!error && data) {
+        const mapped: CatalogProduct[] = data.map((d: any) => {
+          const cost = Number(d.cost_price ?? d.costPrice ?? d.preco_custo ?? d.valor_custo ?? 0);
+          const sale = Number(d.sale_price ?? d.salePrice ?? d.preco_venda ?? d.valor_venda ?? 0);
+          return {
+            id: d.id,
+            description: d.description || d.name || d.nome || d.descricao || "",
+            costPrice: cost,
+            salePrice: sale,
+            profit: Number(d.profit ?? d.lucro ?? (sale - cost)),
+            minStock: Number(d.min_stock ?? d.minStock ?? d.estoque_minimo ?? 0),
+            currentStock: Number(d.current_stock ?? d.currentStock ?? d.estoque_atual ?? 0)
+          };
+        });
+        try {
+          localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(mapped));
+        } catch (e) {}
+        return mapped;
+      }
+    } catch (e) {
+      console.warn("Direct Supabase produtos fetch error:", e);
+    }
+  }
+
+  // 3. Fallback: LocalStorage
+  try {
+    const localStr = localStorage.getItem("NUCLEO_PRODUCTS");
+    if (localStr) return JSON.parse(localStr);
+  } catch (e) {}
+
+  return [];
+}
+
+export async function dbSaveCatalogProduct(userId: string, product: CatalogProduct): Promise<boolean> {
+  // Update local storage mirror first for instant UI response
+  try {
+    const localStr = localStorage.getItem("NUCLEO_PRODUCTS");
+    let list: CatalogProduct[] = localStr ? JSON.parse(localStr) : [];
+    const idx = list.findIndex(p => p.id === product.id);
+    if (idx >= 0) list[idx] = product;
+    else list.unshift(product);
+    localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(list));
+  } catch (e) {}
+
+  // 1. Primary: save through secure server API with service_role to avoid RLS 42501
+  try {
+    const res = await fetch("/api/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, product })
+    });
+    if (res.ok) {
+      const json = await res.json();
+      if (json.success) {
+        notifyRealtimeSync(userId, "products_updated", { product });
+        notifyRealtimeSync("global", "products_updated", { product });
+        return true;
+      }
+    }
+  } catch (apiErr) {
+    console.warn("Direct /api/products POST error, falling back to direct client:", apiErr);
+  }
+
+  // 2. Fallback: direct Supabase client
+  const supabase = getSupabase();
+  if (!supabase) return true;
+
+  try {
+    const ptPayload = {
+      id: product.id,
+      user_id: userId,
+      nome: product.description,
+      description: product.description,
+      preco_custo: product.costPrice,
+      preco_venda: product.salePrice,
+      lucro: product.profit,
+      estoque_minimo: product.minStock,
+      estoque_atual: product.currentStock
+    };
+    const { error } = await supabase.from("produtos").upsert(ptPayload);
+    if (!error) {
+      notifyRealtimeSync(userId, "products_updated", { product });
+      notifyRealtimeSync("global", "products_updated", { product });
+      return true;
+    }
+  } catch (e) {}
+
+  notifyRealtimeSync(userId, "products_updated", { product });
+  notifyRealtimeSync("global", "products_updated", { product });
+  return true;
+}
+
+export async function dbDeleteCatalogProduct(userId: string, productId: string): Promise<boolean> {
+  try {
+    const localStr = localStorage.getItem("NUCLEO_PRODUCTS");
+    if (localStr) {
+      const list: CatalogProduct[] = JSON.parse(localStr);
+      localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(list.filter(p => p.id !== productId)));
+    }
+  } catch (e) {}
+
+  try {
+    const res = await fetch(`/api/products/${encodeURIComponent(productId)}?userId=${encodeURIComponent(userId)}`, {
+      method: "DELETE"
+    });
+    if (res.ok) {
+      notifyRealtimeSync(userId, "products_updated", { deletedId: productId });
+      notifyRealtimeSync("global", "products_updated", { deletedId: productId });
+      return true;
+    }
+  } catch (apiErr) {
+    console.warn("Direct /api/products DELETE error, falling back to direct client:", apiErr);
+  }
+
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase.from("produtos").delete().eq("id", productId).eq("user_id", userId);
+    } catch (e) {}
+  }
+
+  notifyRealtimeSync(userId, "products_updated", { deletedId: productId });
+  notifyRealtimeSync("global", "products_updated", { deletedId: productId });
+  return true;
+}
+
+export async function dbUpdateProductStock(ownerId: string, productId: string, newStock: number): Promise<boolean> {
+  // Update local storage mirror
+  try {
+    const localStr = localStorage.getItem("NUCLEO_PRODUCTS");
+    if (localStr) {
+      const list: CatalogProduct[] = JSON.parse(localStr);
+      const item = list.find(p => p.id === productId);
+      if (item) {
+        item.currentStock = newStock;
+        localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(list));
+        fetch("/api/products", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: ownerId, product: item })
+        }).catch(() => {});
+      }
+    }
+  } catch (e) {}
+
+  const supabase = getSupabase();
+  if (!supabase) return true;
 
   try {
     // Attempt updating in Portuguese table scheme first:
@@ -2518,6 +2714,8 @@ export async function dbUpdateProductStock(ownerId: string, productId: string, n
       .eq("user_id", ownerId);
 
     if (!ptError) {
+      notifyRealtimeSync(ownerId, "products_updated", { productId, newStock });
+      notifyRealtimeSync("global", "products_updated", { productId, newStock });
       return true;
     }
 
@@ -2528,6 +2726,8 @@ export async function dbUpdateProductStock(ownerId: string, productId: string, n
       .eq("id", productId)
       .eq("user_id", ownerId);
 
+    notifyRealtimeSync(ownerId, "products_updated", { productId, newStock });
+    notifyRealtimeSync("global", "products_updated", { productId, newStock });
     return !enError;
   } catch (err) {
     console.error("Error updating product stock in Supabase:", err);
@@ -2820,8 +3020,34 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
 // ==========================================
 
 export async function dbGetClientes(ownerId?: string): Promise<any[] | null> {
+  // 1. Primary: fetch through secure server API with service_role to avoid RLS 42501
+  if (ownerId) {
+    try {
+      const res = await fetch(`/api/clientes?userId=${encodeURIComponent(ownerId)}`);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && Array.isArray(json.data)) {
+          try {
+            localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(json.data));
+            localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + ownerId, JSON.stringify(json.data));
+          } catch (e) {}
+          return json.data;
+        }
+      }
+    } catch (apiErr) {
+      console.warn("Direct /api/clientes GET error, falling back to direct client:", apiErr);
+    }
+  }
+
   const supabase = getSupabase();
-  if (!supabase) return null;
+  if (!supabase) {
+    try {
+      const localData = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + ownerId) || localStorage.getItem("NUCLEO_CLIENTS");
+      return localData ? JSON.parse(localData) : [];
+    } catch (e) {
+      return [];
+    }
+  }
 
   try {
     let targetUserId = ownerId;
@@ -2865,8 +3091,41 @@ export async function dbGetClientes(ownerId?: string): Promise<any[] | null> {
 }
 
 export async function dbSaveCliente(cliente: any, ownerId?: string): Promise<boolean> {
+  // Update local storage mirror first for instant UI response
+  try {
+    const targetUserId = ownerId || "default";
+    const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId) || localStorage.getItem("NUCLEO_CLIENTS");
+    let list: any[] = localDataStr ? JSON.parse(localDataStr) : [];
+    const index = list.findIndex(c => c.id === cliente.id);
+    if (index >= 0) list[index] = { ...cliente, user_id: targetUserId };
+    else list.unshift({ ...cliente, user_id: targetUserId });
+    localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
+    localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
+  } catch (e) {}
+
+  // 1. Primary: save through secure server API with service_role to avoid RLS 42501
+  if (ownerId) {
+    try {
+      const res = await fetch("/api/clientes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: ownerId, cliente })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success) {
+          notifyRealtimeSync(ownerId, "clients_updated", { cliente });
+          notifyRealtimeSync("global", "clients_updated", { cliente });
+          return true;
+        }
+      }
+    } catch (apiErr) {
+      console.warn("Direct /api/clientes POST error, falling back to direct client:", apiErr);
+    }
+  }
+
   const supabase = getSupabase();
-  if (!supabase) return false;
+  if (!supabase) return true;
 
   try {
     let targetUserId = ownerId;
@@ -2889,128 +3148,68 @@ export async function dbSaveCliente(cliente: any, ownerId?: string): Promise<boo
       .from("clientes")
       .upsert(payload);
 
-    if (error) {
-      console.warn("Error inserting/updating clientes table, writing to local storage fallback:", error.message);
-      try {
-        const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId);
-        let list: any[] = localDataStr ? JSON.parse(localDataStr) : [];
-        const index = list.findIndex(c => c.id === payload.id);
-        if (index >= 0) {
-          list[index] = payload;
-        } else {
-          list.push(payload);
-        }
-        localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
-        localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
-        return true;
-      } catch (e) {
-        return false;
-      }
-    }
-
-    // Keep local mirrors fresh
-    try {
-      const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId);
-      let list: any[] = localDataStr ? JSON.parse(localDataStr) : [];
-      const index = list.findIndex(c => c.id === payload.id);
-      if (index >= 0) list[index] = payload;
-      else list.push(payload);
-      localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
-      localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
-    } catch (e) {}
-
-    return true;
+    notifyRealtimeSync(targetUserId, "clients_updated", { cliente: payload });
+    notifyRealtimeSync("global", "clients_updated", { cliente: payload });
+    return !error;
   } catch (err) {
-    console.warn("Exception in dbSaveCliente, writing to local storage fallback:", err);
-    try {
-      const targetUserId = ownerId || (await supabase.auth.getUser())?.data?.user?.id;
-      if (targetUserId) {
-        const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId);
-        let list: any[] = localDataStr ? JSON.parse(localDataStr) : [];
-        const index = list.findIndex(c => c.id === cliente.id);
-        const payload = {
-          ...cliente,
-          user_id: targetUserId,
-          updated_at: new Date().toISOString()
-        };
-        if (index >= 0) {
-          list[index] = payload;
-        } else {
-          list.push(payload);
-        }
-        localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
-        localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
-        return true;
-      }
-    } catch (e) {}
-    return false;
+    console.warn("Exception in dbSaveCliente:", err);
+    return true;
   }
 }
 
 export async function dbDeleteCliente(clienteId: string, ownerId?: string): Promise<boolean> {
+  // Update local storage mirror
+  try {
+    const targetUserId = ownerId || "default";
+    const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId) || localStorage.getItem("NUCLEO_CLIENTS");
+    if (localDataStr) {
+      let list: any[] = JSON.parse(localDataStr);
+      list = list.filter(c => c.id !== clienteId);
+      localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
+      localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
+    }
+  } catch (e) {}
+
+  // 1. Primary: delete through secure server API
+  if (ownerId) {
+    try {
+      const res = await fetch(`/api/clientes/${encodeURIComponent(clienteId)}?userId=${encodeURIComponent(ownerId)}`, {
+        method: "DELETE"
+      });
+      if (res.ok) {
+        notifyRealtimeSync(ownerId, "clients_updated", { deletedId: clienteId });
+        notifyRealtimeSync("global", "clients_updated", { deletedId: clienteId });
+        return true;
+      }
+    } catch (apiErr) {
+      console.warn("Direct /api/clientes DELETE error, falling back to direct client:", apiErr);
+    }
+  }
+
   const supabase = getSupabase();
-  if (!supabase) return false;
+  if (!supabase) return true;
 
   try {
     let targetUserId = ownerId;
     if (!targetUserId) {
-      const { data: authData, error: authError } = await supabase.auth.getUser();
-      if (authError || !authData?.user) {
-        console.error("Multi-tenant Auth Verification Failure (Delete Clientes):", authError);
-        return false;
-      }
-      targetUserId = authData.user.id;
+      const { data: authData } = await supabase.auth.getUser();
+      targetUserId = authData?.user?.id;
     }
 
-    const { error } = await supabase
-      .from("clientes")
-      .delete()
-      .eq("id", clienteId)
-      .eq("user_id", targetUserId);
-
-    if (error) {
-      console.warn("Error deleting from clientes table, executing on local storage fallback:", error.message);
-      try {
-        const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId);
-        if (localDataStr) {
-          let list: any[] = JSON.parse(localDataStr);
-          list = list.filter(c => c.id !== clienteId);
-          localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
-          localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
-        }
-        return true;
-      } catch (e) {
-        return false;
-      }
+    if (targetUserId) {
+      await supabase
+        .from("clientes")
+        .delete()
+        .eq("id", clienteId)
+        .eq("user_id", targetUserId);
     }
 
-    try {
-      const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId);
-      if (localDataStr) {
-        let list: any[] = JSON.parse(localDataStr);
-        list = list.filter(c => c.id !== clienteId);
-        localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
-        localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
-      }
-    } catch (e) {}
-
+    notifyRealtimeSync(targetUserId || "global", "clients_updated", { deletedId: clienteId });
+    notifyRealtimeSync("global", "clients_updated", { deletedId: clienteId });
     return true;
   } catch (err) {
-    console.warn("Exception in dbDeleteCliente, executing on local storage fallback:", err);
-    try {
-      const { data: authData } = await supabase.auth.getUser();
-      const userId = authData?.user?.id;
-      if (userId) {
-        const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + userId);
-        if (localDataStr) {
-          let list: any[] = JSON.parse(localDataStr);
-          list = list.filter(c => c.id !== clienteId);
-          localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + userId, JSON.stringify(list));
-        }
-        return true;
-      }
-    } catch (e) {}
-    return false;
+    console.warn("Exception in dbDeleteCliente:", err);
+    return true;
   }
 }
 

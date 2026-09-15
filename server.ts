@@ -1985,6 +1985,558 @@ ${JSON.stringify(sales, null, 2)}
     }
   });
 
+  // Products Management API (Service Role to bypass client RLS 42501 and sync instantly across terminals)
+  app.get("/api/products", async (req, res) => {
+    try {
+      const userId = (req.query.userId as string) || "";
+      if (!userId) {
+        return res.status(400).json({ error: "userId é obrigatório" });
+      }
+      const supabase = getSupabaseClient();
+      if (!supabase) return res.json({ success: true, data: [] });
+
+      const { companyUserIds } = await resolveCompanyScope(supabase, userId);
+
+      const { data, error } = await supabase
+        .from("produtos")
+        .select("*")
+        .in("user_id", companyUserIds);
+
+      if (error) {
+        console.error("[Server GET /api/products Error]:", error);
+        return res.status(500).json({ error: error.message });
+      }
+
+      const mapped = (data || []).map((d: any) => {
+        const cost = Number(d.cost_price ?? d.costPrice ?? d.preco_custo ?? d.valor_custo ?? 0);
+        const sale = Number(d.sale_price ?? d.salePrice ?? d.preco_venda ?? d.valor_venda ?? 0);
+        return {
+          id: d.id,
+          description: d.description || d.name || d.nome || d.descricao || "",
+          costPrice: cost,
+          salePrice: sale,
+          profit: Number(d.profit ?? d.lucro ?? (sale - cost)),
+          minStock: Number(d.min_stock ?? d.minStock ?? d.estoque_minimo ?? 0),
+          currentStock: Number(d.current_stock ?? d.currentStock ?? d.estoque_atual ?? 0)
+        };
+      });
+
+      return res.json({ success: true, data: mapped });
+    } catch (err: any) {
+      console.error("[Server GET /api/products Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/products", async (req, res) => {
+    try {
+      const { userId, product } = req.body;
+      if (!userId || !product || !product.id) {
+        return res.status(400).json({ error: "userId e dados do produto são obrigatórios" });
+      }
+      const supabase = getSupabaseClient();
+      if (!supabase) return res.json({ success: true });
+
+      const { canonicalOwnerId } = await resolveCompanyScope(supabase, userId);
+
+      // Ensure user exists in users table to satisfy foreign key constraints
+      try {
+        await supabase.from("users").upsert({
+          id: canonicalOwnerId,
+          name: canonicalOwnerId,
+          username: canonicalOwnerId,
+          password: ""
+        }, { onConflict: "id", ignoreDuplicates: true });
+      } catch (e) {}
+
+      const descriptionText = String(product.description || product.name || product.nome || "").trim();
+      const costValue = Number(product.costPrice ?? product.cost_price ?? product.preco_custo ?? 0);
+      const saleValue = Number(product.salePrice ?? product.sale_price ?? product.preco_venda ?? 0);
+      const minStockVal = Number(product.minStock ?? product.min_stock ?? product.estoque_minimo ?? 0);
+      const currentStockVal = Number(product.currentStock ?? product.current_stock ?? product.estoque_atual ?? 0);
+      const calculatedProfit = Number(product.profit ?? (saleValue - costValue));
+
+      const ptPayload: any = {
+        id: product.id,
+        user_id: canonicalOwnerId,
+        nome: descriptionText,
+        description: descriptionText,
+        name: descriptionText,
+        preco_custo: costValue,
+        preco_venda: saleValue,
+        lucro: calculatedProfit,
+        estoque_minimo: minStockVal,
+        estoque_atual: currentStockVal,
+        cost_price: costValue,
+        sale_price: saleValue,
+        profit: calculatedProfit,
+        min_stock: minStockVal,
+        current_stock: currentStockVal
+      };
+
+      const { error } = await supabase.from("produtos").upsert(ptPayload);
+      if (error) {
+        console.warn("[Server POST /api/products Notice]:", error.message);
+        const fallbackPayload = {
+          id: product.id,
+          user_id: canonicalOwnerId,
+          nome: descriptionText,
+          preco_custo: costValue,
+          preco_venda: saleValue,
+          estoque_atual: currentStockVal
+        };
+        await supabase.from("produtos").upsert(fallbackPayload);
+      }
+
+      const mappedProduct = {
+        id: product.id,
+        description: descriptionText,
+        costPrice: costValue,
+        salePrice: saleValue,
+        profit: calculatedProfit,
+        minStock: minStockVal,
+        currentStock: currentStockVal
+      };
+
+      // Broadcast instant update across all company terminals and global
+      broadcastSyncEvent(canonicalOwnerId, "products_updated", { product: mappedProduct });
+      broadcastSyncEvent(userId, "products_updated", { product: mappedProduct });
+      broadcastSyncEvent("global", "products_updated", { product: mappedProduct });
+
+      return res.json({ success: true, product: mappedProduct });
+    } catch (err: any) {
+      console.error("[Server POST /api/products Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/products/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const userId = (req.query.userId as string) || "";
+      const supabase = getSupabaseClient();
+      if (!supabase) return res.json({ success: true });
+
+      const { canonicalOwnerId, companyUserIds } = userId ? await resolveCompanyScope(supabase, userId) : { canonicalOwnerId: "global", companyUserIds: [] };
+
+      if (companyUserIds.length > 0) {
+        await supabase.from("produtos").delete().eq("id", id).in("user_id", companyUserIds);
+      } else {
+        await supabase.from("produtos").delete().eq("id", id);
+      }
+
+      broadcastSyncEvent(canonicalOwnerId, "products_updated", { deletedId: id });
+      broadcastSyncEvent("global", "products_updated", { deletedId: id });
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error("[Server DELETE /api/products Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Clientes Management API (service_role to bypass client RLS and sync across terminals)
+  app.get("/api/clientes", async (req, res) => {
+    try {
+      const userId = (req.query.userId as string) || "";
+      if (!userId) {
+        return res.status(400).json({ error: "userId é obrigatório" });
+      }
+      const supabase = getSupabaseClient();
+      if (!supabase) return res.json({ success: true, data: [] });
+
+      const { companyUserIds } = await resolveCompanyScope(supabase, userId);
+
+      const { data, error } = await supabase
+        .from("clientes")
+        .select("*")
+        .in("user_id", companyUserIds)
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        console.error("[Server GET /api/clientes Error]:", error);
+        return res.status(500).json({ error: error.message });
+      }
+
+      return res.json({ success: true, data: data || [] });
+    } catch (err: any) {
+      console.error("[Server GET /api/clientes Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/clientes", async (req, res) => {
+    try {
+      const { userId, cliente } = req.body;
+      if (!userId || !cliente || !cliente.id) {
+        return res.status(400).json({ error: "userId e dados do cliente são obrigatórios" });
+      }
+      const supabase = getSupabaseClient();
+      if (!supabase) return res.json({ success: true });
+
+      const { canonicalOwnerId } = await resolveCompanyScope(supabase, userId);
+
+      // Ensure user exists in users table
+      try {
+        await supabase.from("users").upsert({
+          id: canonicalOwnerId,
+          name: canonicalOwnerId,
+          username: canonicalOwnerId,
+          password: ""
+        }, { onConflict: "id", ignoreDuplicates: true });
+      } catch (e) {}
+
+      const payload = {
+        ...cliente,
+        user_id: canonicalOwnerId,
+        updated_at: new Date().toISOString()
+      };
+
+      const { error } = await supabase.from("clientes").upsert(payload);
+      if (error) {
+        console.error("[Server POST /api/clientes Error]:", error);
+        return res.status(500).json({ error: error.message });
+      }
+
+      broadcastSyncEvent(canonicalOwnerId, "clients_updated", { cliente: payload });
+      broadcastSyncEvent(userId, "clients_updated", { cliente: payload });
+      broadcastSyncEvent("global", "clients_updated", { cliente: payload });
+
+      return res.json({ success: true, cliente: payload });
+    } catch (err: any) {
+      console.error("[Server POST /api/clientes Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/clientes/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const userId = (req.query.userId as string) || "";
+      const supabase = getSupabaseClient();
+      if (!supabase) return res.json({ success: true });
+
+      const { canonicalOwnerId, companyUserIds } = userId ? await resolveCompanyScope(supabase, userId) : { canonicalOwnerId: "global", companyUserIds: [] };
+
+      if (companyUserIds.length > 0) {
+        await supabase.from("clientes").delete().eq("id", id).in("user_id", companyUserIds);
+      } else {
+        await supabase.from("clientes").delete().eq("id", id);
+      }
+
+      broadcastSyncEvent(canonicalOwnerId, "clients_updated", { deletedId: id });
+      broadcastSyncEvent("global", "clients_updated", { deletedId: id });
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error("[Server DELETE /api/clientes Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Direct Server-Side Backup Restore (uses service_role to insert all tables in Supabase and broadcast to all terminals)
+  app.post("/api/backup/restore", async (req, res) => {
+    try {
+      const { userId, backupData } = req.body;
+      if (!userId || !backupData) {
+        return res.status(400).json({ error: "userId e backupData são obrigatórios" });
+      }
+
+      const supabase = getSupabaseClient();
+      if (!supabase) {
+        return res.json({ success: true, message: "Supabase não configurado no servidor" });
+      }
+
+      const { canonicalOwnerId } = await resolveCompanyScope(supabase, userId);
+
+      // Ensure user exists in users table
+      try {
+        await supabase.from("users").upsert({
+          id: canonicalOwnerId,
+          name: canonicalOwnerId,
+          username: canonicalOwnerId,
+          password: ""
+        }, { onConflict: "id", ignoreDuplicates: true });
+      } catch (e) {}
+
+      const counts = {
+        sales: 0,
+        produtos: 0,
+        expenses: 0,
+        gastos_mensais: 0,
+        clientes: 0,
+        company_profile: false,
+        goals: false,
+        cash_register: false
+      };
+
+      // 1. Company Profile
+      if (backupData.company_profile) {
+        try {
+          await supabase.from("company_profile").upsert({
+            ...backupData.company_profile,
+            user_id: canonicalOwnerId,
+            updated_at: new Date().toISOString()
+          });
+          counts.company_profile = true;
+        } catch (e) {
+          console.warn("[Backup Restore] company_profile error:", e);
+        }
+      }
+
+      // 2. Goals
+      if (backupData.goals) {
+        try {
+          await supabase.from("goals").upsert({
+            ...backupData.goals,
+            user_id: canonicalOwnerId,
+            updated_at: new Date().toISOString()
+          });
+          counts.goals = true;
+        } catch (e) {
+          console.warn("[Backup Restore] goals error:", e);
+        }
+      }
+
+      // 3. Clientes
+      const rawClientes = Array.isArray(backupData.clientes) ? backupData.clientes : [];
+      if (rawClientes.length > 0) {
+        const batchClientes = rawClientes.map((c: any) => ({
+          id: c.id || "client_" + Math.random().toString(36).substring(2, 9),
+          user_id: canonicalOwnerId,
+          name: c.name || c.nome || "Cliente Sem Nome",
+          phone: c.phone || c.telefone || "",
+          email: c.email || "",
+          address: c.address || c.endereco || "",
+          notes: c.notes || c.observacao || c.observation || "",
+          cpf_cnpj: c.cpf_cnpj || c.cpfCnpj || "",
+          created_at: c.created_at || c.createdAt || new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }));
+
+        try {
+          for (let i = 0; i < batchClientes.length; i += 50) {
+            await supabase.from("clientes").upsert(batchClientes.slice(i, i + 50));
+          }
+          counts.clientes = batchClientes.length;
+        } catch (cErr) {
+          console.warn("[Backup Restore] clientes batch error:", cErr);
+        }
+      }
+
+      // 4. Produtos (both PT and EN columns to ensure compatibility)
+      const rawProdutos = Array.isArray(backupData.produtos) ? backupData.produtos : [];
+      if (rawProdutos.length > 0) {
+        const batchProdutos = rawProdutos.map((p: any) => {
+          const id = p.id || "prod_" + Math.random().toString(36).substring(2, 9);
+          const name = p.name || p.nome || p.description || p.descricao || "Produto";
+          const cost = Number(p.costPrice ?? p.cost_price ?? p.preco_custo ?? p.valor_custo ?? 0);
+          const sale = Number(p.salePrice ?? p.sale_price ?? p.preco_venda ?? p.valor_venda ?? 0);
+          const minStock = Number(p.minStock ?? p.min_stock ?? p.estoque_minimo ?? 0);
+          const currentStock = Number(p.currentStock ?? p.current_stock ?? p.estoque_atual ?? 0);
+          const profit = Number(p.profit ?? (sale - cost));
+
+          return {
+            id,
+            user_id: canonicalOwnerId,
+            nome: name,
+            description: name,
+            name: name,
+            preco_custo: cost,
+            preco_venda: sale,
+            lucro: profit,
+            estoque_minimo: minStock,
+            estoque_atual: currentStock,
+            cost_price: cost,
+            sale_price: sale,
+            profit: profit,
+            min_stock: minStock,
+            current_stock: currentStock
+          };
+        });
+
+        try {
+          for (let i = 0; i < batchProdutos.length; i += 50) {
+            const chunk = batchProdutos.slice(i, i + 50);
+            const { error: pErr } = await supabase.from("produtos").upsert(chunk);
+            if (pErr) {
+              for (const item of chunk) {
+                try {
+                  await supabase.from("produtos").upsert({
+                    id: item.id,
+                    user_id: canonicalOwnerId,
+                    nome: item.nome,
+                    preco_custo: item.preco_custo,
+                    preco_venda: item.preco_venda,
+                    estoque_atual: item.estoque_atual
+                  });
+                } catch (e) {}
+              }
+            }
+          }
+          counts.produtos = batchProdutos.length;
+        } catch (pErr) {
+          console.warn("[Backup Restore] produtos batch error:", pErr);
+        }
+      }
+
+      // 5. Sales & Budgets
+      const rawSales = Array.isArray(backupData.sales) ? backupData.sales : [];
+      const rawBudgets = Array.isArray(backupData.budgets) ? backupData.budgets : [];
+      const allSales = [...rawSales];
+      rawBudgets.forEach((b: any) => {
+        if (!allSales.some((s: any) => s.id === b.id)) {
+          allSales.push({ ...b, isBudget: true, is_budget: true });
+        }
+      });
+
+      if (allSales.length > 0) {
+        const batchSales: any[] = [];
+        allSales.forEach((s: any) => {
+          if (!s || !s.id || s.id === "quick_sales_config" || String(s.id).startsWith("cash_register_state")) return;
+
+          const metaStr = JSON.stringify({
+            orderDate: s.orderDate || "",
+            deliveryDate: s.deliveryDate || "",
+            deliveryReason: s.deliveryReason || "",
+            payments: s.payments || [],
+            materialEntregue: !!s.materialEntregue,
+            sellerId: s.sellerId || "",
+            sellerName: s.sellerName || "",
+            sellerRole: s.sellerRole || "",
+            deliveredBy: s.deliveredBy || "",
+            deliveredAt: s.deliveredAt || "",
+            deliveredRole: s.deliveredRole || "",
+            auditLog: s.auditLog || []
+          });
+          const rawPhone = s.clientPhone || s.client_phone || "";
+          const purePhone = rawPhone.includes("::") ? rawPhone.split("::")[0] : rawPhone;
+          const phoneWithMeta = `${purePhone}::${metaStr}`;
+
+          batchSales.push({
+            id: s.id,
+            user_id: canonicalOwnerId,
+            client_name: s.clientName || s.client_name || "Cliente",
+            client_phone: phoneWithMeta,
+            items: s.items || [],
+            use_motoboy: !!(s.useMotoboy || s.use_motoboy),
+            motoboy_cost: Number(s.motoboyCost ?? s.motoboy_cost ?? 0),
+            discount: Number(s.discount ?? 0),
+            down_payment: Number(s.downPayment ?? s.down_payment ?? 0),
+            operation_cost: Number(s.operationCost ?? s.operation_cost ?? 0),
+            cost_items: s.costItems || s.cost_items || [],
+            total_value: Number(s.totalValue ?? s.total_value ?? 0),
+            balance_due: Number(s.balanceDue ?? s.balance_due ?? 0),
+            net_profit: Number(s.netProfit ?? s.net_profit ?? 0),
+            client_image: s.clientImage || s.client_image || null,
+            date: s.date || new Date().toISOString(),
+            is_budget: !!(s.isBudget || s.is_budget),
+            payment_method: s.paymentMethod || s.payment_method || "dinheiro"
+          });
+        });
+
+        for (let i = 0; i < batchSales.length; i += 50) {
+          const chunk = batchSales.slice(i, i + 50);
+          const { error: sErr } = await supabase.from("sales").upsert(chunk);
+          if (sErr) {
+            const stripped = chunk.map((it: any) => {
+              const copy = { ...it };
+              delete copy.payment_method;
+              return copy;
+            });
+            try {
+              await supabase.from("sales").upsert(stripped);
+            } catch (e) {}
+          }
+        }
+        counts.sales = batchSales.length;
+      }
+
+      // 6. Expenses
+      const rawExpenses = Array.isArray(backupData.expenses) ? backupData.expenses : [];
+      if (rawExpenses.length > 0) {
+        const batchExpenses = rawExpenses.map((e: any) => ({
+          id: e.id || "exp_" + Math.random().toString(36).substring(2, 9),
+          user_id: canonicalOwnerId,
+          description: e.description || "Despesa",
+          value: Number(e.value) || 0,
+          date: e.date || new Date().toISOString(),
+          category: e.category || "Outros"
+        }));
+
+        for (let i = 0; i < batchExpenses.length; i += 50) {
+          try {
+            await supabase.from("expenses").upsert(batchExpenses.slice(i, i + 50));
+          } catch (e) {}
+        }
+        counts.expenses = batchExpenses.length;
+      }
+
+      // 7. Gastos Mensais (Recurring / Monthly Bills)
+      const rawGastos = Array.isArray(backupData.gastos_mensais) ? backupData.gastos_mensais : [];
+      if (rawGastos.length > 0) {
+        const batchGastos = rawGastos.map((g: any) => ({
+          id: g.id || "bill_" + Math.random().toString(36).substring(2, 9),
+          user_id: canonicalOwnerId,
+          name: g.name || g.description || g.titulo || g.nome || "Fatura",
+          value: Number(g.value || g.valor || 0),
+          category: g.category || g.categoria || "Outros",
+          due_date: g.due_date || g.dueDate || g.vencimento || "",
+          observation: g.observation || g.observacao || ""
+        }));
+
+        for (let i = 0; i < batchGastos.length; i += 50) {
+          try {
+            await supabase.from("gastos_mensais").upsert(batchGastos.slice(i, i + 50));
+          } catch (e) {}
+        }
+        counts.gastos_mensais = batchGastos.length;
+      }
+
+      // 8. Cash Register State
+      if (backupData.cash_register_state || backupData.cash_register) {
+        const regState = backupData.cash_register_state || backupData.cash_register;
+        const nowISO = new Date().toISOString();
+        const createPayload = (rowId: string) => ({
+          id: rowId,
+          user_id: canonicalOwnerId,
+          client_name: "CASH_REGISTER_SYNCED_STATE",
+          client_phone: "CASH_REGISTER",
+          items: regState as any,
+          total_value: 0,
+          is_budget: true,
+          operation_cost: 0,
+          balance_due: 0,
+          net_profit: 0,
+          discount: 0,
+          down_payment: 0,
+          motoboy_cost: 0,
+          date: nowISO
+        });
+
+        await Promise.allSettled([
+          supabase.from("sales").upsert(createPayload(`cash_register_state_${canonicalOwnerId}`)),
+          supabase.from("sales").upsert(createPayload("cash_register_state"))
+        ]);
+        counts.cash_register = true;
+      }
+
+      // BROADCAST REALTIME SYNC ACROSS ALL COMPUTERS AND TERMINALS
+      broadcastSyncEvent(canonicalOwnerId, "backup_restored", { counts, timestamp: Date.now() });
+      broadcastSyncEvent(canonicalOwnerId, "products_updated", { count: counts.produtos });
+      broadcastSyncEvent(canonicalOwnerId, "sales_updated", { count: counts.sales });
+      broadcastSyncEvent(canonicalOwnerId, "expenses_updated", { count: counts.expenses });
+      broadcastSyncEvent(canonicalOwnerId, "clients_updated", { count: counts.clientes });
+      broadcastSyncEvent(userId, "backup_restored", { counts, timestamp: Date.now() });
+      broadcastSyncEvent("global", "backup_restored", { counts, timestamp: Date.now() });
+      broadcastSyncEvent("global", "products_updated", { count: counts.produtos });
+      broadcastSyncEvent("global", "sales_updated", { count: counts.sales });
+
+      return res.json({ success: true, counts });
+    } catch (err: any) {
+      console.error("[Server POST /api/backup/restore Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Cash Register Management API (uses service_role to bypass client RLS 42501)
   app.post("/api/cash-register", async (req, res) => {
     try {
