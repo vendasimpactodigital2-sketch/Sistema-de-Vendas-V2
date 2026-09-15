@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>Sistema de Vendas para Gráficas</title>
+
+    <!-- Global error and CORS/Script Error diagnostics with automatic self-healing -->
+    <script>
+      window.addEventListener('error', function(event) {
+        var msg = event.message || '';
+        var url = event.filename || '';
+        var line = event.lineno || '';
+        var col = event.colno || '';
+        var err = event.error;
+
+        // Note: For resource loading failures (captured in capture phase), event.target may exist and not have message
+        var isResourceError = event.target && (event.target.tagName === 'SCRIPT' || event.target.tagName === 'LINK');
+        if (isResourceError) {
+          msg = 'Load failed: ' + (event.target.src || event.target.href || 'resource');
+        }
+
+        console.warn('[Diagnóstico Global] Erro interceptado:', {
+          message: msg,
+          url: url,
+          line: line,
+          col: col,
+          isResourceError: isResourceError,
+          errorObject: err ? { name: err.name, message: err.message, stack: err.stack } : null
+        });
+
+        // Detecta falhas críticas de carregamento de scripts (causadas por cache antigo, mudança de hash ou falhas de rede)
+        var isSyntaxError = msg.indexOf('SyntaxError') > -1 || (err && err.name === 'SyntaxError');
+        var isUnexpectedToken = msg.indexOf("Unexpected token '<'") > -1 || (err && err.message && err.message.indexOf("Unexpected token '<'") > -1);
+        var isChunkLoadFailed = msg.toLowerCase().indexOf('failed to fetch dynamically imported module') > -1 || msg.toLowerCase().indexOf('error loading dynamically imported module') > -1;
+        
+        // Verifica se é uma falha de carregamento de um recurso crítico do nosso próprio app (mesma origem)
+        var isCriticalResourceError = false;
+        if (isResourceError && event.target) {
+          var src = event.target.src || event.target.href || '';
+          // Apenas ativa se for da mesma origem e for um script, stylesheet ou módulo do nosso app
+          if (src && src.indexOf(window.location.origin) > -1) {
+            if (src.indexOf('/src/') > -1 || src.indexOf('/assets/') > -1 || src.indexOf('main.tsx') > -1 || src.indexOf('.css') > -1) {
+              isCriticalResourceError = true;
+            }
+          }
+        }
+
+        var isLoadFailed = isCriticalResourceError;
+        var isGenericScriptError = false; // Nunca disparar reload para erro de script genérico sem contexto (geralmente extensões)
+
+        // Se for um erro crítico que cause tela branca, aplica o procedimento de auto-recuperação
+        if (isUnexpectedToken || isChunkLoadFailed || isSyntaxError || isLoadFailed) {
+          console.log('[Self-Healing] Erro crítico de carregamento ou sintaxe detectado em recurso próprio. Iniciando procedimento de auto-recuperação...');
+
+          // Evita loops infinitos de recarregamento usando sessionStorage
+          var now = Date.now();
+          var lastReload = Number(sessionStorage.getItem('NUCLEO_LAST_AUTO_RELOAD') || 0);
+          var reloadCount = Number(sessionStorage.getItem('NUCLEO_AUTO_RELOAD_COUNT') || 0);
+
+          if (now - lastReload < 15000) {
+            if (reloadCount >= 3) {
+              console.warn('[Self-Healing] Loop de recarregamento evitado. O sistema já tentou se recuperar 3 vezes nos últimos 15 segundos.');
+              return;
+            }
+            sessionStorage.setItem('NUCLEO_AUTO_RELOAD_COUNT', reloadCount + 1);
+          } else {
+            sessionStorage.setItem('NUCLEO_AUTO_RELOAD_COUNT', 1);
+          }
+          sessionStorage.setItem('NUCLEO_LAST_AUTO_RELOAD', now);
+
+          console.log('[Self-Healing] Limpando caches e service workers para obter os arquivos mais recentes do servidor...');
+
+          // Limpa Service Workers registrados
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+              for (var i = 0; i < registrations.length; i++) {
+                registrations[i].unregister();
+              }
+            });
+          }
+
+          // Limpa caches locais
+          if ('caches' in window) {
+            caches.keys().then(function(keys) {
+              keys.forEach(function(key) {
+                caches.delete(key);
+              });
+            });
+          }
+
+          // Limpa dados temporários que possam estar corrompidos se necessário (preserva dados de vendas)
+          if (isUnexpectedToken || isSyntaxError) {
+            localStorage.removeItem('NUCLEO_CURRENT_USER');
+          }
+
+          setTimeout(function() {
+            console.log('[Self-Healing] Forçando recarregamento total da página...');
+            window.location.reload(true);
+          }, 800);
+        }
+
+        if (msg.toLowerCase().indexOf('script error') > -1 && !isGenericScriptError) {
+          console.info('[CORS/Script Error Blocked] Nota: Erros genéricos de script costumam decorrer de restrições de CORS sobre scripts externos ou extensões de navegador.');
+        }
+      }, true); // Habilitado capture-phase para interceptar falhas de rede/carregamento de tags script e link
+
+      window.addEventListener('unhandledrejection', function(event) {
+        var reason = event.reason;
+        if (reason && (reason.message || '').includes('WebSocket')) {
+          return; // Ignore benign WebSocket HMR rejection logs
+        }
+        console.warn('[Diagnóstico Global] Rejeição de promessa interceptada:', reason);
+      });
+    </script>
+
+    <!-- PWA Integration assets -->
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/png" href="/icon-512.png" />
+    <link rel="apple-touch-icon" href="/icon-512.png" />
+    <meta name="theme-color" content="#4e1617" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

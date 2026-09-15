@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Sistema de Vendas e Recibos com PDF",
+  "description": "Sistema simples e elegante de vendas de produtos e serviços para emissão de recibos em PDF, incluindo custos operacionais, cálculo de lucro líquido, suporte a serviço de motoboy e imagem do serviço.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "short_name": "Sistema Vendas",
+  "name": "Sistema de Venda - Controle Financeiro Núcleo",
+  "description": "Controle de vendas, catálogo de produtos, orçamentos e relatórios financeiros de forma integrada e offline.",
+  "icons": [
+    {
+      "src": "/icon-512.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#0d1117",
+  "theme_color": "#e91e63",
+  "display": "standalone",
+  "orientation": "portrait"
+}
