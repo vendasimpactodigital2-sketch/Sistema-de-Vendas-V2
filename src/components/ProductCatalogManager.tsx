@@ -18,7 +18,7 @@ import {
   Minus
 } from "lucide-react";
 import { CatalogProduct, User } from "../types";
-import { getSupabase } from "../supabase";
+import { getSupabase, notifyRealtimeSync } from "../supabase";
 
 // Helper to generate a valid RFC4122 v4 UUID
 const generateProductUUID = (): string => {
@@ -241,44 +241,69 @@ export function ProductCatalogManager({
     return false;
   };
 
+  const companyOwnerId = currentUser?.owner_id || currentUser?.id || "";
+
+  const loadProducts = async () => {
+    const supabase = getSupabase();
+    if (!supabase || !companyOwnerId) return;
+
+    try {
+      const { data, error } = await supabase
+        .from("produtos")
+        .select("*")
+        .eq("user_id", companyOwnerId);
+
+      if (error) {
+        console.error("Erro ao carregar produtos:", error);
+      } else if (data) {
+        const mappedProducts: CatalogProduct[] = data.map((d: any) => {
+          const cost = Number(d.cost_price ?? d.costPrice ?? d.preco_custo ?? d.valor_custo ?? 0);
+          const sale = Number(d.sale_price ?? d.salePrice ?? d.preco_venda ?? d.valor_venda ?? 0);
+          return {
+            id: d.id,
+            description: d.description || d.name || d.nome || d.descricao || "",
+            costPrice: cost,
+            salePrice: sale,
+            profit: sale - cost,
+            minStock: Number(d.min_stock ?? d.minStock ?? d.estoque_minimo ?? 0),
+            currentStock: Number(d.current_stock ?? d.currentStock ?? d.estoque_atual ?? 0)
+          };
+        });
+        setCatalogProducts(mappedProducts);
+        try {
+          localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(mappedProducts));
+        } catch (e) {}
+      }
+    } catch (err) {
+      console.error("Erro ao sincronizar produtos:", err);
+    }
+  };
+
   // Load products from Supabase when component mounts
   useEffect(() => {
-    if (!currentUser) return;
-    const loadProducts = async () => {
-      const supabase = getSupabase();
-      if (!supabase) return;
+    if (companyOwnerId) {
+      loadProducts();
+    }
+  }, [companyOwnerId]);
 
-      try {
-        const { data, error } = await supabase
-          .from("produtos")
-          .select("*")
-          .eq("user_id", currentUser.id);
-
-        if (error) {
-          console.error("Erro ao carregar produtos:", error);
-          addToast("Erro ao carregar produtos do Supabase ⚠️", "error");
-        } else if (data) {
-          const mappedProducts: CatalogProduct[] = data.map((d: any) => {
-            const cost = Number(d.cost_price ?? d.costPrice ?? d.preco_custo ?? d.valor_custo ?? 0);
-            const sale = Number(d.sale_price ?? d.salePrice ?? d.preco_venda ?? d.valor_venda ?? 0);
-            return {
-              id: d.id,
-              description: d.description || d.name || d.nome || d.descricao || "",
-              costPrice: cost,
-              salePrice: sale,
-              profit: sale - cost,
-              minStock: Number(d.min_stock ?? d.minStock ?? d.estoque_minimo ?? 0),
-              currentStock: Number(d.current_stock ?? d.currentStock ?? d.estoque_atual ?? 0)
-            };
-          });
-          setCatalogProducts(mappedProducts);
-        }
-      } catch (err) {
-        console.error("Erro ao sincronizar produtos:", err);
+  // Real-time synchronization across all devices and terminals
+  useEffect(() => {
+    const handleRemoteSync = (e: any) => {
+      const detail = e.detail;
+      if (!detail || detail.event === "products_updated" || detail.event === "backup_restored" || detail.event === "sync") {
+        loadProducts();
       }
     };
-    loadProducts();
-  }, [currentUser]);
+    window.addEventListener("products_remote_sync", handleRemoteSync);
+    window.addEventListener("backup_restored_sync", handleRemoteSync);
+    window.addEventListener("app_remote_sync", handleRemoteSync);
+
+    return () => {
+      window.removeEventListener("products_remote_sync", handleRemoteSync);
+      window.removeEventListener("backup_restored_sync", handleRemoteSync);
+      window.removeEventListener("app_remote_sync", handleRemoteSync);
+    };
+  }, [companyOwnerId]);
 
   // Quick adjust stock columns directly from list
   const handleQuickAdjustStock = (productId: string, amount: number) => {
@@ -296,10 +321,11 @@ export function ProductCatalogManager({
     );
 
     // Save stock update to Supabase
-    if (currentUser) {
+    if (companyOwnerId) {
       setTimeout(() => {
         if (!updatedProduct) return;
-        dbSaveCatalogProduct(updatedProduct, currentUser.id);
+        dbSaveCatalogProduct(updatedProduct, companyOwnerId);
+        notifyRealtimeSync(companyOwnerId, "products_updated", { id: productId });
       }, 50);
     }
 
@@ -424,10 +450,11 @@ export function ProductCatalogManager({
     setCatalogProducts(prev => [...newProducts, ...prev]);
 
     // Save imported products to Supabase
-    if (currentUser && newProducts.length > 0) {
+    if (companyOwnerId && newProducts.length > 0) {
       newProducts.forEach(prod => {
-        dbSaveCatalogProduct(prod, currentUser.id);
+        dbSaveCatalogProduct(prod, companyOwnerId);
       });
+      notifyRealtimeSync(companyOwnerId, "products_updated", { count: newProducts.length });
     }
 
     addToast(`${newProducts.length} produtos importados e cadastrados! 🛍️🚀`, "success");
@@ -499,8 +526,9 @@ export function ProductCatalogManager({
     }
 
     // Save to Supabase
-    if (currentUser) {
-      dbSaveCatalogProduct(updatedProd, currentUser.id);
+    if (companyOwnerId) {
+      dbSaveCatalogProduct(updatedProd, companyOwnerId);
+      notifyRealtimeSync(companyOwnerId, "products_updated", { id: targetId });
     }
 
     resetForm();
@@ -510,9 +538,10 @@ export function ProductCatalogManager({
     // Add back to active catalogProducts
     setCatalogProducts(prev => [product, ...prev]);
     
-    // Save to Supabase if currentUser
-    if (currentUser) {
-      dbSaveCatalogProduct(product, currentUser.id);
+    // Save to Supabase if companyOwnerId
+    if (companyOwnerId) {
+      dbSaveCatalogProduct(product, companyOwnerId);
+      notifyRealtimeSync(companyOwnerId, "products_updated", { id: product.id });
     }
     
     // Remove from deletedProducts
@@ -1216,16 +1245,19 @@ export function ProductCatalogManager({
                                     setCatalogProducts(prev => prev.filter(prod => prod.id !== deletedId));
 
                                     // Delete remotely from Supabase
-                                    if (currentUser) {
+                                    if (companyOwnerId) {
                                       const supabase = getSupabase();
                                       if (supabase) {
                                         supabase
                                           .from("produtos")
                                           .delete()
                                           .eq("id", deletedId)
+                                          .eq("user_id", companyOwnerId)
                                           .then(({ error }) => {
                                             if (error) {
                                               console.error("Erro ao deletar produto do Supabase:", error);
+                                            } else {
+                                              notifyRealtimeSync(companyOwnerId, "products_updated", { deletedId });
                                             }
                                           });
                                       }

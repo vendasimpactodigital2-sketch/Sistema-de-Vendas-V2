@@ -1687,6 +1687,9 @@ ${JSON.stringify(sales, null, 2)}
   app.post("/api/realtime/notify", (req, res) => {
     const { companyId, event, data } = req.body;
     broadcastSyncEvent(companyId || "global", event || "sync", data);
+    if (companyId && companyId !== "global") {
+      broadcastSyncEvent("global", event || "sync", data);
+    }
     return res.json({ success: true });
   });
 

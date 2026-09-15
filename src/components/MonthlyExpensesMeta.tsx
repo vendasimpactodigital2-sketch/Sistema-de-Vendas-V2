@@ -18,7 +18,7 @@ import {
   StickyNote
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { getSupabase } from "../supabase";
+import { getSupabase, notifyRealtimeSync } from "../supabase";
 import { User } from "../types";
 
 export interface MonthlyBill {
@@ -111,44 +111,67 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
     }, 4000);
   };
 
-  // Fetch monthly expenses on mount
+  const companyOwnerId = currentUser?.owner_id || currentUser?.id || "";
+
+  const fetchMonthlyBills = async () => {
+    const supabase = getSupabase();
+    if (!supabase || !companyOwnerId) return;
+
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("gastos_mensais")
+        .select("*")
+        .eq("user_id", companyOwnerId);
+
+      if (error) {
+        console.error("Erro ao carregar os dados do Supabase:", error);
+      } else if (data) {
+        const mappedBills: MonthlyBill[] = data.map((d: any) => ({
+          id: d.id,
+          name: d.name || d.description || d.titulo || d.nome || "",
+          value: Number(d.value || d.valor || 0),
+          category: d.category || d.categoria || "Outros",
+          dueDate: d.due_date || d.dueDate || d.vencimento || "",
+          observation: d.observation || d.observacao || ""
+        }));
+        setBills(mappedBills);
+        try {
+          localStorage.setItem("NUCLEO_MONTHLY_BILLS", JSON.stringify(mappedBills));
+        } catch (e) {}
+      }
+    } catch (err) {
+      console.error("Erro ao sincronizar gastos:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch monthly expenses on mount or company change
   useEffect(() => {
-    if (!currentUser) return;
+    if (companyOwnerId) {
+      fetchMonthlyBills();
+    }
+  }, [companyOwnerId]);
 
-    const fetchMonthlyBills = async () => {
-      const supabase = getSupabase();
-      if (!supabase) return;
-
-      setLoading(true);
-      try {
-        const { data, error } = await supabase
-          .from("gastos_mensais")
-          .select("*")
-          .eq("user_id", currentUser.id);
-
-        if (error) {
-          console.error("Erro ao carregar os dados do Supabase:", error);
-          showLocalToast("Erro ao carregar dados do Supabase ⚠️", "error");
-        } else if (data) {
-          const mappedBills: MonthlyBill[] = data.map((d: any) => ({
-            id: d.id,
-            name: d.name || d.description || d.titulo || d.nome || "",
-            value: Number(d.value || d.valor || 0),
-            category: d.category || d.categoria || "Outros",
-            dueDate: d.due_date || d.dueDate || d.vencimento || "",
-            observation: d.observation || d.observacao || ""
-          }));
-          setBills(mappedBills);
-        }
-      } catch (err) {
-        console.error("Erro ao sincronizar gastos:", err);
-      } finally {
-        setLoading(false);
+  // Real-time synchronization across all devices and terminals
+  useEffect(() => {
+    const handleRemoteSync = (e: any) => {
+      const detail = e.detail;
+      if (!detail || detail.event === "gastos_mensais_updated" || detail.event === "backup_restored" || detail.event === "sync") {
+        fetchMonthlyBills();
       }
     };
+    window.addEventListener("bills_remote_sync", handleRemoteSync);
+    window.addEventListener("backup_restored_sync", handleRemoteSync);
+    window.addEventListener("app_remote_sync", handleRemoteSync);
 
-    fetchMonthlyBills();
-  }, [currentUser]);
+    return () => {
+      window.removeEventListener("bills_remote_sync", handleRemoteSync);
+      window.removeEventListener("backup_restored_sync", handleRemoteSync);
+      window.removeEventListener("app_remote_sync", handleRemoteSync);
+    };
+  }, [companyOwnerId]);
 
   // Helper to save bill in an isolated, schema-safe way
   const dbSaveMonthlyBill = async (billId: string, name: string, value: number, category: string, dueDate: string, observation: string, userId: string): Promise<boolean> => {
@@ -275,7 +298,7 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
       );
 
       // Save to Supabase
-      if (currentUser) {
+      if (companyOwnerId) {
         dbSaveMonthlyBill(
           editingBillId,
           formName.trim(),
@@ -283,8 +306,9 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
           formCategory,
           formDueDate,
           formObservation.trim(),
-          currentUser.id
+          companyOwnerId
         );
+        notifyRealtimeSync(companyOwnerId, "gastos_mensais_updated", { billId: editingBillId });
       }
 
       showLocalToast("Gasto mensal atualizado com sucesso! 📝", "success");
@@ -303,7 +327,7 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
       setBills((prev) => [newBill, ...prev]);
 
       // Save to Supabase
-      if (currentUser) {
+      if (companyOwnerId) {
         dbSaveMonthlyBill(
           cleanId,
           formName.trim(),
@@ -311,8 +335,9 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
           formCategory,
           formDueDate,
           formObservation.trim(),
-          currentUser.id
+          companyOwnerId
         );
+        notifyRealtimeSync(companyOwnerId, "gastos_mensais_updated", { billId: cleanId });
       }
 
       showLocalToast("Gasto cadastrado! O formulário está pronto para o próximo cadastro. 💰", "success");
@@ -339,16 +364,19 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
     const deletedId = billToDelete.id;
 
     // Delete remotely from Supabase
-    if (currentUser) {
+    if (companyOwnerId) {
       const supabase = getSupabase();
       if (supabase) {
         supabase
           .from("gastos_mensais")
           .delete()
           .eq("id", deletedId)
+          .eq("user_id", companyOwnerId)
           .then(({ error }) => {
             if (error) {
               console.error("Erro ao deletar gasto mensal de Supabase:", error);
+            } else {
+              notifyRealtimeSync(companyOwnerId, "gastos_mensais_updated", { deletedId });
             }
           });
       }

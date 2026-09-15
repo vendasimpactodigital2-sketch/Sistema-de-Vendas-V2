@@ -38,7 +38,7 @@ import {
   Moon
 } from "lucide-react";
 import { CompanyProfile, User, CustomReminder, CashRegisterState, CashRegisterSession, BusinessHours } from "../types";
-import { dbExportAllData, dbImportAllData, dbGetCompanyProfile, isSupabaseConfigured, getAdminDomain, normalizeUserString } from "../supabase";
+import { dbExportAllData, dbImportAllData, dbGetCompanyProfile, isSupabaseConfigured, getAdminDomain, normalizeUserString, notifyRealtimeSync } from "../supabase";
 
 const WEEKDAYS = [
   { key: "monday", label: "Segunda-feira" },
@@ -588,72 +588,26 @@ export function CompanySettings({
         return;
       }
 
-      // Check if it's a LocalStorage key-value backup map (keys starting with NUCLEO_)
-      const keys = Object.keys(parsed);
-      const nucleoKeys = keys.filter(k => k.startsWith("NUCLEO_"));
-      const isLocalStorageDump = nucleoKeys.length > 0 && nucleoKeys.length >= (keys.length / 2);
+      // Unwrap if wrapped inside { data: ... } or { backup: ... }
+      const source = (parsed.data && typeof parsed.data === "object" && !Array.isArray(parsed.data)) ? parsed.data : 
+                     (parsed.backup && typeof parsed.backup === "object" && !Array.isArray(parsed.backup)) ? parsed.backup : parsed;
 
-      if (isLocalStorageDump) {
-        // Write all keys directly to localStorage
-        nucleoKeys.forEach((k) => {
-          try {
-            const val = typeof parsed[k] === "string" ? parsed[k] : JSON.stringify(parsed[k]);
-            localStorage.setItem(k, val);
-          } catch (e) {
-            console.warn("Erro ao salvar chave local de backup:", k, e);
-          }
-        });
-
-        // If user is connected to Supabase, extract and also sync sales, expenses, and products to Supabase
-        if (currentUser && isSupabaseConfigured()) {
-          const ownerId = currentUser.owner_id || currentUser.id;
-          let parsedSales: any[] = [];
-          let parsedExpenses: any[] = [];
-          let parsedProdutos: any[] = [];
-          let parsedGastosMensais: any[] = [];
-          let parsedClientes: any[] = [];
-          let parsedCompany: any = null;
-          let parsedGoals: any = null;
-
-          try { if (parsed["NUCLEO_SALES"]) parsedSales = JSON.parse(parsed["NUCLEO_SALES"]); } catch(e) {}
-          try { if (parsed["NUCLEO_EXPENSES"]) parsedExpenses = JSON.parse(parsed["NUCLEO_EXPENSES"]); } catch(e) {}
-          try { if (parsed["NUCLEO_PRODUCTS"]) parsedProdutos = JSON.parse(parsed["NUCLEO_PRODUCTS"]); } catch(e) {}
-          try { if (parsed["NUCLEO_RECURRING_EXPENSES"]) parsedGastosMensais = JSON.parse(parsed["NUCLEO_RECURRING_EXPENSES"]); } catch(e) {}
-          try { if (parsed["NUCLEO_CLIENTS"]) parsedClientes = JSON.parse(parsed["NUCLEO_CLIENTS"]); } catch(e) {}
-          try { if (parsed["NUCLEO_COMPANY_PROFILE"]) parsedCompany = JSON.parse(parsed["NUCLEO_COMPANY_PROFILE"]); } catch(e) {}
-          try { if (parsed["NUCLEO_GOALS"]) parsedGoals = JSON.parse(parsed["NUCLEO_GOALS"]); } catch(e) {}
-
-          if (parsedSales.length > 0 || parsedExpenses.length > 0 || parsedProdutos.length > 0) {
+      // Check for localStorageDump inside the backup or if the backup itself is a localStorage dump
+      const dumpCandidate = source.localStorageDump || (parsed.localStorageDump) || source;
+      if (dumpCandidate && typeof dumpCandidate === "object" && !Array.isArray(dumpCandidate)) {
+        Object.keys(dumpCandidate).forEach((k) => {
+          if (k.startsWith("NUCLEO_") || k.startsWith("COMPANY_")) {
             try {
-              await dbImportAllData(ownerId, {
-                sales: parsedSales,
-                expenses: parsedExpenses,
-                produtos: parsedProdutos,
-                gastos_mensais: parsedGastosMensais,
-                clientes: parsedClientes,
-                company_profile: parsedCompany,
-                goals: parsedGoals
-              });
-            } catch (dbErr) {
-              console.warn("Aviso ao sincronizar backup local com banco:", dbErr);
+              const val = typeof dumpCandidate[k] === "string" ? dumpCandidate[k] : JSON.stringify(dumpCandidate[k]);
+              localStorage.setItem(k, val);
+            } catch (e) {
+              console.warn("Aviso ao restaurar chave local:", k, e);
             }
           }
-        }
-
-        setBackupSuccessMsg(`Backup local carregado com sucesso! 🎉 ${nucleoKeys.length} blocos de dados restaurados no sistema.`);
-        
-        if (onRefreshData) {
-          await onRefreshData(currentUser || undefined, false, true);
-        }
-        setImporting(false);
-        return;
+        });
       }
 
-      // Unwrap if wrapped inside { data: ... } or { backup: ... }
-      const source = (parsed.data && typeof parsed.data === "object") ? parsed.data : 
-                     (parsed.backup && typeof parsed.backup === "object") ? parsed.backup : parsed;
-
-      // Normalize array or object structure
+      // Extract entities from all possible structures (arrays, camelCase, snake_case, pt/en)
       let sales: any[] = [];
       let produtos: any[] = [];
       let expenses: any[] = [];
@@ -661,9 +615,9 @@ export function CompanySettings({
       let clientes: any[] = [];
       let company_profile: any = null;
       let goals: any = null;
+      let cash_register_state: any = null;
 
       if (Array.isArray(source)) {
-        // Raw array of sales
         sales = source;
       } else if (typeof source === "object") {
         sales = Array.isArray(source.sales) ? source.sales : 
@@ -680,68 +634,99 @@ export function CompanySettings({
                    Array.isArray(source.clients) ? source.clients : [];
         company_profile = source.company_profile || source.empresa || null;
         goals = source.goals || source.metas || null;
+        cash_register_state = source.cash_register_state || source.cashRegister || null;
       }
 
-      const totalItemsFound = sales.length + produtos.length + expenses.length + gastos_mensais.length + clientes.length + (company_profile ? 1 : 0) + (goals ? 1 : 0);
-
-      if (totalItemsFound === 0) {
-        setBackupError("O arquivo de backup selecionado não contém registros válidos (vendas, produtos, gastos ou dados da empresa).");
-        setImporting(false);
-        return;
+      // Fallback: check localStorageDump for missing entities
+      if (dumpCandidate && typeof dumpCandidate === "object") {
+        try {
+          if (sales.length === 0 && dumpCandidate["NUCLEO_SALES"]) {
+            sales = typeof dumpCandidate["NUCLEO_SALES"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_SALES"]) : dumpCandidate["NUCLEO_SALES"];
+          }
+          if (produtos.length === 0 && dumpCandidate["NUCLEO_PRODUCTS"]) {
+            produtos = typeof dumpCandidate["NUCLEO_PRODUCTS"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_PRODUCTS"]) : dumpCandidate["NUCLEO_PRODUCTS"];
+          }
+          if (expenses.length === 0 && dumpCandidate["NUCLEO_EXPENSES"]) {
+            expenses = typeof dumpCandidate["NUCLEO_EXPENSES"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_EXPENSES"]) : dumpCandidate["NUCLEO_EXPENSES"];
+          }
+          if (gastos_mensais.length === 0 && dumpCandidate["NUCLEO_RECURRING_EXPENSES"]) {
+            gastos_mensais = typeof dumpCandidate["NUCLEO_RECURRING_EXPENSES"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_RECURRING_EXPENSES"]) : dumpCandidate["NUCLEO_RECURRING_EXPENSES"];
+          }
+          if (clientes.length === 0 && dumpCandidate["NUCLEO_CLIENTS"]) {
+            clientes = typeof dumpCandidate["NUCLEO_CLIENTS"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_CLIENTS"]) : dumpCandidate["NUCLEO_CLIENTS"];
+          }
+          if (!company_profile && dumpCandidate["NUCLEO_COMPANY_PROFILE"]) {
+            company_profile = typeof dumpCandidate["NUCLEO_COMPANY_PROFILE"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_COMPANY_PROFILE"]) : dumpCandidate["NUCLEO_COMPANY_PROFILE"];
+          }
+          if (!goals && dumpCandidate["NUCLEO_GOALS"]) {
+            goals = typeof dumpCandidate["NUCLEO_GOALS"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_GOALS"]) : dumpCandidate["NUCLEO_GOALS"];
+          }
+          if (!cash_register_state && dumpCandidate["NUCLEO_CASH_REGISTER"]) {
+            cash_register_state = typeof dumpCandidate["NUCLEO_CASH_REGISTER"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_CASH_REGISTER"]) : dumpCandidate["NUCLEO_CASH_REGISTER"];
+          }
+        } catch (dumpParseErr) {
+          console.warn("Aviso ao extrair entidades do dump local:", dumpParseErr);
+        }
       }
 
-      // 1. Immediately persist to localStorage fallbacks for offline resilience & immediate availability
-      if (sales.length > 0) {
-        localStorage.setItem("NUCLEO_SALES", JSON.stringify(sales));
-      }
-      if (expenses.length > 0) {
-        localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(expenses));
-      }
-      if (produtos.length > 0) {
-        localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(produtos));
-      }
-      if (gastos_mensais.length > 0) {
-        localStorage.setItem("NUCLEO_RECURRING_EXPENSES", JSON.stringify(gastos_mensais));
-      }
-      if (clientes.length > 0) {
-        localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(clientes));
-      }
-      if (company_profile) {
-        localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(company_profile));
-      }
-      if (goals) {
-        localStorage.setItem("NUCLEO_GOALS", JSON.stringify(goals));
-      }
+      // Immediately write primary entity keys to localStorage for offline readiness & speed
+      if (sales.length > 0) localStorage.setItem("NUCLEO_SALES", JSON.stringify(sales));
+      if (expenses.length > 0) localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(expenses));
+      if (produtos.length > 0) localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(produtos));
+      if (gastos_mensais.length > 0) localStorage.setItem("NUCLEO_RECURRING_EXPENSES", JSON.stringify(gastos_mensais));
+      if (clientes.length > 0) localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(clientes));
+      if (company_profile) localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(company_profile));
+      if (goals) localStorage.setItem("NUCLEO_GOALS", JSON.stringify(goals));
+      if (cash_register_state) localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(cash_register_state));
 
-      // 2. If connected to Supabase, import into remote database
-      if (currentUser && isSupabaseConfigured()) {
-        const ownerId = currentUser.owner_id || currentUser.id;
-        const res = await dbImportAllData(ownerId, {
-          sales,
-          produtos,
-          expenses,
-          gastos_mensais,
-          clientes,
-          company_profile,
-          goals
-        });
+      const ownerId = currentUser ? (currentUser.owner_id || currentUser.id) : "";
 
-        if (res.success) {
-          const report = `Backup restaurado com sucesso! 🎉\n` +
-            `• Vendas carregadas: ${res.counts.sales}\n` +
-            `• Produtos cadastrados: ${res.counts.produtos}\n` +
-            `• Despesas do fluxo: ${res.counts.expenses}\n` +
-            `• Clientes: ${res.counts.clientes}\n` +
-            `• Faturas fixas: ${res.counts.gastos_mensais}`;
-          setBackupSuccessMsg(report);
-        } else {
-          setBackupSuccessMsg(`Dados restaurados no sistema local (${sales.length} vendas, ${produtos.length} produtos, ${expenses.length} despesas). Aviso: ${res.error}`);
+      // Import to remote Supabase database if configured
+      if (ownerId && isSupabaseConfigured()) {
+        try {
+          const res = await dbImportAllData(ownerId, {
+            ...parsed,
+            sales,
+            produtos,
+            expenses,
+            gastos_mensais,
+            clientes,
+            company_profile,
+            goals,
+            cash_register_state,
+            localStorageDump: dumpCandidate
+          });
+
+          if (res.success) {
+            setBackupSuccessMsg(
+              `Backup restaurado com sucesso no sistema e em todos os terminais! 🎉\n` +
+              `• Vendas: ${res.counts.sales}\n` +
+              `• Produtos: ${res.counts.produtos}\n` +
+              `• Despesas: ${res.counts.expenses}\n` +
+              `• Clientes: ${res.counts.clientes}\n` +
+              `• Faturas fixas: ${res.counts.gastos_mensais}`
+            );
+          } else {
+            setBackupSuccessMsg(`Dados restaurados localmente (${sales.length} vendas, ${produtos.length} produtos, ${expenses.length} despesas). Aviso: ${res.error}`);
+          }
+        } catch (dbErr: any) {
+          console.warn("Aviso ao importar no banco:", dbErr);
+          setBackupSuccessMsg(`Backup restaurado localmente com ${sales.length} vendas e ${produtos.length} produtos.`);
         }
       } else {
-        setBackupSuccessMsg(`Backup carregado com sucesso no sistema! 🎉 (${sales.length} vendas, ${produtos.length} produtos, ${expenses.length} despesas prontas para uso).`);
+        setBackupSuccessMsg(`Backup restaurado com sucesso no sistema local! 🎉 (${sales.length} vendas, ${produtos.length} produtos, ${expenses.length} despesas prontas).`);
       }
 
-      // 3. Immediately trigger global state synchronization so everything appears instantly on screen!
+      // Broadcast real-time sync notification across all terminals and devices
+      if (ownerId) {
+        notifyRealtimeSync(ownerId, "backup_restored", { timestamp: Date.now() });
+      }
+
+      // Local browser window events for instant UI reactivity
+      window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: { event: "backup_restored" } }));
+      window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: { event: "backup_restored" } }));
+
+      // Refresh global app data immediately
       if (onRefreshData) {
         await onRefreshData(currentUser || undefined, false, true);
       }

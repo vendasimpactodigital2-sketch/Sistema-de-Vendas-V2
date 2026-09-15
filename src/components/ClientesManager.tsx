@@ -5,7 +5,7 @@ import {
   Calendar, DollarSign, ShoppingBag, TrendingUp, Wallet, AlertCircle, ShoppingCart,
   Printer, FileDown, CheckCircle2, Clock, AlertTriangle, Share2, Clipboard, Edit2
 } from "lucide-react";
-import { dbGetClientes, dbSaveCliente, dbDeleteCliente } from "../supabase";
+import { dbGetClientes, dbSaveCliente, dbDeleteCliente, notifyRealtimeSync } from "../supabase";
 import { jsPDF } from "jspdf";
 
 interface Cliente {
@@ -99,10 +99,12 @@ export const ClientesManager: React.FC<ClientesManagerProps> = ({
   const [newDeliveryDate, setNewDeliveryDate] = useState<string>("");
   const [newDeliveryReason, setNewDeliveryReason] = useState<string>("");
 
+  const companyOwnerId = currentUser?.owner_id || currentUser?.id || "";
+
   const fetchClientes = async () => {
     setLoading(true);
     try {
-      const data = await dbGetClientes();
+      const data = await dbGetClientes(companyOwnerId);
       if (data) {
         setClientes(data);
       } else {
@@ -120,7 +122,26 @@ export const ClientesManager: React.FC<ClientesManagerProps> = ({
     if (currentUser) {
       fetchClientes();
     }
-  }, [currentUser]);
+  }, [currentUser, companyOwnerId]);
+
+  // Real-time synchronization across all devices and terminals
+  useEffect(() => {
+    const handleRemoteSync = (e: any) => {
+      const detail = e.detail;
+      if (!detail || detail.event === "clients_updated" || detail.event === "backup_restored" || detail.event === "sync") {
+        fetchClientes();
+      }
+    };
+    window.addEventListener("clients_remote_sync", handleRemoteSync);
+    window.addEventListener("backup_restored_sync", handleRemoteSync);
+    window.addEventListener("app_remote_sync", handleRemoteSync);
+
+    return () => {
+      window.removeEventListener("clients_remote_sync", handleRemoteSync);
+      window.removeEventListener("backup_restored_sync", handleRemoteSync);
+      window.removeEventListener("app_remote_sync", handleRemoteSync);
+    };
+  }, [companyOwnerId]);
 
   const handleClearForm = () => {
     setIsEditing(false);
@@ -164,12 +185,13 @@ export const ClientesManager: React.FC<ClientesManagerProps> = ({
     }
 
     try {
-      const success = await dbSaveCliente(payload);
+      const success = await dbSaveCliente(payload, companyOwnerId);
       if (success) {
         addToast(
           (isEditing && !editingId?.startsWith("virtual_")) ? "Cliente atualizado com sucesso!" : "Cliente cadastrado permanentemente!", 
           "success"
         );
+        notifyRealtimeSync(companyOwnerId, "clients_updated", { id: payload.id });
         handleClearForm();
         await fetchClientes();
         // Update selectedCliente details if currently open
@@ -207,9 +229,10 @@ export const ClientesManager: React.FC<ClientesManagerProps> = ({
     }
 
     try {
-      const success = await dbDeleteCliente(id);
+      const success = await dbDeleteCliente(id, companyOwnerId);
       if (success) {
         addToast("Cliente excluído com sucesso!", "success");
+        notifyRealtimeSync(companyOwnerId, "clients_updated", { deletedId: id });
         await fetchClientes();
         if (editingId === id) {
           handleClearForm();

@@ -1536,63 +1536,103 @@ export function parseClientImages(clientImage: string | null): string[] {
 }
 
 // ==========================================
-// BULK DATA BACKUP & RESTORE SERVICES
+// BULK DATA BACKUP & RESTORE SERVICES & REALTIME SYNC
 // ==========================================
 
+/**
+ * Universal real-time notification engine for instant multi-terminal synchronization.
+ * Broadcasts to SSE stream endpoint (/api/realtime/notify), Supabase Realtime channel, and local window events.
+ */
+export async function notifyRealtimeSync(
+  companyId: string,
+  event: string,
+  data?: any
+): Promise<void> {
+  const safeCompanyId = companyId || "global";
+  const payload = { companyId: safeCompanyId, event, data, timestamp: Date.now() };
+
+  // 1. Post to Server-Sent Events (SSE) stream endpoint to notify all connected terminals
+  try {
+    fetch("/api/realtime/notify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).catch((e) => console.warn("[Realtime Notify] SSE fetch warning:", e));
+  } catch (e) {
+    // ignore
+  }
+
+  // 2. Broadcast via Supabase Realtime channel if available
+  try {
+    const supabase = getSupabase();
+    if (supabase) {
+      const channel = supabase.channel("multi-terminal-sync");
+      channel.send({
+        type: "broadcast",
+        event: event,
+        payload
+      }).catch(() => {});
+      channel.send({
+        type: "broadcast",
+        event: "sync_broadcast",
+        payload
+      }).catch(() => {});
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // 3. Local window dispatch for same-window / tabs reactivity
+  try {
+    window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: payload }));
+  } catch (e) {}
+}
+
 export async function dbExportAllData(ownerId: string): Promise<{
-  produtos: any[];
-  sales: any[];
-  expenses: any[];
-  gastos_mensais: any[];
-  clientes: any[];
+  backup_type: string;
+  schema_version: string;
+  exported_at: string;
   company_profile: any | null;
   goals: any | null;
-  exported_at: string;
-  schema_version: string;
+  sales: any[];
+  budgets: any[];
+  expenses: any[];
+  produtos: any[];
+  gastos_mensais: any[];
+  clientes: any[];
+  cash_register: any | null;
+  sessoes_caixa: any[];
+  localStorageDump: Record<string, string>;
 } | null> {
   const supabase = getSupabase();
-  if (!supabase) return null;
 
   try {
     const fetchTableSafe = async (tableName: string, isSingle = false) => {
+      if (!supabase) return isSingle ? null : [];
       try {
         const query = supabase.from(tableName).select("*").eq("user_id", ownerId);
         const { data, error } = isSingle ? await query.maybeSingle() : await query;
         if (error) {
-          console.warn(`[dbExportAllData] Safe fetch failed for table: ${tableName}`, error.message);
-          if (tableName === "clientes") {
-            try {
-              const fallback = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + ownerId) || "[]";
-              return JSON.parse(fallback);
-            } catch (e) {
-              return [];
-            }
-          }
+          console.warn(`[dbExportAllData] Fetch note for ${tableName}:`, error.message);
           return isSingle ? null : [];
         }
         return data || (isSingle ? null : []);
       } catch (e: any) {
-        console.warn(`[dbExportAllData] Safe fetch exception for table: ${tableName}`, e.message || e);
-        if (tableName === "clientes") {
-          try {
-            const fallback = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + ownerId) || "[]";
-            return JSON.parse(fallback);
-          } catch (err) {
-            return [];
-          }
-        }
+        console.warn(`[dbExportAllData] Exception fetching ${tableName}:`, e.message || e);
         return isSingle ? null : [];
       }
     };
 
+    // 1. Fetch remote tables in parallel
     const [
-      produtos,
-      salesRaw,
-      expenses,
-      gastos_mensais,
-      clientes,
-      company_profile,
-      goals
+      produtosRemote,
+      salesRawRemote,
+      expensesRemote,
+      gastosMensaisRemote,
+      clientesRemote,
+      companyProfileRemote,
+      goalsRemote,
+      sessoesCaixaRemote
     ] = await Promise.all([
       fetchTableSafe("produtos"),
       fetchTableSafe("sales"),
@@ -1600,22 +1640,131 @@ export async function dbExportAllData(ownerId: string): Promise<{
       fetchTableSafe("gastos_mensais"),
       fetchTableSafe("clientes"),
       fetchTableSafe("company_profile", true),
-      fetchTableSafe("goals", true)
+      fetchTableSafe("goals", true),
+      fetchTableSafe("sessoes_caixa")
     ]);
 
+    // 2. Extract and merge local storage data so offline or un-synced data is NEVER lost
+    let localSales: any[] = [];
+    let localBudgets: any[] = [];
+    let localExpenses: any[] = [];
+    let localProducts: any[] = [];
+    let localBills: any[] = [];
+    let localClients: any[] = [];
+    let localCompany: any = null;
+    let localGoals: any = null;
+    let localCashRegister: any = null;
+    const localStorageDump: Record<string, string> = {};
+
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith("NUCLEO_") || key.startsWith("nexvolt_"))) {
+          const val = localStorage.getItem(key);
+          if (val) localStorageDump[key] = val;
+        }
+      }
+
+      if (localStorageDump["NUCLEO_SALES"]) {
+        localSales = JSON.parse(localStorageDump["NUCLEO_SALES"]);
+      }
+      if (localStorageDump["NUCLEO_BUDGETS"]) {
+        localBudgets = JSON.parse(localStorageDump["NUCLEO_BUDGETS"]);
+      }
+      if (localStorageDump["NUCLEO_EXPENSES"]) {
+        localExpenses = JSON.parse(localStorageDump["NUCLEO_EXPENSES"]);
+      }
+      if (localStorageDump["NUCLEO_PRODUCTS"]) {
+        localProducts = JSON.parse(localStorageDump["NUCLEO_PRODUCTS"]);
+      }
+      if (localStorageDump["NUCLEO_CARDAPIO_ITEMS"]) {
+        const cardapio = JSON.parse(localStorageDump["NUCLEO_CARDAPIO_ITEMS"]);
+        if (Array.isArray(cardapio)) localProducts = [...localProducts, ...cardapio];
+      }
+      if (localStorageDump["NUCLEO_MONTHLY_BILLS"]) {
+        localBills = JSON.parse(localStorageDump["NUCLEO_MONTHLY_BILLS"]);
+      } else if (localStorageDump["NUCLEO_RECURRING_EXPENSES"]) {
+        localBills = JSON.parse(localStorageDump["NUCLEO_RECURRING_EXPENSES"]);
+      }
+      if (localStorageDump["NUCLEO_CLIENTS"]) {
+        localClients = JSON.parse(localStorageDump["NUCLEO_CLIENTS"]);
+      }
+      const fallbackClientKey = "NUCLEO_CLIENTS_FALLBACK_" + ownerId;
+      if (localStorageDump[fallbackClientKey]) {
+        try {
+          const fb = JSON.parse(localStorageDump[fallbackClientKey]);
+          if (Array.isArray(fb)) localClients = [...localClients, ...fb];
+        } catch (e) {}
+      }
+      if (localStorageDump["NUCLEO_COMPANY_PROFILE"]) {
+        localCompany = JSON.parse(localStorageDump["NUCLEO_COMPANY_PROFILE"]);
+      }
+      if (localStorageDump["NUCLEO_CASH_REGISTER"]) {
+        localCashRegister = JSON.parse(localStorageDump["NUCLEO_CASH_REGISTER"]);
+      }
+      if (localStorageDump["NUCLEO_GOALS"]) {
+        localGoals = JSON.parse(localStorageDump["NUCLEO_GOALS"]);
+      }
+    } catch (err) {
+      console.warn("[dbExportAllData] Local storage extraction warning:", err);
+    }
+
+    // 3. Intelligent Deduplication and Normalization (remote + local)
+    // Helper to deduplicate by ID
+    const mergeDeduplicate = (remoteList: any[], localList: any[]): any[] => {
+      const map = new Map<string, any>();
+      (remoteList || []).forEach(item => {
+        if (item && item.id) map.set(item.id, item);
+      });
+      (localList || []).forEach(item => {
+        if (item && item.id) {
+          if (!map.has(item.id)) {
+            map.set(item.id, item);
+          } else {
+            // merge properties so neither side loses data
+            map.set(item.id, { ...map.get(item.id), ...item });
+          }
+        }
+      });
+      return Array.from(map.values());
+    };
+
+    // Filter out internal system rows from sales
+    const cleanSalesRemote = (salesRawRemote || []).filter(
+      (d: any) => d && d.id !== "quick_sales_config" && !d.id.startsWith("cash_register_state") && !d.id.startsWith("deletion_audit_log")
+    );
+
+    const mergedSales = mergeDeduplicate(cleanSalesRemote, localSales);
+    const mergedExpenses = mergeDeduplicate(expensesRemote || [], localExpenses);
+    const mergedProducts = mergeDeduplicate(produtosRemote || [], localProducts);
+    const mergedBills = mergeDeduplicate(gastosMensaisRemote || [], localBills);
+    const mergedClients = mergeDeduplicate(clientesRemote || [], localClients);
+    const mergedBudgets = mergeDeduplicate(
+      mergedSales.filter((s: any) => s.isBudget || s.is_budget),
+      localBudgets
+    );
+
+    const finalCompany = companyProfileRemote || localCompany;
+    const finalGoals = goalsRemote || localGoals;
+
     return {
-      produtos: produtos || [],
-      sales: (salesRaw || []).filter((d: any) => d.id !== "quick_sales_config" && !d.id.startsWith("cash_register_state") && !d.id.startsWith("deletion_audit_log")),
-      expenses: expenses || [],
-      gastos_mensais: gastos_mensais || [],
-      clientes: clientes || [],
-      company_profile: company_profile || null,
-      goals: goals || null,
+      backup_type: "full_system_backup",
+      schema_version: "2.0.0",
       exported_at: new Date().toISOString(),
-      schema_version: "1.0.0"
+      company_profile: finalCompany,
+      goals: finalGoals,
+      sales: mergedSales,
+      budgets: mergedBudgets,
+      expenses: mergedExpenses,
+      produtos: mergedProducts,
+      gastos_mensais: mergedBills,
+      clientes: mergedClients,
+      cash_register: localCashRegister,
+      sessoes_caixa: sessoesCaixaRemote || [],
+      localStorageDump
     };
   } catch (err) {
-    console.error("Error exporting all data from Supabase:", err);
+    console.error("Error exporting all data:", err);
     return null;
   }
 }
@@ -1625,11 +1774,15 @@ export async function dbImportAllData(
   backupData: {
     produtos?: any[];
     sales?: any[];
+    budgets?: any[];
     expenses?: any[];
     gastos_mensais?: any[];
     clientes?: any[];
     company_profile?: any;
     goals?: any;
+    cash_register?: any;
+    sessoes_caixa?: any[];
+    localStorageDump?: Record<string, string>;
   }
 ): Promise<{
   success: boolean;
@@ -1637,152 +1790,503 @@ export async function dbImportAllData(
   counts: {
     produtos: number;
     sales: number;
+    budgets: number;
     expenses: number;
     gastos_mensais: number;
     clientes: number;
     company_profile: boolean;
     goals: boolean;
+    cash_register: boolean;
   };
 }> {
-  const supabase = getSupabase();
-  if (!supabase) {
-    return {
-      success: false,
-      error: "Supabase não disponível",
-      counts: { produtos: 0, sales: 0, expenses: 0, gastos_mensais: 0, clientes: 0, company_profile: false, goals: false }
-    };
-  }
-
   const counts = {
     produtos: 0,
     sales: 0,
+    budgets: 0,
     expenses: 0,
     gastos_mensais: 0,
     clientes: 0,
     company_profile: false,
-    goals: false
+    goals: false,
+    cash_register: false
   };
 
+  const supabase = getSupabase();
+
   try {
-    // 1. Restore Company Profile (upsert is fine for singletons)
+    // 0. Unpack full LocalStorage dump first if present to seed the new PC with all application configurations
+    if (backupData.localStorageDump && typeof backupData.localStorageDump === "object") {
+      try {
+        Object.entries(backupData.localStorageDump).forEach(([key, value]) => {
+          if (key && value && typeof value === "string") {
+            try {
+              localStorage.setItem(key, value);
+            } catch (e) {}
+          }
+        });
+      } catch (e) {
+        console.warn("Aviso ao desembalar LocalStorageDump:", e);
+      }
+    }
+
+    // 1. Restore Company Profile
     if (backupData.company_profile) {
-      const mappedProfile = { ...backupData.company_profile, user_id: currentOwnerId };
-      const { error: err } = await supabase.from("company_profile").upsert(mappedProfile);
-      if (err) throw new Error(`Erro ao importar empresa: ${err.message}`);
+      const companyPayload = { ...backupData.company_profile, user_id: currentOwnerId };
+      try {
+        localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(backupData.company_profile));
+      } catch (e) {}
+
+      if (supabase) {
+        try {
+          const { error: err } = await supabase.from("company_profile").upsert(companyPayload);
+          if (err) console.warn("Supabase company_profile upsert note:", err.message);
+        } catch (e) {}
+      }
       counts.company_profile = true;
     }
 
-    // 2. Restore Goals (upsert is fine for singletons)
+    // 2. Restore Goals
     if (backupData.goals) {
-      const mappedGoals = { ...backupData.goals, user_id: currentOwnerId };
-      const { error: err } = await supabase.from("goals").upsert(mappedGoals);
-      if (err) throw new Error(`Erro ao importar metas: ${err.message}`);
+      const goalsPayload = { ...backupData.goals, user_id: currentOwnerId };
+      try {
+        localStorage.setItem("NUCLEO_GOALS", JSON.stringify(backupData.goals));
+      } catch (e) {}
+
+      if (supabase) {
+        try {
+          const { error: err } = await supabase.from("goals").upsert(goalsPayload);
+          if (err) console.warn("Supabase goals upsert note:", err.message);
+        } catch (e) {}
+      }
       counts.goals = true;
     }
 
-    // 3. Restore Clientes (Clear slate first, then bulk insert)
-    if (Array.isArray(backupData.clientes)) {
+    // 3. Restore Clientes (normalize and persist to both LocalStorage and Supabase)
+    if (Array.isArray(backupData.clientes) && backupData.clientes.length > 0) {
+      const normalizedClientes = backupData.clientes.map((c: any) => {
+        const id = c.id || "client_" + Math.random().toString(36).substring(2, 9);
+        return {
+          id,
+          user_id: currentOwnerId,
+          name: c.name || c.nome || "Cliente Sem Nome",
+          phone: c.phone || c.telefone || "",
+          email: c.email || "",
+          address: c.address || c.endereco || "",
+          notes: c.notes || c.observacao || c.observation || "",
+          cpf_cnpj: c.cpf_cnpj || c.cpfCnpj || "",
+          created_at: c.created_at || c.createdAt || new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+      });
+
+      // Save locally
       try {
-        const { error: delErr } = await supabase.from("clientes").delete().eq("user_id", currentOwnerId);
-        if (delErr) {
-          console.warn("Aviso ao limpar clientes na tabela remota:", delErr.message);
-        }
-        
-        if (backupData.clientes.length > 0) {
-          const mappedC = backupData.clientes.map((c: any) => {
-            const { user_id, ...rest } = c;
-            return { ...rest, user_id: currentOwnerId };
-          });
-          const { error: err } = await supabase.from("clientes").insert(mappedC);
-          if (err) {
-            console.warn("Erro ao inserir clientes na tabela remota, salvando no fallback local:", err.message);
-            localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + currentOwnerId, JSON.stringify(mappedC));
+        localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(normalizedClientes));
+        localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + currentOwnerId, JSON.stringify(normalizedClientes));
+      } catch (e) {}
+
+      // Save to Supabase
+      if (supabase) {
+        try {
+          await supabase.from("clientes").delete().eq("user_id", currentOwnerId);
+          for (const item of normalizedClientes) {
+            try {
+              await supabase.from("clientes").upsert(item);
+            } catch (e) {}
           }
-        } else {
-          localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + currentOwnerId, "[]");
+        } catch (e) {
+          console.warn("Supabase clientes import note:", e);
         }
-      } catch (e: any) {
-        console.warn("Exception ao restaurar clientes na tabela remota, salvando no fallback local:", e.message || e);
-        const mappedC = backupData.clientes.map((c: any) => {
-          const { user_id, ...rest } = c;
-          return { ...rest, user_id: currentOwnerId };
-        });
-        localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + currentOwnerId, JSON.stringify(mappedC));
       }
-      counts.clientes = backupData.clientes.length;
+      counts.clientes = normalizedClientes.length;
     }
 
-    // 4. Restore Produtos (Clear slate first, then bulk insert)
-    if (Array.isArray(backupData.produtos)) {
-      const { error: delErr } = await supabase.from("produtos").delete().eq("user_id", currentOwnerId);
-      if (delErr) console.warn("Aviso ao limpar produtos:", delErr.message);
+    // 4. Restore Produtos (normalize camelCase/snake_case to PT database schema + LocalStorage)
+    if (Array.isArray(backupData.produtos) && backupData.produtos.length > 0) {
+      const normalizedProducts: any[] = [];
+      const localProducts: any[] = [];
 
-      if (backupData.produtos.length > 0) {
-        const mappedP = backupData.produtos.map((p: any) => {
-          const { user_id, ...rest } = p;
-          return { ...rest, user_id: currentOwnerId };
+      backupData.produtos.forEach((p: any) => {
+        const id = p.id || "prod_" + Math.random().toString(36).substring(2, 9);
+        const name = p.name || p.nome || p.description || p.descricao || "Produto";
+        const cost = Number(p.costPrice ?? p.cost_price ?? p.preco_custo ?? p.valor_custo ?? 0);
+        const sale = Number(p.salePrice ?? p.sale_price ?? p.preco_venda ?? p.valor_venda ?? 0);
+        const minStock = Number(p.minStock ?? p.min_stock ?? p.estoque_minimo ?? 0);
+        const currentStock = Number(p.currentStock ?? p.current_stock ?? p.estoque_atual ?? 0);
+        const profit = sale - cost;
+
+        localProducts.push({
+          id,
+          description: name,
+          name,
+          costPrice: cost,
+          salePrice: sale,
+          profit,
+          minStock,
+          currentStock
         });
-        const { error: err } = await supabase.from("produtos").insert(mappedP);
-        if (err) throw new Error(`Erro ao importar produtos: ${err.message}`);
+
+        // PT-Snake payload for standard database
+        normalizedProducts.push({
+          id,
+          user_id: currentOwnerId,
+          nome: name,
+          description: name,
+          preco_custo: cost,
+          preco_venda: sale,
+          lucro: profit,
+          estoque_minimo: minStock,
+          estoque_atual: currentStock
+        });
+      });
+
+      // Save locally
+      try {
+        localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(localProducts));
+      } catch (e) {}
+
+      // Save to Supabase
+      if (supabase) {
+        try {
+          await supabase.from("produtos").delete().eq("user_id", currentOwnerId);
+          for (const item of normalizedProducts) {
+            const { error: ptErr } = await supabase.from("produtos").upsert(item);
+            if (ptErr) {
+              // Try EN schema fallback if PT fails
+              try {
+                await supabase.from("produtos").upsert({
+                  id: item.id,
+                  user_id: currentOwnerId,
+                  name: item.nome,
+                  description: item.nome,
+                  cost_price: item.preco_custo,
+                  sale_price: item.preco_venda,
+                  profit: item.lucro,
+                  min_stock: item.estoque_minimo,
+                  current_stock: item.estoque_atual
+                });
+              } catch (e) {}
+            }
+          }
+        } catch (e) {
+          console.warn("Supabase produtos import note:", e);
+        }
       }
-      counts.produtos = backupData.produtos.length;
+      counts.produtos = localProducts.length;
     }
 
-    // 5. Restore Sales (Clear slate first, then bulk insert)
-    if (Array.isArray(backupData.sales)) {
-      // Don't delete quick_sales_config or cash_register_state if we want to keep configuration settings,
-      // but standard sales are deleted. Let's delete all except those configurations, or just clean standard sales.
-      // Since quick_sales_config and cash_register_state have specific IDs:
-      const { error: delErr } = await supabase
-        .from("sales")
-        .delete()
-        .eq("user_id", currentOwnerId)
-        .not("id", "in", '("quick_sales_config","cash_register_state")')
-        .not("id", "like", "cash_register_state%");
-      if (delErr) console.warn("Aviso ao limpar vendas:", delErr.message);
+    // 5. Restore Sales & Budgets (normalize camelCase to snake_case database schema + LocalStorage)
+    const rawSales = Array.isArray(backupData.sales) ? backupData.sales : [];
+    const rawBudgets = Array.isArray(backupData.budgets) ? backupData.budgets : [];
+    const allSalesToProcess = [...rawSales];
 
-      if (backupData.sales.length > 0) {
-        const mappedS = backupData.sales.map((s: any) => {
-          const { user_id, ...rest } = s;
-          return { ...rest, user_id: currentOwnerId };
-        });
-        const { error: err } = await supabase.from("sales").insert(mappedS);
-        if (err) throw new Error(`Erro ao importar vendas: ${err.message}`);
+    // Ensure budgets are also present in sales list with isBudget: true
+    rawBudgets.forEach((b: any) => {
+      if (!allSalesToProcess.some((s: any) => s.id === b.id)) {
+        allSalesToProcess.push({ ...b, isBudget: true, is_budget: true });
       }
-      counts.sales = backupData.sales.length;
+    });
+
+    if (allSalesToProcess.length > 0) {
+      const cleanSalesForLocal: any[] = [];
+      const cleanBudgetsForLocal: any[] = [];
+      const normalizedSalesForDb: any[] = [];
+
+      allSalesToProcess.forEach((s: any) => {
+        if (!s || !s.id || s.id === "quick_sales_config" || s.id.startsWith("cash_register_state")) return;
+
+        const isBudget = !!(s.isBudget || s.is_budget);
+        const id = s.id;
+        const date = s.date || new Date().toISOString();
+        const clientName = s.clientName || s.client_name || "Cliente";
+        let clientPhone = s.clientPhone || s.client_phone || "";
+        const items = Array.isArray(s.items) ? s.items : [];
+        const useMotoboy = !!(s.useMotoboy || s.use_motoboy);
+        const motoboyCost = Number(s.motoboyCost ?? s.motoboy_cost ?? 0);
+        const discount = Number(s.discount ?? 0);
+        const downPayment = Number(s.downPayment ?? s.down_payment ?? 0);
+        const operationCost = Number(s.operationCost ?? s.operation_cost ?? 0);
+        const costItems = Array.isArray(s.costItems) ? s.costItems : (Array.isArray(s.cost_items) ? s.cost_items : []);
+        const totalValue = Number(s.totalValue ?? s.total_value ?? 0);
+        const balanceDue = Number(s.balanceDue ?? s.balance_due ?? 0);
+        const netProfit = Number(s.netProfit ?? s.net_profit ?? 0);
+        const clientImage = s.clientImage || s.client_image || "";
+        const paymentMethod = s.paymentMethod || s.payment_method || "dinheiro";
+
+        // Preserve metadata in clientPhone (e.g. seller, orderDate, payments)
+        const metaObj: any = {
+          orderDate: s.orderDate || "",
+          deliveryDate: s.deliveryDate || "",
+          deliveryReason: s.deliveryReason || "",
+          payments: s.payments || [],
+          materialEntregue: !!s.materialEntregue,
+          sellerId: s.sellerId || "",
+          sellerName: s.sellerName || "",
+          sellerRole: s.sellerRole || undefined,
+          deliveredBy: s.deliveredBy || "",
+          deliveredAt: s.deliveredAt || "",
+          deliveredRole: s.deliveredRole || undefined,
+          auditLog: s.auditLog || []
+        };
+        const purePhone = clientPhone.includes("::") ? clientPhone.split("::")[0] : clientPhone;
+        const phoneWithMeta = `${purePhone}::${JSON.stringify(metaObj)}`;
+
+        const localSaleObj = {
+          id,
+          date,
+          clientName,
+          clientPhone: purePhone,
+          orderDate: metaObj.orderDate,
+          deliveryDate: metaObj.deliveryDate,
+          deliveryReason: metaObj.deliveryReason,
+          payments: metaObj.payments,
+          materialEntregue: metaObj.materialEntregue,
+          sellerId: metaObj.sellerId,
+          sellerName: metaObj.sellerName,
+          sellerRole: metaObj.sellerRole,
+          deliveredBy: metaObj.deliveredBy,
+          deliveredAt: metaObj.deliveredAt,
+          deliveredRole: metaObj.deliveredRole,
+          auditLog: metaObj.auditLog,
+          items,
+          useMotoboy,
+          motoboyCost,
+          discount,
+          downPayment,
+          operationCost,
+          costItems,
+          totalValue,
+          balanceDue,
+          netProfit,
+          clientImage,
+          paymentMethod,
+          isBudget
+        };
+
+        if (isBudget) {
+          cleanBudgetsForLocal.push(localSaleObj);
+        } else {
+          cleanSalesForLocal.push(localSaleObj);
+        }
+
+        // Database payload (snake_case)
+        normalizedSalesForDb.push({
+          id,
+          user_id: currentOwnerId,
+          client_name: clientName,
+          client_phone: phoneWithMeta,
+          items,
+          use_motoboy: useMotoboy,
+          motoboy_cost: motoboyCost,
+          discount,
+          down_payment: downPayment,
+          operation_cost: operationCost,
+          cost_items: costItems,
+          total_value: totalValue,
+          balance_due: balanceDue,
+          net_profit: netProfit,
+          client_image: clientImage,
+          date,
+          is_budget: isBudget,
+          payment_method: paymentMethod
+        });
+      });
+
+      // Save locally
+      try {
+        localStorage.setItem("NUCLEO_SALES", JSON.stringify(cleanSalesForLocal));
+        localStorage.setItem("NUCLEO_BUDGETS", JSON.stringify(cleanBudgetsForLocal));
+      } catch (e) {}
+
+      // Save to Supabase (row-by-row upsert to prevent partial failures)
+      if (supabase) {
+        try {
+          for (const sPayload of normalizedSalesForDb) {
+            const { error: sErr } = await supabase.from("sales").upsert(sPayload);
+            if (sErr) {
+              // Try without payment_method column if column not present
+              try {
+                const { payment_method, ...fallbackPayload } = sPayload;
+                await supabase.from("sales").upsert(fallbackPayload);
+              } catch (e) {}
+            }
+          }
+        } catch (e) {
+          console.warn("Supabase sales import note:", e);
+        }
+      }
+
+      counts.sales = cleanSalesForLocal.length;
+      counts.budgets = cleanBudgetsForLocal.length;
     }
 
-    // 6. Restore Expenses (Clear slate first, then bulk insert)
-    if (Array.isArray(backupData.expenses)) {
-      const { error: delErr } = await supabase.from("expenses").delete().eq("user_id", currentOwnerId);
-      if (delErr) console.warn("Aviso ao limpar despesas:", delErr.message);
+    // 6. Restore Expenses (normalize camelCase to snake_case database schema + LocalStorage)
+    if (Array.isArray(backupData.expenses) && backupData.expenses.length > 0) {
+      const localExpenses: any[] = [];
+      const normalizedExpensesForDb: any[] = [];
 
-      if (backupData.expenses.length > 0) {
-        const mappedE = backupData.expenses.map((e: any) => {
-          const { user_id, ...rest } = e;
-          return { ...rest, user_id: currentOwnerId };
+      backupData.expenses.forEach((e: any) => {
+        if (!e || !e.id) return;
+        const id = e.id;
+        const date = e.date || new Date().toISOString();
+        const description = e.description || e.descricao || "Despesa";
+        const category = e.category || e.categoria || "Geral";
+        const value = Number(e.value ?? e.valor ?? 0);
+        const observation = e.observation || e.observacao || "";
+        const receiptUrls = e.receiptUrls || e.receipt_urls || [];
+        const isRecurring = !!(e.isRecurring || e.is_recurring);
+        const isFixedCost = !!(e.isFixedCost || e.is_fixed_cost);
+
+        localExpenses.push({
+          id,
+          date,
+          description,
+          category,
+          value,
+          observation,
+          receiptUrls,
+          isRecurring,
+          isFixedCost
         });
-        const { error: err } = await supabase.from("expenses").insert(mappedE);
-        if (err) throw new Error(`Erro ao importar despesas: ${err.message}`);
+
+        normalizedExpensesForDb.push({
+          id,
+          user_id: currentOwnerId,
+          date,
+          description,
+          category,
+          value,
+          observation,
+          receipt_urls: receiptUrls,
+          is_recurring: isRecurring,
+          is_fixed_cost: isFixedCost
+        });
+      });
+
+      // Save locally
+      try {
+        localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(localExpenses));
+      } catch (e) {}
+
+      // Save to Supabase
+      if (supabase) {
+        try {
+          for (const ePayload of normalizedExpensesForDb) {
+            const { error: eErr } = await supabase.from("expenses").upsert(ePayload);
+            if (eErr) {
+              // Fallback without receipt_urls / fixed cost columns
+              try {
+                await supabase.from("expenses").upsert({
+                  id: ePayload.id,
+                  user_id: currentOwnerId,
+                  date: ePayload.date,
+                  description: ePayload.description,
+                  category: ePayload.category,
+                  value: ePayload.value,
+                  observation: ePayload.observation
+                });
+              } catch (e) {}
+            }
+          }
+        } catch (e) {
+          console.warn("Supabase expenses import note:", e);
+        }
       }
-      counts.expenses = backupData.expenses.length;
+      counts.expenses = localExpenses.length;
     }
 
-    // 7. Restore Gastos Mensais (Clear slate first, then bulk insert)
-    if (Array.isArray(backupData.gastos_mensais)) {
-      const { error: delErr } = await supabase.from("gastos_mensais").delete().eq("user_id", currentOwnerId);
-      if (delErr) console.warn("Aviso ao limpar gastos mensais:", delErr.message);
+    // 7. Restore Gastos Mensais (normalize schema + LocalStorage)
+    if (Array.isArray(backupData.gastos_mensais) && backupData.gastos_mensais.length > 0) {
+      const localBills: any[] = [];
+      const normalizedBillsForDb: any[] = [];
 
-      if (backupData.gastos_mensais.length > 0) {
-        const mappedG = backupData.gastos_mensais.map((g: any) => {
-          const { user_id, ...rest } = g;
-          return { ...rest, user_id: currentOwnerId };
+      backupData.gastos_mensais.forEach((g: any) => {
+        if (!g || !g.id) return;
+        const id = g.id;
+        const name = g.name || g.nome || g.description || g.titulo || "Fatura";
+        const value = Number(g.value ?? g.valor ?? 0);
+        const category = g.category || g.categoria || "Outros";
+        const dueDate = g.dueDate || g.due_date || g.vencimento || "";
+        const observation = g.observation || g.observacao || "";
+
+        localBills.push({
+          id,
+          name,
+          value,
+          category,
+          dueDate,
+          observation
         });
-        const { error: err } = await supabase.from("gastos_mensais").insert(mappedG);
-        if (err) throw new Error(`Erro ao importar gastos mensais: ${err.message}`);
+
+        normalizedBillsForDb.push({
+          id,
+          user_id: currentOwnerId,
+          name,
+          value,
+          category,
+          due_date: dueDate,
+          observation
+        });
+      });
+
+      // Save locally
+      try {
+        localStorage.setItem("NUCLEO_MONTHLY_BILLS", JSON.stringify(localBills));
+        localStorage.setItem("NUCLEO_RECURRING_EXPENSES", JSON.stringify(localBills));
+      } catch (e) {}
+
+      // Save to Supabase
+      if (supabase) {
+        try {
+          for (const gPayload of normalizedBillsForDb) {
+            const { error: gErr } = await supabase.from("gastos_mensais").upsert(gPayload);
+            if (gErr) {
+              // Try PT schema fallback
+              try {
+                await supabase.from("gastos_mensais").upsert({
+                  id: gPayload.id,
+                  user_id: currentOwnerId,
+                  nome: gPayload.name,
+                  valor: gPayload.value,
+                  categoria: gPayload.category,
+                  vencimento: gPayload.due_date,
+                  observacao: gPayload.observation
+                });
+              } catch (e) {}
+            }
+          }
+        } catch (e) {
+          console.warn("Supabase gastos_mensais import note:", e);
+        }
       }
-      counts.gastos_mensais = backupData.gastos_mensais.length;
+      counts.gastos_mensais = localBills.length;
     }
+
+    // 8. Restore Cash Register (state and session history)
+    if (backupData.cash_register || (Array.isArray(backupData.sessoes_caixa) && backupData.sessoes_caixa.length > 0)) {
+      try {
+        let registerState = backupData.cash_register;
+        if (!registerState && Array.isArray(backupData.sessoes_caixa)) {
+          const openSession = backupData.sessoes_caixa.find((s: any) => s.status === "aberto");
+          registerState = {
+            currentSession: openSession || null,
+            history: backupData.sessoes_caixa
+          };
+        }
+        if (registerState) {
+          localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(registerState));
+          if (supabase) {
+            dbSaveCashRegister(currentOwnerId, registerState).catch(() => {});
+          }
+          counts.cash_register = true;
+        }
+      } catch (e) {
+        console.warn("Aviso ao restaurar estado do caixa:", e);
+      }
+    }
+
+    // 9. Instant Multi-Terminal Broadcast to all devices via realtime
+    notifyRealtimeSync(currentOwnerId, "backup_restored", counts);
 
     return {
       success: true,
@@ -1790,7 +2294,7 @@ export async function dbImportAllData(
       counts
     };
   } catch (err: any) {
-    console.error("Error importing backup metadata into Supabase:", err);
+    console.error("Error importing backup metadata:", err);
     return {
       success: false,
       error: err.message || "Erro desconhecido durante a restauração",
@@ -2315,29 +2819,31 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
 // CLIENTES (CUSTOMERS) MULTI-TENANT ISOLATION HELPERS
 // ==========================================
 
-export async function dbGetClientes(): Promise<any[] | null> {
+export async function dbGetClientes(ownerId?: string): Promise<any[] | null> {
   const supabase = getSupabase();
   if (!supabase) return null;
 
   try {
-    // 1. Capture the ID of the currently authenticated user
-    const { data: authData, error: authError } = await supabase.auth.getUser();
-    if (authError || !authData?.user) {
-      console.error("Multi-tenant Auth Verification Failure (Select Clientes):", authError);
-      return null;
+    let targetUserId = ownerId;
+    if (!targetUserId) {
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      if (authError || !authData?.user) {
+        console.error("Multi-tenant Auth Verification Failure (Select Clientes):", authError);
+        return null;
+      }
+      targetUserId = authData.user.id;
     }
-    const userId = authData.user.id;
 
-    // 2. Fetch records strictly filtered by user_id
+    // Fetch records filtered by target user/company owner id
     const { data, error } = await supabase
       .from("clientes")
       .select("*")
-      .eq("user_id", userId);
+      .eq("user_id", targetUserId);
 
     if (error) {
       console.warn("Error selecting from clientes table, falling back to local storage:", error.message);
       try {
-        const localData = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + userId);
+        const localData = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId) || localStorage.getItem("NUCLEO_CLIENTS");
         return localData ? JSON.parse(localData) : [];
       } catch (e) {
         return [];
@@ -2348,10 +2854,9 @@ export async function dbGetClientes(): Promise<any[] | null> {
   } catch (err: any) {
     console.warn("Exception in dbGetClientes, falling back to local storage:", err);
     try {
-      const { data: authData } = await supabase.auth.getUser();
-      const userId = authData?.user?.id;
-      if (userId) {
-        const localData = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + userId);
+      const targetUserId = ownerId || (await supabase.auth.getUser())?.data?.user?.id;
+      if (targetUserId) {
+        const localData = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId) || localStorage.getItem("NUCLEO_CLIENTS");
         return localData ? JSON.parse(localData) : [];
       }
     } catch (e) {}
@@ -2359,27 +2864,27 @@ export async function dbGetClientes(): Promise<any[] | null> {
   }
 }
 
-export async function dbSaveCliente(cliente: any): Promise<boolean> {
+export async function dbSaveCliente(cliente: any, ownerId?: string): Promise<boolean> {
   const supabase = getSupabase();
   if (!supabase) return false;
 
   try {
-    // 1. Capture the ID of the currently authenticated user
-    const { data: authData, error: authError } = await supabase.auth.getUser();
-    if (authError || !authData?.user) {
-      console.error("Multi-tenant Auth Verification Failure (Insert Clientes):", authError);
-      return false;
+    let targetUserId = ownerId;
+    if (!targetUserId) {
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      if (authError || !authData?.user) {
+        console.error("Multi-tenant Auth Verification Failure (Insert Clientes):", authError);
+        return false;
+      }
+      targetUserId = authData.user.id;
     }
-    const userId = authData.user.id;
 
-    // 2. Force the correct user_id into the payload
     const payload = {
       ...cliente,
-      user_id: userId,
+      user_id: targetUserId,
       updated_at: new Date().toISOString()
     };
 
-    // 3. Perform the secure upsert
     const { error } = await supabase
       .from("clientes")
       .upsert(payload);
@@ -2387,7 +2892,7 @@ export async function dbSaveCliente(cliente: any): Promise<boolean> {
     if (error) {
       console.warn("Error inserting/updating clientes table, writing to local storage fallback:", error.message);
       try {
-        const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + userId);
+        const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId);
         let list: any[] = localDataStr ? JSON.parse(localDataStr) : [];
         const index = list.findIndex(c => c.id === payload.id);
         if (index >= 0) {
@@ -2395,26 +2900,37 @@ export async function dbSaveCliente(cliente: any): Promise<boolean> {
         } else {
           list.push(payload);
         }
-        localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + userId, JSON.stringify(list));
+        localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
+        localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
         return true;
       } catch (e) {
         return false;
       }
     }
 
+    // Keep local mirrors fresh
+    try {
+      const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId);
+      let list: any[] = localDataStr ? JSON.parse(localDataStr) : [];
+      const index = list.findIndex(c => c.id === payload.id);
+      if (index >= 0) list[index] = payload;
+      else list.push(payload);
+      localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
+      localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
+    } catch (e) {}
+
     return true;
   } catch (err) {
     console.warn("Exception in dbSaveCliente, writing to local storage fallback:", err);
     try {
-      const { data: authData } = await supabase.auth.getUser();
-      const userId = authData?.user?.id;
-      if (userId) {
-        const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + userId);
+      const targetUserId = ownerId || (await supabase.auth.getUser())?.data?.user?.id;
+      if (targetUserId) {
+        const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId);
         let list: any[] = localDataStr ? JSON.parse(localDataStr) : [];
         const index = list.findIndex(c => c.id === cliente.id);
         const payload = {
           ...cliente,
-          user_id: userId,
+          user_id: targetUserId,
           updated_at: new Date().toISOString()
         };
         if (index >= 0) {
@@ -2422,7 +2938,8 @@ export async function dbSaveCliente(cliente: any): Promise<boolean> {
         } else {
           list.push(payload);
         }
-        localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + userId, JSON.stringify(list));
+        localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
+        localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
         return true;
       }
     } catch (e) {}
@@ -2430,40 +2947,52 @@ export async function dbSaveCliente(cliente: any): Promise<boolean> {
   }
 }
 
-export async function dbDeleteCliente(clienteId: string): Promise<boolean> {
+export async function dbDeleteCliente(clienteId: string, ownerId?: string): Promise<boolean> {
   const supabase = getSupabase();
   if (!supabase) return false;
 
   try {
-    // 1. Capture the ID of the currently authenticated user
-    const { data: authData, error: authError } = await supabase.auth.getUser();
-    if (authError || !authData?.user) {
-      console.error("Multi-tenant Auth Verification Failure (Delete Clientes):", authError);
-      return false;
+    let targetUserId = ownerId;
+    if (!targetUserId) {
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      if (authError || !authData?.user) {
+        console.error("Multi-tenant Auth Verification Failure (Delete Clientes):", authError);
+        return false;
+      }
+      targetUserId = authData.user.id;
     }
-    const userId = authData.user.id;
 
-    // 2. Execute deletion requiring matching user_id to prevent cross-tenant operations
     const { error } = await supabase
       .from("clientes")
       .delete()
       .eq("id", clienteId)
-      .eq("user_id", userId);
+      .eq("user_id", targetUserId);
 
     if (error) {
       console.warn("Error deleting from clientes table, executing on local storage fallback:", error.message);
       try {
-        const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + userId);
+        const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId);
         if (localDataStr) {
           let list: any[] = JSON.parse(localDataStr);
           list = list.filter(c => c.id !== clienteId);
-          localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + userId, JSON.stringify(list));
+          localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
+          localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
         }
         return true;
       } catch (e) {
         return false;
       }
     }
+
+    try {
+      const localDataStr = localStorage.getItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId);
+      if (localDataStr) {
+        let list: any[] = JSON.parse(localDataStr);
+        list = list.filter(c => c.id !== clienteId);
+        localStorage.setItem("NUCLEO_CLIENTS_FALLBACK_" + targetUserId, JSON.stringify(list));
+        localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(list));
+      }
+    } catch (e) {}
 
     return true;
   } catch (err) {
