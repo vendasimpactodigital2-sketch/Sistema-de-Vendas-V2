@@ -164,6 +164,8 @@ export interface CatalogProduct {
   profit: number; // salePrice - costPrice
   minStock: number;
   currentStock: number;
+  status?: string;
+  is_draft?: boolean;
 }
 
 export const getSaleOrderDate = (sale: Sale): string => {

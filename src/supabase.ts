@@ -2596,17 +2596,142 @@ export async function dbDeleteQuickSale(userId: string, id: string): Promise<boo
   }
 }
 
+export function isSystemAdminUser(): boolean {
+  try {
+    const userStr = localStorage.getItem("NUCLEO_CURRENT_USER");
+    if (!userStr) return false;
+    const user = JSON.parse(userStr);
+    const email = (user.email || "").toLowerCase().trim();
+    return email === "sistemadevendaadm@gmail.com";
+  } catch (e) {
+    return false;
+  }
+}
+
+export async function dbPublishSystemStructure(
+  adminEmail: string,
+  structureSnapshot?: any
+): Promise<{ success: boolean; countPublished: number }> {
+  const safeEmail = adminEmail || "sistemadevendaadm@gmail.com";
+  const supabase = getSupabase();
+  let countPublished = 0;
+
+  // 1. Activate all draft products in localStorage
+  try {
+    const localProductsStr = localStorage.getItem("NUCLEO_PRODUCTS");
+    if (localProductsStr) {
+      let list: any[] = JSON.parse(localProductsStr);
+      list = list.map((p) => {
+        if (p.status === "rascunho" || p.is_draft) {
+          countPublished++;
+          return { ...p, status: "ativo", is_draft: false };
+        }
+        return p;
+      });
+      localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(list));
+      if (!structureSnapshot) {
+        structureSnapshot = { produtos: list };
+      } else if (!structureSnapshot.produtos) {
+        structureSnapshot.produtos = list;
+      }
+    }
+  } catch (e) {
+    console.warn("Error activating draft products in localStorage:", e);
+  }
+
+  // 2. Activate draft products in Supabase 'produtos' table
+  if (supabase) {
+    try {
+      await supabase
+        .from("produtos")
+        .update({ status: "ativo", is_draft: false })
+        .eq("status", "rascunho");
+    } catch (e) {
+      console.warn("Notice updating draft products in Supabase:", e);
+    }
+  }
+
+  // 3. Upsert into public.configuracoes_sistema table
+  const configRecord = {
+    id: "global_structure",
+    versao: "ativa",
+    status: "ativa",
+    versao_timestamp: Date.now(),
+    applied_by: safeEmail,
+    applied_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    dados_estrutura: structureSnapshot || null
+  };
+
+  if (supabase) {
+    try {
+      const { error } = await supabase
+        .from("configuracoes_sistema")
+        .upsert(configRecord, { onConflict: "id" });
+      if (error) {
+        console.warn("Supabase configuracoes_sistema upsert notice:", error.message);
+        try {
+          await supabase
+            .from("configuracoes_sistema")
+            .upsert({
+              id: "global_structure",
+              status: "ativa",
+              updated_at: new Date().toISOString()
+            }, { onConflict: "id" });
+        } catch (subErr) {}
+      }
+    } catch (err) {
+      console.warn("Exception updating configuracoes_sistema in Supabase:", err);
+    }
+  }
+
+  try {
+    localStorage.setItem("NUCLEO_SYSTEM_STRUCTURE_CONFIG", JSON.stringify(configRecord));
+  } catch (e) {}
+
+  // 4. Trigger Realtime Notifications to all client terminals
+  await notifyRealtimeSync("global", "system_structure_published", configRecord);
+  await notifyRealtimeSync("global", "structure_applied", configRecord);
+  await notifyRealtimeSync("global", "products_updated", structureSnapshot);
+
+  return { success: true, countPublished };
+}
+
+export async function dbGetSystemConfig(): Promise<any | null> {
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("configuracoes_sistema")
+        .select("*")
+        .eq("id", "global_structure")
+        .maybeSingle();
+      if (!error && data) {
+        return data;
+      }
+    } catch (e) {}
+  }
+  try {
+    const local = localStorage.getItem("NUCLEO_SYSTEM_STRUCTURE_CONFIG");
+    if (local) return JSON.parse(local);
+  } catch (e) {}
+  return null;
+}
+
 export async function dbGetCatalogProducts(userId: string): Promise<CatalogProduct[]> {
+  const isAdmin = isSystemAdminUser();
+
   // 1. Primary: fetch through secure server API with service_role to avoid RLS 42501
   try {
     const res = await fetch(`/api/products?userId=${encodeURIComponent(userId)}`);
     if (res.ok) {
       const json = await res.json();
       if (json.success && Array.isArray(json.data)) {
+        const list = isAdmin ? json.data : json.data.filter((p: any) => p.status !== "rascunho" && !p.is_draft);
         try {
-          localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(json.data));
+          localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(list));
         } catch (e) {}
-        return json.data;
+        return list;
       }
     }
   } catch (apiErr) {
@@ -2633,13 +2758,16 @@ export async function dbGetCatalogProducts(userId: string): Promise<CatalogProdu
             salePrice: sale,
             profit: Number(d.profit ?? d.lucro ?? (sale - cost)),
             minStock: Number(d.min_stock ?? d.minStock ?? d.estoque_minimo ?? 0),
-            currentStock: Number(d.current_stock ?? d.currentStock ?? d.estoque_atual ?? 0)
+            currentStock: Number(d.current_stock ?? d.currentStock ?? d.estoque_atual ?? 0),
+            status: d.status || "ativo",
+            is_draft: !!d.is_draft || d.status === "rascunho"
           };
         });
+        const filtered = isAdmin ? mapped : mapped.filter((p: any) => p.status !== "rascunho" && !p.is_draft);
         try {
-          localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(mapped));
+          localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(filtered));
         } catch (e) {}
-        return mapped;
+        return filtered;
       }
     } catch (e) {
       console.warn("Direct Supabase produtos fetch error:", e);
@@ -2649,20 +2777,36 @@ export async function dbGetCatalogProducts(userId: string): Promise<CatalogProdu
   // 3. Fallback: LocalStorage
   try {
     const localStr = localStorage.getItem("NUCLEO_PRODUCTS");
-    if (localStr) return JSON.parse(localStr);
+    if (localStr) {
+      const parsed = JSON.parse(localStr);
+      if (!isAdmin) {
+        return parsed.filter((p: any) => p.status !== "rascunho" && !p.is_draft);
+      }
+      return parsed;
+    }
   } catch (e) {}
 
   return [];
 }
 
 export async function dbSaveCatalogProduct(userId: string, product: CatalogProduct): Promise<boolean> {
+  const isAdmin = isSystemAdminUser();
+  // Se for o administrador sistemadevendaadm@gmail.com, salva como 'rascunho' a menos que já esteja ativo
+  const finalStatus = product.status || (isAdmin ? "rascunho" : "ativo");
+  const finalDraft = product.is_draft !== undefined ? product.is_draft : (isAdmin && finalStatus === "rascunho");
+  const effectiveProduct: CatalogProduct = {
+    ...product,
+    status: finalStatus,
+    is_draft: finalDraft
+  };
+
   // Update local storage mirror first for instant UI response
   try {
     const localStr = localStorage.getItem("NUCLEO_PRODUCTS");
     let list: CatalogProduct[] = localStr ? JSON.parse(localStr) : [];
-    const idx = list.findIndex(p => p.id === product.id);
-    if (idx >= 0) list[idx] = product;
-    else list.unshift(product);
+    const idx = list.findIndex(p => p.id === effectiveProduct.id);
+    if (idx >= 0) list[idx] = effectiveProduct;
+    else list.unshift(effectiveProduct);
     localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(list));
   } catch (e) {}
 
@@ -2671,13 +2815,13 @@ export async function dbSaveCatalogProduct(userId: string, product: CatalogProdu
     const res = await fetch("/api/products", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, product })
+      body: JSON.stringify({ userId, product: effectiveProduct })
     });
     if (res.ok) {
       const json = await res.json();
       if (json.success) {
-        notifyRealtimeSync(userId, "products_updated", { product });
-        notifyRealtimeSync("global", "products_updated", { product });
+        notifyRealtimeSync(userId, "products_updated", { product: effectiveProduct });
+        notifyRealtimeSync("global", "products_updated", { product: effectiveProduct });
         return true;
       }
     }
@@ -2691,26 +2835,28 @@ export async function dbSaveCatalogProduct(userId: string, product: CatalogProdu
 
   try {
     const ptPayload = {
-      id: product.id,
+      id: effectiveProduct.id,
       user_id: userId,
-      nome: product.description,
-      description: product.description,
-      preco_custo: product.costPrice,
-      preco_venda: product.salePrice,
-      lucro: product.profit,
-      estoque_minimo: product.minStock,
-      estoque_atual: product.currentStock
+      nome: effectiveProduct.description,
+      description: effectiveProduct.description,
+      preco_custo: effectiveProduct.costPrice,
+      preco_venda: effectiveProduct.salePrice,
+      lucro: effectiveProduct.profit,
+      estoque_minimo: effectiveProduct.minStock,
+      estoque_atual: effectiveProduct.currentStock,
+      status: finalStatus,
+      is_draft: finalDraft
     };
     const { error } = await supabase.from("produtos").upsert(ptPayload);
     if (!error) {
-      notifyRealtimeSync(userId, "products_updated", { product });
-      notifyRealtimeSync("global", "products_updated", { product });
+      notifyRealtimeSync(userId, "products_updated", { product: effectiveProduct });
+      notifyRealtimeSync("global", "products_updated", { product: effectiveProduct });
       return true;
     }
   } catch (e) {}
 
-  notifyRealtimeSync(userId, "products_updated", { product });
-  notifyRealtimeSync("global", "products_updated", { product });
+  notifyRealtimeSync(userId, "products_updated", { product: effectiveProduct });
+  notifyRealtimeSync("global", "products_updated", { product: effectiveProduct });
   return true;
 }
 

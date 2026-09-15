@@ -37,7 +37,7 @@ import { Sale, CompanyProfile, Expense, User, CatalogProduct, getSaleOrderDate, 
 import { getLocalDeletionAuditRecords, saveLocalDeletionAuditRecord, clearLocalDeletionAuditRecords, fetchDeletionAuditFromSupabase } from "./utils/deletionAudit";
 import { AuthScreen } from "./components/AuthScreen";
 import { AdminMensalistas } from "./components/AdminMensalistas";
-import { Sparkles, DollarSign, Building2, ShieldAlert, TrendingDown, RefreshCw, X, Trophy, CheckCircle, Info, AlertTriangle, Trash2, Bell, Volume2, VolumeX, Package, MapPin, Calendar, Clock, Check, Gift, Fingerprint, Eye, EyeOff, Phone, Wallet, Search, UserCheck, Sunset, BellRing, Moon } from "lucide-react";
+import { Sparkles, DollarSign, Building2, ShieldAlert, TrendingDown, RefreshCw, X, Trophy, CheckCircle, Info, AlertTriangle, Trash2, Bell, Volume2, VolumeX, Package, MapPin, Calendar, Clock, Check, Gift, Fingerprint, Eye, EyeOff, Phone, Wallet, Search, UserCheck, Sunset, BellRing, Moon, Rocket } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { WeeklyGoalModal } from "./components/WeeklyGoalModal";
 import { TrialCountdown } from "./components/TrialCountdown";
@@ -74,7 +74,9 @@ import {
   dbDeleteCatalogProduct,
   dbUpdateSubscriptionStatus,
   isCashSessionActiveOrOpen,
-  isCashSessionExplicitlyClosed
+  isCashSessionExplicitlyClosed,
+  dbPublishSystemStructure,
+  dbGetSystemConfig
 } from "./supabase";
 
 export function parseBrazilianValue(val: string): number {
@@ -979,18 +981,96 @@ export default function App() {
     });
   }, [cashRegister.history]);
 
-  const [isGlobalRegisterOpen, setIsGlobalRegisterOpen] = useState<boolean>(() => {
-    const saved = localStorage.getItem("NUCLEO_CASH_REGISTER");
-    if (saved) {
+  // 1. Estado reativo direto (sem depender de F5 ou cache estático de outro PC)
+  const [isGlobalRegisterOpen, setIsGlobalRegisterOpen] = useState<boolean>(false);
+
+  useEffect(() => {
+    const companyId = currentUser?.owner_id || currentUser?.id;
+    if (!companyId) return;
+
+    const supabase = getSupabase();
+    if (!supabase) return;
+
+    // 2. Select inicial em public.sessoes_caixa checando status Aberto / Fechado
+    const checkInitialSession = async () => {
       try {
-        const parsed = JSON.parse(saved);
-        return !!parsed?.currentSession;
-      } catch {
-        return false;
+        const { data } = await supabase
+          .from("sessoes_caixa")
+          .select("id, status, valor_abertura, data_abertura, operador")
+          .eq("user_id", companyId)
+          .order("data_abertura", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        const isOpen = (data?.status || "").toLowerCase() === "aberto";
+        setIsGlobalRegisterOpen(isOpen);
+
+        if (isOpen && data) {
+          setCashRegister((prev) => ({
+            ...prev,
+            currentSession: {
+              id: data.id,
+              status: "aberto",
+              valorAbertura: Number(data.valor_abertura) || 0,
+              dataAbertura: data.data_abertura,
+              operador: data.operador || "Operador"
+            }
+          }));
+        } else if (!isOpen) {
+          setCashRegister((prev) => ({ ...prev, currentSession: null }));
+        }
+      } catch (err) {
+        console.warn("Aviso ao carregar status inicial de sessoes_caixa:", err);
       }
-    }
-    return false;
-  });
+    };
+
+    checkInitialSession();
+
+    // 3. Canal Supabase Realtime isolado escutando public.sessoes_caixa
+    const channel = supabase
+      .channel(`sync_caixa_${companyId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "sessoes_caixa",
+          filter: `user_id=eq.${companyId}`
+        },
+        (payload) => {
+          if (payload.eventType === "DELETE") {
+            setIsGlobalRegisterOpen(false);
+            setCashRegister((prev) => ({ ...prev, currentSession: null }));
+            return;
+          }
+
+          const row = payload.new as any;
+          const status = (row?.status || "").toLowerCase();
+          const isOpen = status === "aberto";
+
+          // Alterna imediatamente o React entre Standby e Nova Venda em todos os PCs
+          setIsGlobalRegisterOpen(isOpen);
+          setCashRegister((prev) => ({
+            ...prev,
+            currentSession: isOpen
+              ? {
+                  id: row.id,
+                  status: "aberto",
+                  valorAbertura: Number(row.valor_abertura ?? row.valor_inicial) || 0,
+                  dataAbertura: row.data_abertura || row.created_at || new Date().toISOString(),
+                  operador: row.operador || "Operador"
+                }
+              : null
+          }));
+        }
+      )
+      .subscribe();
+
+    // 4. Cleanup garantindo removeChannel
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [currentUser?.id, currentUser?.owner_id]);
 
   const checkingRegisterRef = useRef<Promise<boolean> | null>(null);
 
@@ -1105,39 +1185,60 @@ export default function App() {
     }
   };
 
-  const playPleasantClosingChime = () => {
-    if (!soundEnabled) return;
+  const [closingAlarmMuted, setClosingAlarmMuted] = useState<boolean>(false);
+
+  const playContinuousCashClosingAlarm = () => {
+    if (!soundEnabled || closingAlarmMuted) return;
     try {
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const now = audioCtx.currentTime;
-      const playBell = (freq: number, start: number, duration: number, volume = 0.20) => {
+      const playTone = (freq: number, start: number, duration: number, vol = 0.28) => {
         const osc = audioCtx.createOscillator();
         const gainNode = audioCtx.createGain();
         osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, start);
+        gainNode.gain.setValueAtTime(vol, start);
+        gainNode.gain.exponentialRampToValueAtTime(0.0001, start + duration);
         osc.connect(gainNode);
         gainNode.connect(audioCtx.destination);
-        osc.frequency.setValueAtTime(freq, start);
-        gainNode.gain.setValueAtTime(volume, start);
-        gainNode.gain.exponentialRampToValueAtTime(0.0001, start + duration);
         osc.start(start);
         osc.stop(start + duration);
       };
-      // Harmonious pleasant evening chime (C5, E5, G5, B5, C6)
-      playBell(523.25, now, 0.9, 0.18);
-      playBell(659.25, now + 0.16, 0.9, 0.20);
-      playBell(783.99, now + 0.32, 1.1, 0.22);
-      playBell(987.77, now + 0.48, 1.2, 0.22);
-      playBell(1046.50, now + 0.64, 1.6, 0.25);
+      // High-audibility pleasant alarm chime: E5 - A5 - C#6 - E6
+      playTone(659.25, now, 0.35, 0.25);
+      playTone(880.00, now + 0.22, 0.35, 0.28);
+      playTone(1108.73, now + 0.44, 0.40, 0.30);
+      playTone(1318.51, now + 0.66, 0.70, 0.32);
     } catch (e) {
-      console.warn("Audio pleasant chime failed:", e);
+      console.warn("Audio closing alarm failed:", e);
     }
+  };
+
+  // Continuous alarm sound loop for cash closing reminder until the user clicks any button
+  useEffect(() => {
+    if (!showAutoClosePrompt || closingAlarmMuted) return;
+
+    // Play immediately
+    playContinuousCashClosingAlarm();
+
+    // Loop alarm sound every 2.4 seconds until user clicks a button to dismiss, close, snooze, or mute
+    const interval = setInterval(() => {
+      playContinuousCashClosingAlarm();
+    }, 2400);
+
+    return () => clearInterval(interval);
+  }, [showAutoClosePrompt, closingAlarmMuted, soundEnabled]);
+
+  const playPleasantClosingChime = () => {
+    playContinuousCashClosingAlarm();
   };
 
   // Test event listener for cash closing reminder from CompanySettings
   useEffect(() => {
     const handleTestReminder = () => {
+      setClosingAlarmMuted(false);
       setShowAutoClosePrompt(true);
-      playPleasantClosingChime();
+      playContinuousCashClosingAlarm();
     };
     window.addEventListener("TEST_CASH_CLOSING_REMINDER", handleTestReminder);
     return () => window.removeEventListener("TEST_CASH_CLOSING_REMINDER", handleTestReminder);
@@ -1439,8 +1540,7 @@ export default function App() {
                   setCurrentUser(null);
                   localStorage.removeItem("NUCLEO_CURRENT_USER");
                   localStorage.removeItem("NUCLEO_USERS");
-                  localStorage.removeItem("NUCLEO_CASH_REGISTER");
-                  localStorage.removeItem("NUCLEO_LAST_CASH_REGISTER_SYNCED_DATE");
+                  // Preservar NUCLEO_CASH_REGISTER para que o caixa permaneça aberto o dia todo
                   sessionStorage.clear();
                   isRedirecting = false;
                 }, 1800);
@@ -2028,6 +2128,99 @@ export default function App() {
     }
   }, [currentUser]);
 
+  // Estado e contagem de rascunhos para o usuário administrador exclusivo (sistemadevendaadm@gmail.com)
+  const [isApplyingStructure, setIsApplyingStructure] = useState<boolean>(false);
+
+  const pendingDraftsCount = useMemo(() => {
+    if (currentUser?.email?.toLowerCase().trim() !== "sistemadevendaadm@gmail.com") return 0;
+    return catalogProducts.filter((p) => p.status === "rascunho" || p.is_draft).length;
+  }, [currentUser, catalogProducts]);
+
+  // Handler para receber e aplicar estrutura global do sistema publicada pelo administrador em tempo real
+  const handleApplyRemoteSystemStructure = useCallback((payload: any) => {
+    console.log("[Client Realtime] Recebida atualização da estrutura global (configuracoes_sistema):", payload);
+
+    // 1. Se o payload contém snapshot dos produtos, aplica de imediato na memória e armazenamento local
+    if (payload?.dados_estrutura?.produtos && Array.isArray(payload.dados_estrutura.produtos)) {
+      const newProds = payload.dados_estrutura.produtos;
+      setCatalogProducts(newProds);
+      try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(newProds)); } catch (e) {}
+    } else {
+      // Recarrega catálogo de produtos do Supabase
+      const ownerId = currentUser?.owner_id || currentUser?.id;
+      if (ownerId) {
+        dbGetCatalogProducts(ownerId).then((prods) => {
+          if (prods && prods.length > 0) {
+            setCatalogProducts(prods);
+          }
+        }).catch(console.warn);
+      }
+    }
+
+    // 2. Se contém snapshot do perfil da empresa / configurações globais
+    if (payload?.dados_estrutura?.company) {
+      setCompany((prev) => ({ ...prev, ...payload.dados_estrutura.company }));
+      try {
+        localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(payload.dados_estrutura.company));
+      } catch (e) {}
+    }
+
+    // 3. Dispara eventos locais para atualização reativa de outros módulos da aplicação
+    window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: payload }));
+    window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: { table: "configuracoes_sistema", payload } }));
+
+    addToast("✨ Nova estrutura do sistema aplicada com sucesso em tempo real!", "success");
+    playAlertSound("info");
+  }, [currentUser, addToast, playAlertSound]);
+
+  // Ação exclusiva do administrador (sistemadevendaadm@gmail.com) para aplicar a nova estrutura global
+  const handleApplyNewStructure = async () => {
+    if (currentUser?.email?.toLowerCase().trim() !== "sistemadevendaadm@gmail.com") {
+      addToast("Apenas o administrador do sistema (sistemadevendaadm@gmail.com) pode aplicar a nova estrutura.", "error");
+      return;
+    }
+
+    const confirmApply = window.confirm(
+      "🚀 APLICAR NOVA ESTRUTURA GLOBAL\n\n" +
+      "Esta ação atualizará a tabela global 'configuracoes_sistema' no Supabase para ativa e aplicará todas as modificações estruturais e novos produtos instantaneamente para todas as telas dos clientes em tempo real via Supabase Realtime.\n\n" +
+      "Deseja aplicar agora?"
+    );
+    if (!confirmApply) return;
+
+    setIsApplyingStructure(true);
+    try {
+      const activeProducts = catalogProducts.map((p) => ({
+        ...p,
+        status: "ativo",
+        is_draft: false
+      }));
+
+      const structureSnapshot = {
+        produtos: activeProducts,
+        company: company,
+        appliedBy: currentUser.email,
+        timestamp: Date.now()
+      };
+
+      const res = await dbPublishSystemStructure(currentUser.email, structureSnapshot);
+
+      // Atualiza produtos em memória para o administrador
+      setCatalogProducts(activeProducts);
+      try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(activeProducts)); } catch (e) {}
+
+      addToast(
+        `🚀 Nova estrutura ativada com sucesso! ${res.countPublished > 0 ? `${res.countPublished} produto(s) ativados. ` : ""}Todas as telas dos clientes foram sincronizadas em tempo real.`,
+        "success"
+      );
+      playAlertSound("success");
+    } catch (err: any) {
+      console.error("Erro ao aplicar nova estrutura no Supabase:", err);
+      addToast("Falha ao aplicar nova estrutura: " + (err?.message || "Erro desconhecido"), "error");
+    } finally {
+      setIsApplyingStructure(false);
+    }
+  };
+
   // Reactive real-time websocket subscription channels for instant multi-terminal sync
   useEffect(() => {
     // Se o usuário não estiver autenticado (currentUser for null ou undefined), encerra imediatamente para impedir que o .subscribe() seja executado sem sessão ativa
@@ -2319,7 +2512,8 @@ export default function App() {
             payload.table === "clientes" ||
             payload.table === "goals" ||
             payload.table === "gastos_mensais" ||
-            payload.table === "company_profile";
+            payload.table === "company_profile" ||
+            payload.table === "configuracoes_sistema";
 
           if (isStaticTable) {
             triggerRemoteSync(currentUser, true, true);
@@ -2329,7 +2523,19 @@ export default function App() {
             if (payload.table === "clientes") {
               window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: payload }));
             }
+            if (payload.table === "configuracoes_sistema") {
+              console.log("[Supabase Realtime] Tabela configuracoes_sistema alterada:", payload);
+              handleApplyRemoteSystemStructure(payload.new || payload);
+            }
           }
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "configuracoes_sistema" },
+        (payload) => {
+          console.log("[Supabase Realtime] Evento direto em configuracoes_sistema:", payload.eventType, payload.new);
+          handleApplyRemoteSystemStructure(payload.new || payload);
         }
       )
       .on("broadcast", { event: "cash_register_broadcast" }, ({ payload: bcData }) => {
@@ -2363,9 +2569,17 @@ export default function App() {
       .on("broadcast", { event: "clients_broadcast" }, () => {
         window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: {} }));
       })
+      .on("broadcast", { event: "system_structure_published" }, ({ payload: bcData }) => {
+        console.log("[Supabase Realtime] Broadcast system_structure_published recebido:", bcData);
+        handleApplyRemoteSystemStructure(bcData);
+      })
+      .on("broadcast", { event: "structure_applied" }, ({ payload: bcData }) => {
+        console.log("[Supabase Realtime] Broadcast structure_applied recebido:", bcData);
+        handleApplyRemoteSystemStructure(bcData);
+      })
       .subscribe((status, err) => {
         if (status === "SUBSCRIBED") {
-          console.log("✅ [Supabase Realtime] Conectado e escutando 'sales' e 'expenses' com sucesso!");
+          console.log("✅ [Supabase Realtime] Conectado e escutando 'sales', 'expenses' e 'configuracoes_sistema' com sucesso!");
         } else if (status === "CHANNEL_ERROR") {
           console.warn("⚠️ [Supabase Realtime] Canal Realtime:", err);
         } else {
@@ -2381,7 +2595,7 @@ export default function App() {
         console.error("Erro ao remover canal Realtime:", err);
       });
     };
-  }, [currentUser, fetchSales, fetchExpenses]);
+  }, [currentUser, fetchSales, fetchExpenses, handleApplyRemoteSystemStructure]);
 
   // Realtime Server-Sent Events (SSE) Multi-Terminal Instant Sync: instantly pushes cash register & sales changes between computers
   useEffect(() => {
@@ -2477,6 +2691,9 @@ export default function App() {
             } else if (parsed.event === "clients_updated") {
               window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: parsed }));
               window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: parsed }));
+            } else if (parsed.event === "system_structure_published" || parsed.event === "structure_applied") {
+              console.log("[Realtime SSE] Evento de nova estrutura do sistema publicado:", parsed);
+              handleApplyRemoteSystemStructure(parsed.data || parsed);
             } else if (parsed.event === "backup_restored") {
               triggerRemoteSync(currentUser, true, true);
               window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: parsed }));
@@ -2530,7 +2747,25 @@ export default function App() {
         clearTimeout(reconnectTimeout);
       }
     };
-  }, [currentUser]);
+  }, [currentUser, handleApplyRemoteSystemStructure]);
+
+  // Listener para eventos de sincronização remota via window custom events (app_remote_sync)
+  useEffect(() => {
+    const handleRemoteEvent = (evt: any) => {
+      const d = evt.detail;
+      if (
+        d?.event === "system_structure_published" ||
+        d?.event === "structure_applied" ||
+        d?.table === "configuracoes_sistema"
+      ) {
+        handleApplyRemoteSystemStructure(d?.data || d?.payload || d);
+      }
+    };
+    window.addEventListener("app_remote_sync" as any, handleRemoteEvent);
+    return () => {
+      window.removeEventListener("app_remote_sync" as any, handleRemoteEvent);
+    };
+  }, [handleApplyRemoteSystemStructure]);
 
   // Terminal Heartbeat Poller: synchronizes cash register and data across all terminals logged into the account
   useEffect(() => {
@@ -2542,8 +2777,8 @@ export default function App() {
       dbGetCashRegister(companyOwnerId).then((remote) => {
         if (!remote) return;
         const currentLocal = cashRegisterRef.current;
-        const localIsOpen = !!currentLocal?.currentSession && currentLocal.currentSession.status === "aberto";
-        const remoteIsOpen = !!remote.currentSession && remote.currentSession.status === "aberto";
+        const localIsOpen = !!currentLocal?.currentSession && isCashSessionActiveOrOpen(currentLocal.currentSession);
+        const remoteIsOpen = !!remote.currentSession && isCashSessionActiveOrOpen(remote.currentSession);
 
         // Case 1: Remote is open, this terminal was closed -> Adopt open register immediately!
         if (remoteIsOpen && !localIsOpen) {
@@ -3601,56 +3836,40 @@ export default function App() {
           }
         }
 
-        // 3. CHECK PLEASANT CASH CLOSING REMINDER / CLOSING AT END OF BUSINESS HOURS
-        if (cashRegister?.currentSession && cashRegister.currentSession.status === "aberto") {
+        // 3. CHECK CASH CLOSING REMINDER / CLOSING AT END OF BUSINESS HOURS
+        if (cashRegister?.currentSession && isCashSessionActiveOrOpen(cashRegister.currentSession)) {
           const currentSession = cashRegister.currentSession;
-          const sessionDateStr = new Date(currentSession.dataAbertura).toISOString().split("T")[0];
+          const sessionDateStr = getLocalDateFromISO(currentSession.dataAbertura);
           
-          if (sessionDateStr !== todayDateStr) {
-            // Day changed! Handled separately if needed
-          } else {
-            const dismissedDate = localStorage.getItem("NUCLEO_DISMISSED_AUTOCLOSE_DATE");
-            const snoozeUntil = localStorage.getItem("NUCLEO_SNOOZE_CASH_CLOSING_UNTIL");
-            const isSnoozed = snoozeUntil ? Date.now() < Number(snoozeUntil) : false;
-            const isDismissedToday = dismissedDate === todayDateStr;
+          const dismissedDate = localStorage.getItem("NUCLEO_DISMISSED_AUTOCLOSE_DATE");
+          const snoozeUntil = localStorage.getItem("NUCLEO_SNOOZE_CASH_CLOSING_UNTIL");
+          const isSnoozed = snoozeUntil ? Date.now() < Number(snoozeUntil) : false;
+          const isDismissedToday = dismissedDate === todayDateStr;
 
-            // Determine effective reminder / closing time
-            let effectiveTime = (company?.cashClosingReminderTime || "").trim();
-            if (!effectiveTime) {
-              if (company?.businessHours) {
-                const dayKeys: (keyof BusinessHours)[] = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-                const todayKey = dayKeys[currentDayOfWeek];
-                const dayConfig = company.businessHours[todayKey];
-                if (dayConfig && dayConfig.isOpen && dayConfig.closeTime) {
-                  effectiveTime = dayConfig.closeTime;
-                }
+          // Determine effective reminder / closing time
+          let effectiveTime = (company?.cashClosingReminderTime || "").trim();
+          if (!effectiveTime) {
+            if (company?.businessHours) {
+              const dayKeys: (keyof BusinessHours)[] = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+              const todayKey = dayKeys[currentDayOfWeek];
+              const dayConfig = company.businessHours[todayKey];
+              if (dayConfig && dayConfig.isOpen && dayConfig.closeTime) {
+                effectiveTime = dayConfig.closeTime;
               }
             }
-            if (!effectiveTime) {
-              effectiveTime = company?.closingTime || "18:00";
-            }
+          }
+          if (!effectiveTime) {
+            effectiveTime = company?.closingTime || "18:00";
+          }
 
-            let sessionHHMM = "00:00";
-            try {
-              if (currentSession.dataAbertura) {
-                const sessionOpenDate = new Date(currentSession.dataAbertura);
-                sessionHHMM = `${String(sessionOpenDate.getHours()).padStart(2, "0")}:${String(sessionOpenDate.getMinutes()).padStart(2, "0")}`;
-              }
-            } catch (e) {
-              console.warn("Error parsing session opening time:", e);
-            }
+          // Trigger when current time is past effective closing time, or if session was left open from a previous day
+          const isPastClosing = (currentHHMM >= effectiveTime) || (sessionDateStr < todayDateStr);
+          const isReminderEnabled = company?.cashClosingReminderEnabled ?? true;
 
-            const sessionAgeMinutes = currentSession.dataAbertura 
-              ? (Date.now() - new Date(currentSession.dataAbertura).getTime()) / (1000 * 60)
-              : 999;
-            const isPastClosing = currentHHMM >= effectiveTime && sessionHHMM < effectiveTime && sessionAgeMinutes > 60;
-            const isReminderEnabled = company?.cashClosingReminderEnabled ?? true;
-
-            // Trigger pleasant notification if enabled, past closing time, and not dismissed/snoozed
-            if (isReminderEnabled && isPastClosing && !isDismissedToday && !isSnoozed && !showAutoClosePrompt) {
-              setShowAutoClosePrompt(true);
-              try { playPleasantClosingChime(); } catch (e) { console.warn(e); }
-            }
+          // Trigger continuous alarm & notification if enabled, past closing time, and not dismissed/snoozed
+          if (isReminderEnabled && isPastClosing && !isDismissedToday && !isSnoozed && !showAutoClosePrompt) {
+            setClosingAlarmMuted(false);
+            setShowAutoClosePrompt(true);
           }
         }
       } catch (err) {
@@ -3952,8 +4171,9 @@ export default function App() {
     cashRegisterRef.current = updatedState;
     localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updatedState));
     localStorage.setItem("NUCLEO_LAST_CASH_REGISTER_SYNCED_DATE", newSession.dataAbertura);
-    // Snooze closing reminder for 12 hours so it never disturbs this freshly opened session
-    localStorage.setItem("NUCLEO_SNOOZE_CASH_CLOSING_UNTIL", String(Date.now() + 12 * 60 * 60 * 1000));
+    // Limpar adiamentos e dispensas anteriores para que o alarme toque no horário correto hoje
+    localStorage.removeItem("NUCLEO_SNOOZE_CASH_CLOSING_UNTIL");
+    localStorage.removeItem("NUCLEO_DISMISSED_AUTOCLOSE_DATE");
     setIsGlobalRegisterOpen(true);
 
     // Play welcome beep
@@ -4664,8 +4884,7 @@ export default function App() {
     // 1. Clear session-specific keys and user listings locally first to guarantee instant visual logout
     localStorage.removeItem("NUCLEO_CURRENT_USER");
     localStorage.removeItem("NUCLEO_USERS");
-    localStorage.removeItem("NUCLEO_CASH_REGISTER");
-    localStorage.removeItem("NUCLEO_LAST_CASH_REGISTER_SYNCED_DATE");
+    // O caixa pertence à empresa e fica aberto durante todo o expediente, não remover ao sair do sistema
     localStorage.removeItem("NUCLEO_RINGING_REMINDER_IDS");
     
     // Clear the cart/sale form state in localStorage to prevent leakage between user sessions
@@ -5005,6 +5224,25 @@ export default function App() {
 
             {/* Direct Inline Action Control Buttons */}
             <div className="flex items-center gap-1.5">
+              {currentUser?.email?.toLowerCase().trim() === "sistemadevendaadm@gmail.com" && (
+                <button
+                  id="btn-admin-aplicar-nova-estrutura"
+                  type="button"
+                  onClick={handleApplyNewStructure}
+                  disabled={isApplyingStructure}
+                  className="px-3 py-1 bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-extrabold text-xs rounded-lg shadow-md border border-emerald-400/40 cursor-pointer transition-all active:scale-95 flex items-center gap-1.5 shrink-0"
+                  title="Aplicar Nova Estrutura no Supabase (configuracoes_sistema) e sincronizar clientes em tempo real"
+                >
+                  <Rocket className={`h-3.5 w-3.5 text-emerald-200 ${isApplyingStructure ? "animate-spin" : ""}`} />
+                  <span>{isApplyingStructure ? "Aplicando..." : "Aplicar Nova Estrutura"}</span>
+                  {pendingDraftsCount > 0 && (
+                    <span className="px-1.5 py-0.5 bg-amber-400 text-slate-950 text-[10px] font-black rounded-full leading-none">
+                      {pendingDraftsCount}
+                    </span>
+                  )}
+                </button>
+              )}
+
               {activeEditingSale && activeTab === "sale" && (
                 <button
                   onClick={() => setActiveEditingSale(null)}
@@ -6589,6 +6827,24 @@ export default function App() {
 
                   {/* Title & subtitle */}
                   <div className="space-y-1.5 px-2">
+                    {/* Pulsing Alarm Active Banner */}
+                    <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs mb-2 animate-pulse shadow-sm">
+                      <div className="flex items-center gap-2">
+                        <Bell className="h-4 w-4 text-amber-400 animate-bounce" />
+                        <span className="font-extrabold uppercase tracking-wide text-[11px]">
+                          {closingAlarmMuted ? "Alarme Silenciado 🔇" : "Alarme Contínuo Tocando 🔔"}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setClosingAlarmMuted(!closingAlarmMuted)}
+                        className="px-2.5 py-1 rounded-lg bg-amber-500/30 hover:bg-amber-500/50 text-amber-200 text-[10px] font-bold uppercase transition-all cursor-pointer"
+                        title={closingAlarmMuted ? "Reativar o som do alarme" : "Silenciar o toque contínuo"}
+                      >
+                        {closingAlarmMuted ? "Reativar Som" : "Silenciar"}
+                      </button>
+                    </div>
+
                     <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px] font-bold uppercase tracking-wider mb-1">
                       <Clock className="h-3 w-3" />
                       Fim de Expediente • {closingHour}

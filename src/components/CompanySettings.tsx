@@ -778,25 +778,22 @@ export function CompanySettings({
     }
   };
 
-  const handleRestoreLocalStorageBackup = (backupObj: Record<string, string>) => {
+  const handleRestoreLocalStorageBackup = (backupObj: Record<string, any>) => {
     const confirmRestore = window.confirm(
-      "⚠️ RESTAURAR COPIA LOCAL (LocalStorage)\n\n" +
-      "ATENÇÃO: Este procedimento substituirá todo o seu histórico local de vendas, gastos, caixa registradora e lembretes cadastrados no navegador pelas informações do arquivo de backup.\n\n" +
+      "⚠️ RESTAURAR CÓPIA LOCAL (LocalStorage)\n\n" +
+      "ATENÇÃO: Este procedimento atualizará seus dados locais de vendas, produtos, gastos e clientes cadastrados com as informações do arquivo de backup.\n\n" +
       "Deseja prosseguir com a restauração imediata? O sistema reiniciará para atualizar os dados."
     );
     if (!confirmRestore) return;
     
     try {
-      // Clean previous NUCLEO_ values
-      Object.keys(localStorage).forEach(key => {
-        if (key.startsWith("NUCLEO_")) {
-          localStorage.removeItem(key);
-        }
-      });
-      
-      // Load new ones
+      // Set the restored keys without wiping authentication or open cash register state
       Object.entries(backupObj).forEach(([key, val]) => {
-        localStorage.setItem(key, val);
+        if (typeof val === "string") {
+          localStorage.setItem(key, val);
+        } else {
+          localStorage.setItem(key, JSON.stringify(val));
+        }
       });
       
       alert("✓ Restauração local realizada com sucesso! O aplicativo será recarregado.");
