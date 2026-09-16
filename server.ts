@@ -2768,42 +2768,24 @@ ${JSON.stringify(sales, null, 2)}
 
       // Synchronize auxiliary fluxo_caixa table if present
       if (state.currentSession && state.currentSession.status === "aberto") {
-        upsertPromises.push(
-          supabase.from("sessoes_caixa").upsert({
-            id: state.currentSession.id,
-            user_id: canonicalOwnerId,
-            status: "aberto",
-            valor_abertura: state.currentSession.valorAbertura || 0,
-            data_abertura: state.currentSession.dataAbertura || nowISO,
-            operador: state.currentSession.operador || "Operador",
-            updated_at: nowISO
-          })
-        );
-        upsertPromises.push(
-          supabase.from("fluxo_caixa").upsert({
-            user_id: canonicalOwnerId,
-            data: todayStr,
-            data_abertura: state.currentSession.dataAbertura || nowISO,
-            valor_abertura: state.currentSession.valorAbertura || 0,
-            operador: state.currentSession.operador || "Operador",
-            status: "aberto",
-            session_id: state.currentSession.id,
-            updated_at: nowISO
-          }, { onConflict: "user_id,data" })
-        );
+        const isUUID = typeof state.currentSession.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(state.currentSession.id);
+        if (isUUID) {
+          upsertPromises.push(
+            supabase.from("sessoes_caixa").upsert({
+              id: state.currentSession.id,
+              empresa_id: canonicalOwnerId,
+              status: "aberto",
+              valor_abertura: state.currentSession.valorAbertura || 0,
+              data_abertura: state.currentSession.dataAbertura || nowISO
+            })
+          );
+        }
       } else if (!state.currentSession) {
         upsertPromises.push(
           supabase.from("sessoes_caixa").update({
             status: "fechado",
-            data_fechamento: nowISO,
-            updated_at: nowISO
+            data_fechamento: nowISO
           }).or("status.ilike.%abert%,status.ilike.%ativ%,data_fechamento.is.null")
-        );
-        upsertPromises.push(
-          supabase.from("fluxo_caixa").update({
-            status: "fechado",
-            updated_at: nowISO
-          }).eq("user_id", canonicalOwnerId).eq("data", todayStr)
         );
       }
 

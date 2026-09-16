@@ -3289,25 +3289,25 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
     }
   }
 
-  // 2. Real table: synchronize public.sessoes_caixa and public.historico_caixas (setting both user_id and company_id)
+  // 2. Real table: synchronize public.sessoes_caixa and public.historico_caixas
   if (supabase) {
     try {
       if (state.currentSession && state.currentSession.status === "aberto") {
-        await supabase.from("sessoes_caixa").upsert({
-          id: state.currentSession.id,
-          company_id: effectiveUserId,
-          user_id: effectiveUserId,
-          status: "aberto",
-          valor_abertura: state.currentSession.valorAbertura || 0,
-          data_abertura: state.currentSession.dataAbertura || nowISO,
-          operador: state.currentSession.operador || "Operador",
-          updated_at: nowISO
-        });
+        const isUUID = typeof state.currentSession.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(state.currentSession.id);
+        if (isUUID) {
+          await supabase.from("sessoes_caixa").upsert({
+            id: state.currentSession.id,
+            empresa_id: effectiveUserId,
+            status: "aberto",
+            valor_abertura: state.currentSession.valorAbertura || 0,
+            data_abertura: state.currentSession.dataAbertura || nowISO
+          });
+        }
       } else if (!state.currentSession) {
         await supabase.from("sessoes_caixa").update({
           status: "fechado",
-          updated_at: nowISO
-        }).or(`company_id.eq.${effectiveUserId},user_id.eq.${effectiveUserId}`).eq("status", "aberto");
+          data_fechamento: nowISO
+        }).eq("empresa_id", effectiveUserId).eq("status", "aberto");
 
         if (state.history && state.history.length > 0) {
           const lastClosed = state.history[0];
@@ -3658,23 +3658,23 @@ export async function dbOpenGlobalCashRegister(userId: string, session: any): Pr
 
   const nowISO = new Date().toISOString();
 
-  // 1. Primary: upsert into public.sessoes_caixa setting BOTH user_id and company_id
+  // 1. Primary: upsert into public.sessoes_caixa
   if (supabase) {
     try {
-      const { error: sessErr } = await supabase
-        .from("sessoes_caixa")
-        .upsert({
-          id: session.id || `session_${Date.now()}`,
-          user_id: effectiveUserId,
-          company_id: effectiveUserId,
-          status: "aberto",
-          valor_abertura: session.valorAbertura || 0,
-          data_abertura: session.dataAbertura || nowISO,
-          operador: session.operador || "Operador",
-          updated_at: nowISO
-        });
-      if (!sessErr) {
-        console.log("[dbOpenGlobalCashRegister] Successfully opened register in sessoes_caixa");
+      const isUUID = typeof session.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session.id);
+      if (isUUID) {
+        const { error: sessErr } = await supabase
+          .from("sessoes_caixa")
+          .upsert({
+            id: session.id,
+            empresa_id: effectiveUserId,
+            status: "aberto",
+            valor_abertura: session.valorAbertura || 0,
+            data_abertura: session.dataAbertura || nowISO
+          });
+        if (!sessErr) {
+          console.log("[dbOpenGlobalCashRegister] Successfully opened register in sessoes_caixa");
+        }
       }
     } catch (e) {}
 

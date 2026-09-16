@@ -4151,18 +4151,20 @@ export default function App() {
   const handleOpenRegister = async (valorAbertura: number, operador: string) => {
     setBypassTodayClosure(false);
 
-    // Block duplicate opening for same day
+    // Block duplicate opening for same day if already confirmed open
     const localToday = new Date();
     const year = localToday.getFullYear();
     const month = String(localToday.getMonth() + 1).padStart(2, '0');
     const day = String(localToday.getDate()).padStart(2, '0');
     const todayDateStr = `${year}-${month}-${day}`;
 
-    // check currentSession
+    // check currentSession: if already open and marked open, smoothly confirm and close modal
     if (cashRegister.currentSession && cashRegister.currentSession.status === "aberto") {
       const activeSessionDate = getLocalDateFromISO(cashRegister.currentSession.dataAbertura);
-      if (activeSessionDate === todayDateStr) {
-        addToast("❌ Erro: Já existe um caixa ativo aberto para o dia de hoje!", "error");
+      if (activeSessionDate === todayDateStr && isRegisterOpenForToday) {
+        addToast("✅ O caixa já está aberto e ativo para o expediente de hoje!", "info");
+        setShowCashRegisterModal(false);
+        setIsGlobalRegisterOpen(true);
         return;
       }
     }
@@ -4174,8 +4176,15 @@ export default function App() {
       return;
     }
 
+    const sessionUUID = (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+      ? crypto.randomUUID()
+      : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+          const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+          return v.toString(16);
+        });
+
     const newSession: CashRegisterSession = {
-      id: "session_" + Math.random().toString(36).substring(2, 9),
+      id: sessionUUID,
       status: "aberto",
       valorAbertura,
       dataAbertura: new Date().toISOString(),
@@ -5072,25 +5081,60 @@ export default function App() {
 
   if (isStandbyActive) {
     return (
-      <StandbyScreen
-        companyProfile={company}
-        currentUser={currentUser}
-        onStartNewSale={() => {
-          if (!isRegisterOpenForToday) {
+      <>
+        <StandbyScreen
+          companyProfile={company}
+          currentUser={currentUser}
+          onStartNewSale={() => {
+            if (!isRegisterOpenForToday) {
+              setShowCashRegisterModal(true);
+              return;
+            }
+            setIsStandbyActive(false);
+            setActiveTab("sale");
+          }}
+          onLogout={handleLogout}
+          isCashRegisterOpen={isRegisterOpenForToday}
+          onOpenCashRegister={() => {
             setShowCashRegisterModal(true);
-            return;
-          }
-          setIsStandbyActive(false);
-          setActiveTab("sale");
-        }}
-        onLogout={handleLogout}
-        isCashRegisterOpen={isRegisterOpenForToday}
-        onOpenCashRegister={() => {
-          setShowCashRegisterModal(true);
-        }}
-        pendingSalesCount={sales.filter(isPendingRetiradaOrBaixa).length}
-        todaysDeliveriesCount={todaysDeliveries.length}
-      />
+          }}
+          pendingSalesCount={sales.filter(isPendingRetiradaOrBaixa).length}
+          todaysDeliveriesCount={todaysDeliveries.length}
+        />
+
+        {/* Synchronized Cash Register Session Opener/Closer Dialog Modal on Standby */}
+        <CashRegisterModal
+          isOpen={showCashRegisterModal}
+          onClose={() => setShowCashRegisterModal(false)}
+          cashRegister={cashRegister}
+          sales={sales}
+          expenses={expenses}
+          activeOperatorName={currentUser?.name || ""}
+          onOpenRegister={async (valorAbertura, operador) => {
+            await handleOpenRegister(valorAbertura, operador);
+            setIsStandbyActive(false);
+            setActiveTab("sale");
+          }}
+          onCloseRegister={handleCloseRegister}
+          currentUser={currentUser}
+          adminUnlocked={adminUnlocked}
+          isCashRegisterOpen={isRegisterOpenForToday}
+          onRefreshRegister={() => {
+            checkGlobalRegisterStatus();
+          }}
+        />
+
+        <AdminUnlockModal
+          isOpen={adminUnlockOpen}
+          onClose={() => {
+            setAdminUnlockOpen(false);
+            setAdminUnlockSuccessCallback(null);
+          }}
+          onSuccess={handleAdminUnlockSuccess}
+          currentUser={currentUser}
+          message={adminUnlockMessage}
+        />
+      </>
     );
   }
 
