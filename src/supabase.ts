@@ -1431,73 +1431,75 @@ export async function dbSaveGoals(
  */
 export async function dbUploadImages(files: File[]): Promise<string[]> {
   const supabase = getSupabase();
-  if (!supabase) {
-    return [];
-  }
-
   const urls: string[] = [];
+  const filesToUploadViaServer: { name: string; base64: string; type: string }[] = [];
+
   for (const file of files) {
-    try {
-      // Create random unique name (using Timestamp + random alphanumeric ID)
-      const cleanName = file.name.replace(/[^A-Za-z0-9.]/g, "_");
-      const randomId = Math.random().toString(36).substring(2, 10);
-      const uniqueName = `${Date.now()}_${randomId}_${cleanName}`;
-      
-      const bucketName = "comprovantes";
-      
-      const { data, error } = await supabase.storage
-        .from(bucketName)
-        .upload(uniqueName, file, {
-          cacheControl: "3600",
-          upsert: false
-        });
+    let uploaded = false;
+    if (supabase) {
+      try {
+        const cleanName = file.name.replace(/[^A-Za-z0-9.]/g, "_");
+        const randomId = Math.random().toString(36).substring(2, 10);
+        const uniqueName = `${Date.now()}_${randomId}_${cleanName}`;
+        const bucketName = "comprovantes";
         
-      if (error) {
-        console.error("Supabase Storage Upload Error:", error);
-        
-        // Auto-provision bucket 'comprovantes' if it doesn't exist
-        if (error.message?.includes("bucket") || error.message?.includes("not found")) {
-          try {
-            console.log(`Bucket '${bucketName}' not found. Attempting creation...`);
-            await supabase.storage.createBucket(bucketName, {
-              public: true,
-              fileSizeLimit: 5242880 // 5MB Limit
-            });
-            
-            // Retry upload
-            const { data: retryData, error: retryError } = await supabase.storage
-              .from(bucketName)
-              .upload(uniqueName, file, {
-                cacheControl: "3600",
-                upsert: false
-              });
-              
-            if (!retryError && retryData) {
-              const { data: publicUrlData } = supabase.storage.from(bucketName).getPublicUrl(uniqueName);
-              if (publicUrlData?.publicUrl) {
-                urls.push(publicUrlData.publicUrl);
-                continue;
-              }
-            } else {
-              console.error("Retry upload failed:", retryError);
-            }
-          } catch (createErr) {
-            console.error("Bucket creation or retry exception:", createErr);
+        const { data, error } = await supabase.storage
+          .from(bucketName)
+          .upload(uniqueName, file, {
+            cacheControl: "3600",
+            upsert: true
+          });
+          
+        if (!error && data) {
+          const { data: publicUrlData } = supabase.storage.from(bucketName).getPublicUrl(uniqueName);
+          if (publicUrlData?.publicUrl) {
+            urls.push(publicUrlData.publicUrl);
+            uploaded = true;
           }
         }
-        continue;
+      } catch (e) {
+        console.warn("Direct storage upload failed, will fallback to server upload API:", e);
       }
-      
-      if (data) {
-        const { data: publicUrlData } = supabase.storage.from(bucketName).getPublicUrl(uniqueName);
-        if (publicUrlData?.publicUrl) {
-          urls.push(publicUrlData.publicUrl);
-        }
+    }
+
+    if (!uploaded) {
+      try {
+        const b64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        filesToUploadViaServer.push({
+          name: file.name,
+          base64: b64,
+          type: file.type || "image/jpeg"
+        });
+      } catch (readErr) {
+        console.error("Failed to read file for server upload:", readErr);
       }
-    } catch (e) {
-      console.error("dbUploadImages unexpected error:", e);
     }
   }
+
+  // If any file couldn't be uploaded directly to Supabase client-side, upload through server /api/upload
+  if (filesToUploadViaServer.length > 0) {
+    try {
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: filesToUploadViaServer })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && Array.isArray(json.urls)) {
+          urls.push(...json.urls);
+        }
+      }
+    } catch (srvErr) {
+      console.error("Server /api/upload failed:", srvErr);
+    }
+  }
+
   return urls;
 }
 

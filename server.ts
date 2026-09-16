@@ -1693,6 +1693,124 @@ ${JSON.stringify(sales, null, 2)}
     return res.json({ success: true });
   });
 
+  // Helper to ensure 'comprovantes' bucket exists and convert base64 image strings to public storage URLs
+  async function sanitizeAndStoreImages(supabase: any, clientImageValue: any): Promise<string | null> {
+    if (!clientImageValue) return null;
+    let list: string[] = [];
+    if (typeof clientImageValue === "string") {
+      if (clientImageValue.startsWith("[") || clientImageValue.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(clientImageValue);
+          list = Array.isArray(parsed) ? parsed : [parsed];
+        } catch (e) {
+          list = [clientImageValue];
+        }
+      } else {
+        list = [clientImageValue];
+      }
+    } else if (Array.isArray(clientImageValue)) {
+      list = clientImageValue;
+    }
+
+    const resultUrls: string[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      if (typeof item === "string" && item.startsWith("data:image/")) {
+        try {
+          const matches = item.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+          if (matches && matches.length === 3) {
+            const mimeType = matches[1];
+            const ext = mimeType.split("/")[1]?.split("+")[0] || "png";
+            const buffer = Buffer.from(matches[2], "base64");
+            const fileName = `sale_${Date.now()}_${Math.random().toString(36).substring(2, 9)}_${i}.${ext}`;
+            
+            try {
+              await supabase.storage.createBucket("comprovantes", { public: true });
+            } catch (bErr) {}
+
+            const { error: upErr } = await supabase.storage.from("comprovantes").upload(fileName, buffer, {
+              contentType: mimeType,
+              upsert: true
+            });
+            if (!upErr) {
+              const { data: pubData } = supabase.storage.from("comprovantes").getPublicUrl(fileName);
+              if (pubData?.publicUrl) {
+                resultUrls.push(pubData.publicUrl);
+                continue;
+              }
+            }
+          }
+        } catch (e) {
+          console.error("Failed to convert base64 image to storage URL in server:", e);
+        }
+        // If upload failed, avoid saving huge strings into Postgres
+        if (item.length < 50000) {
+          resultUrls.push(item);
+        }
+      } else if (typeof item === "string" && item.trim()) {
+        resultUrls.push(item);
+      }
+    }
+    return resultUrls.length > 0 ? JSON.stringify(resultUrls) : null;
+  }
+
+  // Safe Image Upload API (uses service_role to upload images to Supabase Storage 'comprovantes')
+  app.post("/api/upload", async (req, res) => {
+    try {
+      const { files } = req.body;
+      if (!Array.isArray(files) || files.length === 0) {
+        return res.status(400).json({ error: "Nenhum arquivo enviado" });
+      }
+      const supabase = getSupabaseClient();
+      if (!supabase) {
+        return res.status(500).json({ error: "Supabase não configurado" });
+      }
+
+      try {
+        await supabase.storage.createBucket("comprovantes", { public: true });
+      } catch (e) {}
+
+      const urls: string[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const fileObj = files[i];
+        const base64Data = fileObj.data || fileObj.base64;
+        if (!base64Data) continue;
+
+        let cleanBase64 = base64Data;
+        let mimeType = fileObj.type || "image/jpeg";
+        if (cleanBase64.startsWith("data:")) {
+          const match = cleanBase64.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+          if (match) {
+            mimeType = match[1];
+            cleanBase64 = match[2];
+          }
+        }
+        const ext = mimeType.split("/")[1]?.split("+")[0] || "jpg";
+        const buffer = Buffer.from(cleanBase64, "base64");
+        const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 10)}_${i}.${ext}`;
+
+        const { error: upErr } = await supabase.storage.from("comprovantes").upload(fileName, buffer, {
+          contentType: mimeType,
+          upsert: true
+        });
+
+        if (!upErr) {
+          const { data: pubData } = supabase.storage.from("comprovantes").getPublicUrl(fileName);
+          if (pubData?.publicUrl) {
+            urls.push(pubData.publicUrl);
+          }
+        } else {
+          console.error("Server upload error for image:", upErr);
+        }
+      }
+
+      return res.json({ success: true, urls });
+    } catch (err: any) {
+      console.error("[Server POST /api/upload Error]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Sales Management API (uses service_role to bypass client RLS 42501)
   app.post("/api/sales", async (req, res) => {
     try {
@@ -1724,6 +1842,8 @@ ${JSON.stringify(sales, null, 2)}
       });
       const clientPhoneWithMeta = `${sale.clientPhone || ""}::${metaStr}`;
 
+      const sanitizedImage = await sanitizeAndStoreImages(supabase, sale.clientImage);
+
       const payload: any = {
         id: sale.id,
         user_id: canonicalOwnerId,
@@ -1739,7 +1859,7 @@ ${JSON.stringify(sales, null, 2)}
         total_value: Number(sale.totalValue) || 0,
         balance_due: Number(sale.balanceDue) || 0,
         net_profit: Number(sale.netProfit) || (Number(sale.totalValue || 0) - Number(sale.operationCost || 0)),
-        client_image: sale.clientImage || null,
+        client_image: sanitizedImage,
         date: sale.date || new Date().toISOString(),
         is_budget: !!sale.isBudget,
         payment_method: sale.paymentMethod || "dinheiro"
@@ -2466,7 +2586,14 @@ ${JSON.stringify(sales, null, 2)}
             total_value: Number(s.totalValue ?? s.total_value ?? 0),
             balance_due: Number(s.balanceDue ?? s.balance_due ?? 0),
             net_profit: Number(s.netProfit ?? s.net_profit ?? 0),
-            client_image: s.clientImage || s.client_image || null,
+            client_image: (() => {
+              const img = s.clientImage || s.client_image || null;
+              if (typeof img === "string" && img.length > 50000) {
+                // If it contains huge base64 data, avoid bloating database
+                return null;
+              }
+              return img;
+            })(),
             date: s.date || new Date().toISOString(),
             is_budget: !!(s.isBudget || s.is_budget),
             payment_method: s.paymentMethod || s.payment_method || "dinheiro"

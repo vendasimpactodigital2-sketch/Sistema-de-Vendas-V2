@@ -888,15 +888,62 @@ export function SaleForm({
     });
   };
 
-  // Process a list or array of image files
-  const processImageFiles = (files: File[]) => {
+  // Helper to compress image files on client before upload/storage
+  const compressImageFile = async (file: File, maxWidth = 1600, maxHeight = 1600, quality = 0.82): Promise<File> => {
+    if (file.size <= 200 * 1024) return file;
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          let { width, height } = img;
+          if (width > maxWidth || height > maxHeight) {
+            if (width > height) {
+              height = Math.round((height * maxWidth) / width);
+              width = maxWidth;
+            } else {
+              width = Math.round((width * maxHeight) / height);
+              height = maxHeight;
+            }
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return resolve(file);
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob(
+            (blob) => {
+              if (!blob || blob.size >= file.size) return resolve(file);
+              const compressedFile = new File([blob], file.name.replace(/\.[^/.]+$/, "") + ".jpg", {
+                type: "image/jpeg",
+                lastModified: Date.now()
+              });
+              resolve(compressedFile);
+            },
+            "image/jpeg",
+            quality
+          );
+        };
+        img.onerror = () => resolve(file);
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = () => resolve(file);
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // Process a list or array of image files with auto-compression
+  const processImageFiles = async (files: File[]) => {
     const validImages = files.filter(file => file.type.startsWith("image/"));
     if (validImages.length === 0) {
       alert("Por favor, adicione apenas arquivos de imagem válidos.");
       return;
     }
 
-    const newImageItems: ImageItem[] = validImages.map((file) => ({
+    const compressed = await Promise.all(validImages.map(f => compressImageFile(f)));
+
+    const newImageItems: ImageItem[] = compressed.map((file) => ({
       id: Math.random().toString(36).substring(2, 10) + "_" + Date.now(),
       url: URL.createObjectURL(file),
       file
@@ -1050,26 +1097,25 @@ export function SaleForm({
       }
 
       if (filesToUpload.length > 0) {
-        // Upload via dbUploadImages
+        // Upload via dbUploadImages (supports direct storage and server API fallback)
         const uploaded = await dbUploadImages(filesToUpload);
         if (uploaded && uploaded.length > 0) {
           finalUrls.push(...uploaded);
         } else {
-          // Fallback if Supabase upload fails (e.g., if there's no supabase config)
-          if (isSupabaseConfigured()) {
-            throw new Error("Erro no upload do Supabase Storage.");
-          }
+          // Graceful fallback: convert compressed files to data URL only if small
           const base64s = await Promise.all(
-            filesToUpload.map((file) => {
-              return new Promise<string>((resolve, reject) => {
+            filesToUpload.map(async (file) => {
+              const compressed = await compressImageFile(file, 800, 800, 0.7);
+              return new Promise<string>((resolve) => {
                 const reader = new FileReader();
                 reader.onload = (e) => resolve(e.target?.result as string);
-                reader.onerror = (e) => reject(e);
-                reader.readAsDataURL(file);
+                reader.onerror = () => resolve("");
+                reader.readAsDataURL(compressed);
               });
             })
           );
-          finalUrls.push(...base64s);
+          const validBase64s = base64s.filter(s => s && s.length < 50000);
+          finalUrls.push(...validBase64s);
         }
       }
 
@@ -1078,7 +1124,6 @@ export function SaleForm({
       return JSON.stringify(finalUrls);
     } catch (err) {
       console.error("Erro no processamento das imagens:", err);
-      alert("Houve um problema ao salvar as imagens. Tentando salvar sem novos arquivos.");
       // Fallback: return already uploaded urls
       const existing = imageItems.filter(x => !x.file).map(x => x.url);
       return existing.length > 0 ? JSON.stringify(existing) : null;
