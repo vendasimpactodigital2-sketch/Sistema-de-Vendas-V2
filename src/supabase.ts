@@ -3667,7 +3667,7 @@ export async function dbOpenGlobalCashRegister(userId: string, session: any): Pr
           .from("sessoes_caixa")
           .upsert({
             id: session.id,
-            empresa_id: effectiveUserId,
+            empresa_id: "62f892b2-3855-4ae9-8b2d-42d4b6223815",
             status: "aberto",
             valor_abertura: session.valorAbertura || 0,
             data_abertura: session.dataAbertura || nowISO
@@ -3736,20 +3736,16 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
 
   const nowISO = new Date().toISOString();
 
-  // 1. Primary: update public.sessoes_caixa using both company_id and user_id
+  // 1. Primary: update public.sessoes_caixa using empresa_id
   if (supabase) {
     try {
       await supabase
         .from("sessoes_caixa")
         .update({
           status: "fechado",
-          data_fechamento: closingData.dataFechamento || nowISO,
-          valor_fechamento_real: closingData.valorFechamentoReal || 0,
-          valor_fechamento_esperado: closingData.valorFechamentoEsperado || 0,
-          observacoes: closingData.observacoes || "",
-          updated_at: nowISO
+          data_fechamento: closingData.dataFechamento || nowISO
         })
-        .or(`company_id.eq.${effectiveUserId},user_id.eq.${effectiveUserId}`)
+        .eq("empresa_id", "62f892b2-3855-4ae9-8b2d-42d4b6223815")
         .eq("status", "aberto");
       console.log("[dbCloseGlobalCashRegister] Successfully marked sessoes_caixa as fechado");
     } catch (e) {}

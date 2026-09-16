@@ -319,17 +319,19 @@ export function StandbyScreen({
           {/* Caixa Status - clickable to open cash register if closed */}
           <div 
             onClick={!isCashRegisterOpen ? onOpenCashRegister : undefined}
-            className={`p-2 bg-slate-900/60 border border-slate-850/80 rounded-xl flex items-center gap-2 backdrop-blur-md transition-all ${
-              !isCashRegisterOpen ? "cursor-pointer hover:bg-slate-800/80 hover:border-amber-500/50" : ""
+            className={`p-2 bg-slate-900/60 border rounded-xl flex items-center gap-2 backdrop-blur-md transition-all ${
+              !isCashRegisterOpen 
+                ? "cursor-pointer hover:bg-slate-800/80 hover:border-rose-500/60 border-rose-500/40 bg-rose-950/20" 
+                : "border-slate-850/80"
             }`}
             title={isCashRegisterOpen ? "Caixa Aberto" : "Caixa Fechado - Clique para Abrir"}
           >
-            <div className={`p-1.5 rounded-lg border ${isCashRegisterOpen ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/15 text-amber-400 border-amber-500/30'}`}>
+            <div className={`p-1.5 rounded-lg border ${isCashRegisterOpen ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border-rose-500/40 animate-pulse'}`}>
               <Wallet className="h-3.5 w-3.5" />
             </div>
             <div className="text-left min-w-0">
               <span className="text-[8px] font-mono text-slate-500 uppercase block font-bold leading-none">Caixa</span>
-              <span className={`text-[10px] font-black uppercase tracking-tight block truncate mt-0.5 ${isCashRegisterOpen ? 'text-emerald-400' : 'text-amber-400'}`}>
+              <span className={`text-[10px] font-black uppercase tracking-tight block truncate mt-0.5 ${isCashRegisterOpen ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {isCashRegisterOpen ? "Aberto" : "Fechado"}
               </span>
             </div>

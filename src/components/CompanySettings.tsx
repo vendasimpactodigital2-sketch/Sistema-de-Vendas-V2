@@ -38,7 +38,7 @@ import {
   Moon
 } from "lucide-react";
 import { CompanyProfile, User, CustomReminder, CashRegisterState, CashRegisterSession, BusinessHours } from "../types";
-import { dbExportAllData, dbImportAllData, dbGetCompanyProfile, isSupabaseConfigured, getAdminDomain, normalizeUserString, notifyRealtimeSync } from "../supabase";
+import { dbExportAllData, dbImportAllData, dbGetCompanyProfile, isSupabaseConfigured, getAdminDomain, normalizeUserString, notifyRealtimeSync, getSupabase } from "../supabase";
 
 const WEEKDAYS = [
   { key: "monday", label: "Segunda-feira" },
@@ -511,6 +511,179 @@ export function CompanySettings({
   const [backupSuccessMsg, setBackupSuccessMsg] = useState<string | null>(null);
   const backupFileInputRef = useRef<HTMLInputElement>(null);
 
+  // Backup list and Realtime sync from meus_dados table
+  interface BackupCloudItem {
+    id: string;
+    titulo: string;
+    descricao?: string | null;
+    valor?: number;
+    created_at: string;
+    empresa_id?: string;
+    user_id?: string;
+  }
+
+  const [cloudBackups, setCloudBackups] = useState<BackupCloudItem[]>([]);
+  const [loadingCloudBackups, setLoadingCloudBackups] = useState<boolean>(false);
+  const uploadCloudBackupInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingCloud, setUploadingCloud] = useState<boolean>(false);
+
+  const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+
+  // 1. SELECT na tabela meus_dados forçando estritamente o filtro por empresa_id = '62f892b2-3855-4ae9-8b2d-42d4b6223815'
+  const fetchCloudBackups = async () => {
+    const supabase = getSupabase();
+    if (!supabase) return;
+    setLoadingCloudBackups(true);
+    try {
+      let { data, error } = await supabase
+        .from("meus_dados")
+        .select("*")
+        .eq("empresa_id", UNIFIED_EMPRESA_ID)
+        .order("created_at", { ascending: false });
+
+      if (error && (error.code === "42703" || error.message?.includes("empresa_id"))) {
+        const fallback = await supabase
+          .from("meus_dados")
+          .select("*")
+          .eq("user_id", UNIFIED_EMPRESA_ID)
+          .order("created_at", { ascending: false });
+        data = fallback.data;
+      }
+
+      if (data) {
+        setCloudBackups(data);
+      }
+    } catch (err) {
+      console.warn("Aviso ao carregar backups da tabela meus_dados:", err);
+    } finally {
+      setLoadingCloudBackups(false);
+    }
+  };
+
+  // 2. Escuta Realtime do Supabase na tabela meus_dados para que novos uploads brotem na lista de todas as máquinas
+  useEffect(() => {
+    fetchCloudBackups();
+
+    const supabase = getSupabase();
+    if (!supabase) return;
+
+    const channel = supabase
+      .channel("sync_meus_dados_backups_realtime")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "meus_dados"
+        },
+        () => {
+          fetchCloudBackups();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const handleUploadBackupToCloud = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || !e.target.files[0]) return;
+    const file = e.target.files[0];
+    e.target.value = "";
+    setUploadingCloud(true);
+    setBackupSuccessMsg(null);
+    setBackupError(null);
+
+    try {
+      const text = await file.text();
+      try {
+        JSON.parse(text);
+      } catch (jsonErr) {
+        setBackupError("O arquivo selecionado não é um JSON válido.");
+        setUploadingCloud(false);
+        return;
+      }
+
+      const supabase = getSupabase();
+      if (!supabase) {
+        setBackupError("Supabase não configurado.");
+        setUploadingCloud(false);
+        return;
+      }
+
+      const payloadRecord: any = {
+        titulo: file.name,
+        descricao: text,
+        valor: file.size || text.length,
+        user_id: UNIFIED_EMPRESA_ID
+      };
+
+      try {
+        const { error } = await supabase.from("meus_dados").insert({
+          ...payloadRecord,
+          empresa_id: UNIFIED_EMPRESA_ID
+        });
+        if (error) throw error;
+      } catch (err: any) {
+        if (err?.code === "42703" || err?.message?.includes("empresa_id")) {
+          const { error: fallbackErr } = await supabase.from("meus_dados").insert(payloadRecord);
+          if (fallbackErr) throw fallbackErr;
+        } else {
+          throw err;
+        }
+      }
+
+      setBackupSuccessMsg(`Backup "${file.name}" salvo na nuvem com sucesso! Sincronizado para todas as máquinas.`);
+      setTimeout(() => setBackupSuccessMsg(null), 6000);
+      await fetchCloudBackups();
+    } catch (err: any) {
+      console.error("Erro ao enviar backup:", err);
+      setBackupError("Falha ao salvar backup na nuvem: " + (err.message || err));
+    } finally {
+      setUploadingCloud(false);
+    }
+  };
+
+  const handleRestoreCloudBackup = async (item: BackupCloudItem) => {
+    if (!item.descricao) {
+      alert("Arquivo de backup sem conteúdo.");
+      return;
+    }
+    const confirmed = window.confirm(`Deseja realmente restaurar os dados do backup "${item.titulo}" de ${new Date(item.created_at).toLocaleString("pt-BR")}? Isso atualizará os registros locais.`);
+    if (!confirmed) return;
+
+    try {
+      const mockFile = new File([item.descricao], item.titulo, { type: "application/json" });
+      await executeDirectRestore(mockFile);
+    } catch (err: any) {
+      setBackupError("Falha ao processar conteúdo do backup: " + (err.message || err));
+    }
+  };
+
+  const handleDownloadCloudBackup = (item: BackupCloudItem) => {
+    if (!item.descricao) return;
+    const blob = new Blob([item.descricao], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = item.titulo;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDeleteCloudBackup = async (id: string) => {
+    const confirmed = window.confirm("Excluir esta cópia de backup da nuvem?");
+    if (!confirmed) return;
+    const supabase = getSupabase();
+    if (supabase) {
+      await supabase.from("meus_dados").delete().eq("id", id);
+      setCloudBackups((prev) => prev.filter((b) => b.id !== id));
+    }
+  };
+
   const handleExportBackup = async () => {
     if (!currentUser) {
       alert("Você precisa estar logado para realizar um backup.");
@@ -542,7 +715,32 @@ export function CompanySettings({
       document.body.removeChild(link);
       URL.revokeObjectURL(downloadUrl);
 
-      setBackupSuccessMsg("Cópia de segurança exportada com sucesso! O arquivo .json foi salvo na sua pasta de Downloads.");
+      // Gravar na nuvem (tabela meus_dados) para sincronizar entre todos os computadores
+      const supabase = getSupabase();
+      if (supabase) {
+        try {
+          const jsonString = JSON.stringify(data);
+          const payloadRecord: any = {
+            titulo: `nexvolt_backup_${sanitizedName}_${dateStr}.json`,
+            descricao: jsonString,
+            valor: jsonString.length,
+            user_id: UNIFIED_EMPRESA_ID
+          };
+          try {
+            await supabase.from("meus_dados").insert({
+              ...payloadRecord,
+              empresa_id: UNIFIED_EMPRESA_ID
+            });
+          } catch (err: any) {
+            await supabase.from("meus_dados").insert(payloadRecord);
+          }
+          fetchCloudBackups();
+        } catch (dbErr) {
+          console.warn("Aviso ao salvar backup na tabela meus_dados:", dbErr);
+        }
+      }
+
+      setBackupSuccessMsg("Cópia de segurança exportada com sucesso! O arquivo .json foi salvo na sua pasta de Downloads e sincronizado na Nuvem.");
       setTimeout(() => setBackupSuccessMsg(null), 6000);
     } catch (err: any) {
       console.error(err);
@@ -1899,15 +2097,27 @@ export function CompanySettings({
             ) : null}
 
             {/* --- SEÇÃO CLOUD BACKUP --- */}
-            <div className="space-y-1 bg-slate-950/40 p-2 rounded-lg border border-slate-900/40">
-              <span className="text-[9px] font-black text-brand-magenta uppercase tracking-wider block">1. Backup Remoto (Nuvem Supabase)</span>
+            <div className="space-y-2 bg-slate-950/40 p-2.5 rounded-lg border border-slate-900/40">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-black text-brand-magenta uppercase tracking-wider block">1. Backup Remoto (Nuvem Supabase)</span>
+                <button
+                  type="button"
+                  onClick={fetchCloudBackups}
+                  className="text-[8px] text-slate-400 hover:text-brand-magenta flex items-center gap-1 font-mono transition-colors"
+                  title="Atualizar lista de backups"
+                >
+                  <RefreshCw className={`h-2.5 w-2.5 ${loadingCloudBackups ? "animate-spin" : ""}`} />
+                  <span>Sincronizar</span>
+                </button>
+              </div>
+
               <div className="grid grid-cols-2 gap-2 pt-1">
                 <button
                   type="button"
                   onClick={handleExportBackup}
                   disabled={exporting}
                   className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-gradient-to-r from-brand-magenta/80 to-pink-650/80 text-white hover:brightness-110 active:scale-95 transition-all text-[9px] font-extrabold uppercase shadow-sm shadow-pink-900/10 cursor-pointer disabled:opacity-50 h-[30px]"
-                  title="Exportar Todas as Informações da Nuvem"
+                  title="Exportar Todas as Informações da Nuvem e Salvar na Tabela"
                 >
                   {exporting ? (
                     <RefreshCw className="h-3 w-3 animate-spin shrink-0" />
@@ -1920,21 +2130,108 @@ export function CompanySettings({
                 <button
                   type="button"
                   onClick={() => {
-                    backupFileInputRef.current?.click();
+                    uploadCloudBackupInputRef.current?.click();
                   }}
-                  disabled={importing}
-                  className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 text-white hover:brightness-110 active:scale-95 transition-all text-[9px] font-extrabold uppercase shadow-sm shadow-emerald-500/10 cursor-pointer disabled:opacity-50 h-[30px]"
-                  title="Restaurar a partir de Cópia .JSON (carrega na mesma hora)"
+                  disabled={uploadingCloud}
+                  className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-gradient-to-r from-blue-600 to-cyan-500 text-white hover:brightness-110 active:scale-95 transition-all text-[9px] font-extrabold uppercase shadow-sm shadow-cyan-500/10 cursor-pointer disabled:opacity-50 h-[30px]"
+                  title="Enviar Arquivo de Backup (.JSON) para a Nuvem e Compartilhar com Todas as Máquinas"
                 >
-                  {importing ? (
+                  {uploadingCloud ? (
                     <RefreshCw className="h-3 w-3 animate-spin shrink-0" />
                   ) : (
                     <Upload className="h-3.5 w-3.5 shrink-0 text-white" />
                   )}
                   <span>
-                    {importing ? "Restaurando..." : "Restaurar Nuvem"}
+                    {uploadingCloud ? "Enviando..." : "Upload Nuvem"}
                   </span>
                 </button>
+              </div>
+
+              {/* Input oculto para upload direto para a nuvem */}
+              <input
+                ref={uploadCloudBackupInputRef}
+                type="file"
+                accept=".json"
+                onChange={handleUploadBackupToCloud}
+                className="hidden"
+              />
+
+              {/* LISTA DE BACKUPS SINCRONIZADOS EM TEMPO REAL */}
+              <div className="pt-2 border-t border-slate-900/60 space-y-1.5">
+                <div className="flex items-center justify-between text-[8px] font-bold text-slate-400 uppercase tracking-wider">
+                  <span>Arquivos na Nuvem ({cloudBackups.length})</span>
+                  <span className="text-emerald-400 flex items-center gap-1">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
+                    Realtime Ativo
+                  </span>
+                </div>
+
+                {loadingCloudBackups && cloudBackups.length === 0 ? (
+                  <div className="p-2 text-center text-[9px] text-slate-500 font-mono flex items-center justify-center gap-1.5">
+                    <RefreshCw className="h-3 w-3 animate-spin text-brand-magenta" />
+                    Carregando backups da nuvem...
+                  </div>
+                ) : cloudBackups.length === 0 ? (
+                  <div className="p-2 rounded bg-slate-900/40 border border-slate-900 text-center text-[9px] text-slate-500 font-mono">
+                    Nenhum backup em nuvem encontrado.
+                  </div>
+                ) : (
+                  <div className="max-h-40 overflow-y-auto space-y-1 pr-0.5 custom-scrollbar">
+                    {cloudBackups.map((bkp) => (
+                      <div
+                        key={bkp.id}
+                        className="p-1.5 rounded-lg bg-slate-900/70 border border-slate-800 hover:border-slate-700 flex items-center justify-between gap-2 transition-all"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <Database className="h-3 w-3 text-brand-magenta shrink-0" />
+                            <span className="text-[9px] font-bold text-slate-200 truncate block font-mono">
+                              {bkp.titulo}
+                            </span>
+                          </div>
+                          <span className="text-[8px] text-slate-400 block font-mono mt-0.5">
+                            {new Date(bkp.created_at).toLocaleString("pt-BR", {
+                              day: "2-digit",
+                              month: "2-digit",
+                              year: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit"
+                            })}
+                            {bkp.valor ? ` • ${(Number(bkp.valor) / 1024).toFixed(1)} KB` : ""}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleRestoreCloudBackup(bkp)}
+                            disabled={importing}
+                            className="px-1.5 py-0.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 rounded text-[8px] font-bold uppercase transition-colors cursor-pointer"
+                            title="Restaurar este backup nesta máquina"
+                          >
+                            Restaurar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadCloudBackup(bkp)}
+                            className="p-1 text-slate-400 hover:text-brand-cyan transition-colors cursor-pointer"
+                            title="Baixar arquivo .json"
+                          >
+                            <Download className="h-3 w-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCloudBackup(bkp.id)}
+                            className="p-1 text-slate-500 hover:text-red-400 transition-colors cursor-pointer"
+                            title="Excluir da nuvem"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 
