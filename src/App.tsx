@@ -985,13 +985,14 @@ export default function App() {
   const [isGlobalRegisterOpen, setIsGlobalRegisterOpen] = useState<boolean>(false);
 
   useEffect(() => {
+    let isMounted = true;
     const companyId = currentUser?.owner_id || currentUser?.id;
     if (!companyId) return;
 
     const supabase = getSupabase();
     if (!supabase) return;
 
-    // 2. Select inicial em public.sessoes_caixa checando status Aberto / Fechado
+    // 2. Select inicial em public.sessoes_caixa checando status Aberto / Fechado com proteção isMounted
     const checkInitialSession = async () => {
       try {
         const { data } = await supabase
@@ -1001,6 +1002,8 @@ export default function App() {
           .order("data_abertura", { ascending: false })
           .limit(1)
           .maybeSingle();
+
+        if (!isMounted) return;
 
         const isOpen = (data?.status || "").trim().toLowerCase() === "aberto";
         setIsGlobalRegisterOpen(isOpen);
@@ -1038,6 +1041,8 @@ export default function App() {
           filter: `company_id=eq.${companyId}`
         },
         (payload) => {
+          if (!isMounted) return;
+
           if (payload.eventType === "DELETE") {
             setIsGlobalRegisterOpen(false);
             setCashRegister((prev) => ({ ...prev, currentSession: null }));
@@ -1066,8 +1071,9 @@ export default function App() {
       )
       .subscribe();
 
-    // 4. Cleanup garantindo removeChannel
+    // 4. Cleanup garantindo isMounted = false e removeChannel
     return () => {
+      isMounted = false;
       supabase.removeChannel(channel);
     };
   }, [currentUser?.id, currentUser?.owner_id]);
@@ -2604,157 +2610,7 @@ export default function App() {
     };
   }, [currentUser, fetchSales, fetchExpenses, handleApplyRemoteSystemStructure]);
 
-  // Realtime Server-Sent Events (SSE) Multi-Terminal Instant Sync: instantly pushes cash register & sales changes between computers
-  useEffect(() => {
-    if (!currentUser) return;
-    const companyOwnerId = currentUser.owner_id || currentUser.id;
-    if (!companyOwnerId) return;
-
-    let eventSource: EventSource | null = null;
-    let reconnectTimeout: any = null;
-
-    const connectSSE = () => {
-      try {
-        eventSource = new EventSource(`/api/realtime/stream?companyId=${encodeURIComponent(companyOwnerId)}`);
-
-        eventSource.onopen = () => {
-          console.log("[Realtime SSE] Conectado ao stream em tempo real da empresa:", companyOwnerId);
-        };
-
-        eventSource.onmessage = (event) => {
-          if (!event.data || event.data.startsWith(":")) return;
-          try {
-            const parsed = JSON.parse(event.data);
-            if (parsed.type === "connected") return;
-
-            console.log("[Realtime SSE Event Received]", parsed.event, parsed.data);
-
-            if (parsed.event === "cash_register_updated") {
-              const remoteState = parsed.data?.state;
-              if (remoteState && typeof remoteState === "object") {
-                const remoteIsOpen = !!remoteState.currentSession && remoteState.currentSession.status === "aberto";
-                const currentLocal = cashRegisterRef.current;
-                const localIsOpen = !!currentLocal?.currentSession && currentLocal.currentSession.status === "aberto";
-
-                // If remote says closed, only close if current local session id is in closed history
-                if (!remoteIsOpen && localIsOpen) {
-                  const localSessionId = currentLocal?.currentSession?.id;
-                  const isExplicitlyClosedInRemote = !!localSessionId && (remoteState.history || []).some(
-                    (s: any) => s.id === localSessionId && s.status === "fechado"
-                  );
-                  if (isExplicitlyClosedInRemote) {
-                    setCashRegister(remoteState);
-                    cashRegisterRef.current = remoteState;
-                    setIsGlobalRegisterOpen(false);
-                    localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remoteState));
-                  }
-                } else {
-                  setCashRegister(remoteState);
-                  cashRegisterRef.current = remoteState;
-                  setIsGlobalRegisterOpen(remoteIsOpen);
-                  localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remoteState));
-                }
-              } else {
-                dbGetCashRegister(companyOwnerId).then(remote => {
-                  if (remote) {
-                    setCashRegister(remote);
-                    cashRegisterRef.current = remote;
-                    setIsGlobalRegisterOpen(!!remote.currentSession && remote.currentSession.status === "aberto");
-                  }
-                });
-              }
-            } else if (parsed.event === "sales_updated") {
-              triggerRemoteSync(currentUser, true, false);
-              window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: parsed }));
-              window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: parsed }));
-            } else if (parsed.event === "expenses_updated") {
-              triggerRemoteSync(currentUser, true, false);
-              window.dispatchEvent(new CustomEvent("expenses_remote_sync", { detail: parsed }));
-            } else if (parsed.event === "products_updated") {
-              window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: parsed }));
-              window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: parsed }));
-              // Update local state if a single product payload is present
-              if (parsed.data?.product) {
-                const prod = parsed.data.product;
-                setCatalogProducts(prev => {
-                  const idx = prev.findIndex(p => p.id === prod.id);
-                  if (idx >= 0) {
-                    const next = [...prev];
-                    next[idx] = prod;
-                    return next;
-                  }
-                  return [prod, ...prev];
-                });
-              } else if (parsed.data?.deletedId) {
-                const delId = parsed.data.deletedId;
-                setCatalogProducts(prev => prev.filter(p => p.id !== delId));
-              } else {
-                if (companyOwnerId) {
-                  dbGetCatalogProducts(companyOwnerId).then(list => {
-                    if (list && list.length > 0) setCatalogProducts(list);
-                  });
-                }
-              }
-            } else if (parsed.event === "clients_updated") {
-              window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: parsed }));
-              window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: parsed }));
-            } else if (parsed.event === "system_structure_published" || parsed.event === "structure_applied") {
-              console.log("[Realtime SSE] Evento de nova estrutura do sistema publicado:", parsed);
-              handleApplyRemoteSystemStructure(parsed.data || parsed);
-            } else if (parsed.event === "backup_restored") {
-              triggerRemoteSync(currentUser, true, true);
-              window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: parsed }));
-              window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: parsed }));
-              window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: parsed }));
-              window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: parsed }));
-              window.dispatchEvent(new CustomEvent("expenses_remote_sync", { detail: parsed }));
-              window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: parsed }));
-              if (companyOwnerId) {
-                dbGetCashRegister(companyOwnerId).then(remote => {
-                  if (remote) {
-                    setCashRegister(remote);
-                    cashRegisterRef.current = remote;
-                    setIsGlobalRegisterOpen(!!remote.currentSession && remote.currentSession.status === "aberto");
-                  }
-                });
-                dbGetCatalogProducts(companyOwnerId).then(list => {
-                  if (list && list.length > 0) setCatalogProducts(list);
-                });
-              }
-            } else if (parsed.event === "gastos_mensais_updated" || parsed.event === "goals_updated" || parsed.event === "company_updated" || parsed.event === "sync") {
-              triggerRemoteSync(currentUser, true, false);
-              window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: parsed }));
-            }
-          } catch (e) {
-            console.error("[Realtime SSE] Error parsing event:", e);
-          }
-        };
-
-        eventSource.onerror = () => {
-          if (eventSource) {
-            eventSource.close();
-            eventSource = null;
-          }
-          reconnectTimeout = setTimeout(connectSSE, 3000);
-        };
-      } catch (err) {
-        console.error("[Realtime SSE Connection Error]:", err);
-        reconnectTimeout = setTimeout(connectSSE, 4000);
-      }
-    };
-
-    connectSSE();
-
-    return () => {
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
-      if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
-      }
-    };
-  }, [currentUser, handleApplyRemoteSystemStructure]);
+  // Sincronização multi-terminal garantida diretamente via Supabase Realtime (sem SSE / rotas Vercel legadas)
 
   // Listener para eventos de sincronização remota via window custom events (app_remote_sync)
   useEffect(() => {

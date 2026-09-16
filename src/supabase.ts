@@ -3042,6 +3042,7 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
       const { data: openSessions, error: sessErr } = await supabase
         .from("sessoes_caixa")
         .select("*")
+        .eq("company_id", effectiveUserId)
         .order("created_at", { ascending: false })
         .limit(10);
 
@@ -3054,6 +3055,7 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
             const { data: histRows } = await supabase
               .from("historico_caixas")
               .select("*")
+              .eq("company_id", effectiveUserId)
               .order("created_at", { ascending: false })
               .limit(50);
             if (histRows && histRows.length > 0) {
@@ -3089,24 +3091,7 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
     }
   }
 
-  // 2. Fetch through secure server API with service_role to avoid RLS 42501
-  try {
-    const res = await fetch(`/api/cash-register?userId=${encodeURIComponent(effectiveUserId)}`);
-    if (res.ok) {
-      const json = await res.json();
-      if (json.success && json.data) {
-        let parsed = json.data;
-        if (typeof parsed === "string") {
-          try { parsed = JSON.parse(parsed); } catch (e) {}
-        }
-        return parsed as CashRegisterState;
-      }
-    }
-  } catch (apiErr) {
-    console.warn("Direct /api/cash-register GET error, falling back to direct client:", apiErr);
-  }
-
-  // 3. Fallback: direct Supabase client sales table
+  // 2. Fallback: direct Supabase client sales table
   if (!supabase) return null;
 
   try {
@@ -3267,7 +3252,7 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
       if (state.currentSession && state.currentSession.status === "aberto") {
         await supabase.from("sessoes_caixa").upsert({
           id: state.currentSession.id,
-          user_id: effectiveUserId,
+          company_id: effectiveUserId,
           status: "aberto",
           valor_abertura: state.currentSession.valorAbertura || 0,
           data_abertura: state.currentSession.dataAbertura || nowISO,
@@ -3278,14 +3263,14 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
         await supabase.from("sessoes_caixa").update({
           status: "fechado",
           updated_at: nowISO
-        }).eq("status", "aberto");
+        }).eq("company_id", effectiveUserId).eq("status", "aberto");
 
         if (state.history && state.history.length > 0) {
           const lastClosed = state.history[0];
           await supabase.from("historico_caixas").upsert({
             id: lastClosed.id,
             session_id: lastClosed.id,
-            user_id: effectiveUserId,
+            company_id: effectiveUserId,
             status: "fechado",
             valor_abertura: lastClosed.valorAbertura || 0,
             data_abertura: lastClosed.dataAbertura || nowISO,
@@ -3303,27 +3288,7 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
     }
   }
 
-  // 2. Primary: save through secure server API with service_role to avoid RLS 42501
-  try {
-    const res = await fetch("/api/cash-register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: effectiveUserId, state })
-    });
-    if (res.ok) {
-      const json = await res.json();
-      if (json.success) {
-        if (json.date) {
-          localStorage.setItem("NUCLEO_LAST_CASH_REGISTER_SYNCED_DATE", json.date);
-        }
-        return true;
-      }
-    }
-  } catch (apiErr) {
-    console.warn("Direct /api/cash-register POST error, falling back to direct client:", apiErr);
-  }
-
-  // 3. Fallback: direct Supabase client sales row
+  // 2. Direct Supabase client sales row
   if (!supabase) return false;
 
   const createPayload = (rowId: string, uid: string) => ({
@@ -3581,6 +3546,7 @@ export async function dbCheckGlobalCashRegister(userId: string): Promise<boolean
       const { data: sessData, error: sessErr } = await supabase
         .from("sessoes_caixa")
         .select("*")
+        .eq("company_id", effectiveUserId)
         .order("created_at", { ascending: false })
         .limit(10);
 
@@ -3736,6 +3702,7 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
           observacoes: closingData.observacoes || "",
           updated_at: nowISO
         })
+        .eq("company_id", effectiveUserId)
         .eq("status", "aberto");
       console.log("[dbCloseGlobalCashRegister] Successfully marked sessoes_caixa as fechado");
     } catch (e) {}
@@ -3747,7 +3714,7 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
         .upsert({
           id: sessionId || `hist_${Date.now()}`,
           session_id: sessionId,
-          user_id: effectiveUserId,
+          company_id: effectiveUserId,
           status: "fechado",
           valor_abertura: closingData.valorAbertura || 0,
           data_abertura: closingData.dataAbertura || nowISO,
