@@ -1078,6 +1078,8 @@ export async function dbSaveSale(userId: string, sale: Sale): Promise<boolean> {
     if (res.ok) {
       const json = await res.json();
       if (json.success) {
+        notifyRealtimeSync(userId, "sales_updated", { saleId: sale.id });
+        notifyRealtimeSync("global", "sales_updated", { saleId: sale.id });
         return true;
       }
     }
@@ -1158,6 +1160,8 @@ export async function dbSaveSale(userId: string, sale: Sale): Promise<boolean> {
         return false;
       }
     }
+    notifyRealtimeSync(userId, "sales_updated", { saleId: sale.id });
+    notifyRealtimeSync("global", "sales_updated", { saleId: sale.id });
     return true;
   } catch (err) {
     console.error("Supabase upsert sale exception:", err);
@@ -1174,6 +1178,7 @@ export async function dbDeleteSale(saleId: string): Promise<boolean> {
     if (res.ok) {
       const json = await res.json();
       if (json.success) {
+        notifyRealtimeSync("global", "sales_updated", { deletedId: saleId });
         return true;
       }
     }
@@ -1195,6 +1200,7 @@ export async function dbDeleteSale(saleId: string): Promise<boolean> {
       console.error("Error deleting sale:", error);
       return false;
     }
+    notifyRealtimeSync("global", "sales_updated", { deletedId: saleId });
     return true;
   } catch (err) {
     console.error("Supabase delete sale exception:", err);
@@ -3025,6 +3031,21 @@ export function isCashSessionExplicitlyClosed(row: any): boolean {
 }
 
 export async function dbGetCashRegister(userId: string): Promise<CashRegisterState | null> {
+  // 1. Primary: fetch through secure server API with service_role to avoid RLS/table discrepancies across machines
+  if (userId) {
+    try {
+      const res = await fetch(`/api/cash-register?userId=${encodeURIComponent(userId)}`);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && json.data) {
+          return json.data as CashRegisterState;
+        }
+      }
+    } catch (apiErr) {
+      console.warn("Direct /api/cash-register GET error, falling back to direct client:", apiErr);
+    }
+  }
+
   const supabase = getSupabase();
   let effectiveUserId = userId;
   if (supabase?.auth) {
@@ -3036,15 +3057,15 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
     } catch (e) {}
   }
 
-  // 1. Real table: check public.sessoes_caixa for any active open session
+  // 2. Real table: check public.sessoes_caixa for any active open session (querying both company_id and user_id)
   if (supabase) {
     try {
       const { data: openSessions, error: sessErr } = await supabase
         .from("sessoes_caixa")
         .select("*")
-        .eq("company_id", effectiveUserId)
+        .or(`company_id.eq.${effectiveUserId},user_id.eq.${effectiveUserId}`)
         .order("created_at", { ascending: false })
-        .limit(10);
+        .limit(15);
 
       if (!sessErr && openSessions && openSessions.length > 0) {
         const sessRow = openSessions.find((s: any) => isCashSessionActiveOrOpen(s));
@@ -3055,7 +3076,7 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
             const { data: histRows } = await supabase
               .from("historico_caixas")
               .select("*")
-              .eq("company_id", effectiveUserId)
+              .or(`company_id.eq.${effectiveUserId},user_id.eq.${effectiveUserId}`)
               .order("created_at", { ascending: false })
               .limit(50);
             if (histRows && histRows.length > 0) {
@@ -3246,13 +3267,34 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
     } catch (e) {}
   }
 
-  // 1. Real table: synchronize public.sessoes_caixa and public.historico_caixas
+  // 1. Primary: save through secure server API with service_role to broadcast SSE and save reliably
+  let serverSaved = false;
+  if (effectiveUserId) {
+    try {
+      const res = await fetch("/api/cash-register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: effectiveUserId, state })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success) {
+          serverSaved = true;
+        }
+      }
+    } catch (apiErr) {
+      console.warn("Direct /api/cash-register POST error, continuing with direct client fallback:", apiErr);
+    }
+  }
+
+  // 2. Real table: synchronize public.sessoes_caixa and public.historico_caixas (setting both user_id and company_id)
   if (supabase) {
     try {
       if (state.currentSession && state.currentSession.status === "aberto") {
         await supabase.from("sessoes_caixa").upsert({
           id: state.currentSession.id,
           company_id: effectiveUserId,
+          user_id: effectiveUserId,
           status: "aberto",
           valor_abertura: state.currentSession.valorAbertura || 0,
           data_abertura: state.currentSession.dataAbertura || nowISO,
@@ -3263,7 +3305,7 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
         await supabase.from("sessoes_caixa").update({
           status: "fechado",
           updated_at: nowISO
-        }).eq("company_id", effectiveUserId).eq("status", "aberto");
+        }).or(`company_id.eq.${effectiveUserId},user_id.eq.${effectiveUserId}`).eq("status", "aberto");
 
         if (state.history && state.history.length > 0) {
           const lastClosed = state.history[0];
@@ -3271,6 +3313,7 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
             id: lastClosed.id,
             session_id: lastClosed.id,
             company_id: effectiveUserId,
+            user_id: effectiveUserId,
             status: "fechado",
             valor_abertura: lastClosed.valorAbertura || 0,
             data_abertura: lastClosed.dataAbertura || nowISO,
@@ -3288,40 +3331,39 @@ export async function dbSaveCashRegister(userId: string, state: CashRegisterStat
     }
   }
 
-  // 2. Direct Supabase client sales row
-  if (!supabase) return false;
+  // 3. Direct Supabase client sales row
+  if (supabase) {
+    const createPayload = (rowId: string, uid: string) => ({
+      id: rowId,
+      user_id: uid,
+      client_name: "CASH_REGISTER_SYNCED_STATE",
+      client_phone: "CASH_REGISTER",
+      items: state as any,
+      total_value: 0,
+      is_budget: true,
+      operation_cost: 0,
+      balance_due: 0,
+      net_profit: 0,
+      discount: 0,
+      down_payment: 0,
+      motoboy_cost: 0,
+      date: nowISO
+    });
 
-  const createPayload = (rowId: string, uid: string) => ({
-    id: rowId,
-    user_id: uid,
-    client_name: "CASH_REGISTER_SYNCED_STATE",
-    client_phone: "CASH_REGISTER",
-    items: state as any,
-    total_value: 0,
-    is_budget: true,
-    operation_cost: 0,
-    balance_due: 0,
-    net_profit: 0,
-    discount: 0,
-    down_payment: 0,
-    motoboy_cost: 0,
-    date: nowISO
-  });
+    try {
+      const scopedPayload = createPayload(`cash_register_state_${effectiveUserId}`, effectiveUserId);
+      await supabase.from("sales").upsert(scopedPayload);
+    } catch (err) {}
+  }
 
-  let saved = false;
+  // 4. Instant multi-terminal broadcast via notifyRealtimeSync & local event
+  notifyRealtimeSync(effectiveUserId, "cash_register_updated", { state });
+  notifyRealtimeSync("global", "cash_register_updated", { state });
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("cash_register_remote_sync", { detail: { state } }));
+  }
 
-  try {
-    const scopedPayload = createPayload(`cash_register_state_${effectiveUserId}`, effectiveUserId);
-    const { error: scopedError } = await supabase
-      .from("sales")
-      .upsert(scopedPayload);
-
-    if (!scopedError) {
-      saved = true;
-    }
-  } catch (err) {}
-
-  return saved;
+  return true;
 }
 
 // ==========================================
@@ -3527,6 +3569,15 @@ export async function dbDeleteCliente(clienteId: string, ownerId?: string): Prom
 // ==========================================
 
 export async function dbCheckGlobalCashRegister(userId: string): Promise<boolean> {
+  // 1. Primary: check canonical cash register state via dbGetCashRegister (which calls /api/cash-register first)
+  try {
+    const state = await dbGetCashRegister(userId);
+    if (state?.currentSession && isCashSessionActiveOrOpen(state.currentSession)) {
+      console.log(`[dbCheckGlobalCashRegister] Open session active in cash_register_state for user ${userId}`);
+      return true;
+    }
+  } catch (err) {}
+
   const supabase = getSupabase();
   if (!supabase) return false;
 
@@ -3541,12 +3592,12 @@ export async function dbCheckGlobalCashRegister(userId: string): Promise<boolean
       } catch (e) {}
     }
 
-    // 1. Primary check on public.sessoes_caixa for any active session
+    // 2. Real table check on public.sessoes_caixa for any active session (querying both company_id and user_id)
     try {
       const { data: sessData, error: sessErr } = await supabase
         .from("sessoes_caixa")
         .select("*")
-        .eq("company_id", effectiveUserId)
+        .or(`company_id.eq.${effectiveUserId},user_id.eq.${effectiveUserId}`)
         .order("created_at", { ascending: false })
         .limit(10);
 
@@ -3561,15 +3612,6 @@ export async function dbCheckGlobalCashRegister(userId: string): Promise<boolean
       console.warn("[dbCheckGlobalCashRegister] sessoes_caixa check notice:", err);
     }
 
-    // 2. Secondary check: fetch canonical cash register state
-    try {
-      const state = await dbGetCashRegister(effectiveUserId);
-      if (state?.currentSession && isCashSessionActiveOrOpen(state.currentSession)) {
-        console.log(`[dbCheckGlobalCashRegister] Open session active in cash_register_state for user ${effectiveUserId}`);
-        return true;
-      }
-    } catch (err) {}
-
     // 3. Auxiliary tables check (fluxo_caixa, etc.)
     const tableNames = ["fluxo_caixa", "fluxo_de_caixa", "fluxo_caixas", "fluxo_de_caixas"];
     for (const tableName of tableNames) {
@@ -3577,6 +3619,7 @@ export async function dbCheckGlobalCashRegister(userId: string): Promise<boolean
         const { data, error } = await supabase
           .from(tableName)
           .select("*")
+          .or(`user_id.eq.${effectiveUserId},company_id.eq.${effectiveUserId}`)
           .order("created_at", { ascending: false })
           .limit(5);
 
@@ -3601,28 +3644,27 @@ export async function dbCheckGlobalCashRegister(userId: string): Promise<boolean
 
 export async function dbOpenGlobalCashRegister(userId: string, session: any): Promise<boolean> {
   const supabase = getSupabase();
-  if (!supabase) return false;
+  let effectiveUserId = userId;
+  if (supabase?.auth) {
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      if (authData?.user?.id) {
+        effectiveUserId = authData.user.id;
+      }
+    } catch (e) {}
+  }
 
-  try {
-    let effectiveUserId = userId;
-    if (supabase.auth) {
-      try {
-        const { data: authData } = await supabase.auth.getUser();
-        if (authData?.user?.id) {
-          effectiveUserId = authData.user.id;
-        }
-      } catch (e) {}
-    }
+  const nowISO = new Date().toISOString();
 
-    const nowISO = new Date().toISOString();
-
-    // 1. Primary: upsert into public.sessoes_caixa
+  // 1. Primary: upsert into public.sessoes_caixa setting BOTH user_id and company_id
+  if (supabase) {
     try {
       const { error: sessErr } = await supabase
         .from("sessoes_caixa")
         .upsert({
           id: session.id || `session_${Date.now()}`,
           user_id: effectiveUserId,
+          company_id: effectiveUserId,
           status: "aberto",
           valor_abertura: session.valorAbertura || 0,
           data_abertura: session.dataAbertura || nowISO,
@@ -3642,6 +3684,7 @@ export async function dbOpenGlobalCashRegister(userId: string, session: any): Pr
 
     const payload = {
       user_id: effectiveUserId,
+      company_id: effectiveUserId,
       data: todayStr,
       data_abertura: session.dataAbertura || nowISO,
       valor_abertura: session.valorAbertura || 0,
@@ -3665,32 +3708,34 @@ export async function dbOpenGlobalCashRegister(userId: string, session: any): Pr
         // Try next
       }
     }
-
-    return true;
-  } catch (err) {
-    console.error("Exception in dbOpenGlobalCashRegister:", err);
-    return false;
   }
+
+  // 2. Realtime notification broadcast
+  notifyRealtimeSync(effectiveUserId, "cash_register_updated", { session });
+  notifyRealtimeSync("global", "cash_register_updated", { session });
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("cash_register_remote_sync", { detail: { session } }));
+  }
+
+  return true;
 }
 
 export async function dbCloseGlobalCashRegister(userId: string, sessionId: string, closingData: any): Promise<boolean> {
   const supabase = getSupabase();
-  if (!supabase) return false;
+  let effectiveUserId = userId;
+  if (supabase?.auth) {
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      if (authData?.user?.id) {
+        effectiveUserId = authData.user.id;
+      }
+    } catch (e) {}
+  }
 
-  try {
-    let effectiveUserId = userId;
-    if (supabase.auth) {
-      try {
-        const { data: authData } = await supabase.auth.getUser();
-        if (authData?.user?.id) {
-          effectiveUserId = authData.user.id;
-        }
-      } catch (e) {}
-    }
+  const nowISO = new Date().toISOString();
 
-    const nowISO = new Date().toISOString();
-
-    // 1. Primary: update public.sessoes_caixa
+  // 1. Primary: update public.sessoes_caixa using both company_id and user_id
+  if (supabase) {
     try {
       await supabase
         .from("sessoes_caixa")
@@ -3702,12 +3747,12 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
           observacoes: closingData.observacoes || "",
           updated_at: nowISO
         })
-        .eq("company_id", effectiveUserId)
+        .or(`company_id.eq.${effectiveUserId},user_id.eq.${effectiveUserId}`)
         .eq("status", "aberto");
       console.log("[dbCloseGlobalCashRegister] Successfully marked sessoes_caixa as fechado");
     } catch (e) {}
 
-    // 2. Primary: record in public.historico_caixas
+    // 2. Primary: record in public.historico_caixas setting both company_id and user_id
     try {
       await supabase
         .from("historico_caixas")
@@ -3715,6 +3760,7 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
           id: sessionId || `hist_${Date.now()}`,
           session_id: sessionId,
           company_id: effectiveUserId,
+          user_id: effectiveUserId,
           status: "fechado",
           valor_abertura: closingData.valorAbertura || 0,
           data_abertura: closingData.dataAbertura || nowISO,
@@ -3740,24 +3786,23 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
     const tableNames = ["fluxo_caixa", "fluxo_de_caixa", "fluxo_caixas", "fluxo_de_caixas"];
     for (const tableName of tableNames) {
       try {
-        const { error } = await supabase
+        await supabase
           .from(tableName)
           .update(payload)
+          .or(`user_id.eq.${effectiveUserId},company_id.eq.${effectiveUserId}`)
           .eq("status", "aberto");
-
-        if (!error) {
-          console.log(`[dbCloseGlobalCashRegister] Successfully closed register in ${tableName}`);
-        }
-      } catch (err) {
-        // Try next
-      }
+      } catch (err) {}
     }
-
-    return true;
-  } catch (err) {
-    console.error("Exception in dbCloseGlobalCashRegister:", err);
-    return false;
   }
+
+  // 3. Realtime notification broadcast
+  notifyRealtimeSync(effectiveUserId, "cash_register_updated", { closed: true, sessionId });
+  notifyRealtimeSync("global", "cash_register_updated", { closed: true, sessionId });
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("cash_register_remote_sync", { detail: { closed: true, sessionId } }));
+  }
+
+  return true;
 }
 
 export async function dbGetSupportFeedbacks(userId?: string): Promise<SupportFeedback[]> {

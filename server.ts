@@ -2245,7 +2245,7 @@ ${JSON.stringify(sales, null, 2)}
         return res.json({ success: true, message: "Supabase não configurado no servidor" });
       }
 
-      const { canonicalOwnerId } = await resolveCompanyScope(supabase, userId);
+      const { canonicalOwnerId, companyUserIds } = await resolveCompanyScope(supabase, userId);
 
       // Ensure user exists in users table
       try {
@@ -2256,6 +2256,23 @@ ${JSON.stringify(sales, null, 2)}
           password: ""
         }, { onConflict: "id", ignoreDuplicates: true });
       } catch (e) {}
+
+      // Normalize backup payload in case it's a LocalStorage dump or nested backup structure
+      const dumpCandidate = backupData.localStorageDump || backupData;
+      
+      const parseDumpKey = (keyName: string) => {
+        if (!dumpCandidate || typeof dumpCandidate !== "object") return null;
+        const val = dumpCandidate[keyName];
+        if (!val) return null;
+        if (typeof val === "string") {
+          try {
+            return JSON.parse(val);
+          } catch (e) {
+            return null;
+          }
+        }
+        return val;
+      };
 
       const counts = {
         sales: 0,
@@ -2269,10 +2286,11 @@ ${JSON.stringify(sales, null, 2)}
       };
 
       // 1. Company Profile
-      if (backupData.company_profile) {
+      const compProf = backupData.company_profile || backupData.companyProfile || parseDumpKey("NUCLEO_COMPANY_PROFILE") || parseDumpKey("COMPANY_PROFILE");
+      if (compProf && typeof compProf === "object") {
         try {
           await supabase.from("company_profile").upsert({
-            ...backupData.company_profile,
+            ...compProf,
             user_id: canonicalOwnerId,
             updated_at: new Date().toISOString()
           });
@@ -2283,10 +2301,11 @@ ${JSON.stringify(sales, null, 2)}
       }
 
       // 2. Goals
-      if (backupData.goals) {
+      const goalsObj = backupData.goals || backupData.metas || parseDumpKey("NUCLEO_GOALS");
+      if (goalsObj && typeof goalsObj === "object") {
         try {
           await supabase.from("goals").upsert({
-            ...backupData.goals,
+            ...goalsObj,
             user_id: canonicalOwnerId,
             updated_at: new Date().toISOString()
           });
@@ -2297,7 +2316,12 @@ ${JSON.stringify(sales, null, 2)}
       }
 
       // 3. Clientes
-      const rawClientes = Array.isArray(backupData.clientes) ? backupData.clientes : [];
+      let rawClientes = Array.isArray(backupData.clientes) ? backupData.clientes : 
+                        Array.isArray(backupData.clients) ? backupData.clients : [];
+      if (rawClientes.length === 0) {
+        const fromDump = parseDumpKey("NUCLEO_CLIENTS") || parseDumpKey("NUCLEO_CLIENTES");
+        if (Array.isArray(fromDump)) rawClientes = fromDump;
+      }
       if (rawClientes.length > 0) {
         const batchClientes = rawClientes.map((c: any) => ({
           id: c.id || "client_" + Math.random().toString(36).substring(2, 9),
@@ -2323,7 +2347,12 @@ ${JSON.stringify(sales, null, 2)}
       }
 
       // 4. Produtos (both PT and EN columns to ensure compatibility)
-      const rawProdutos = Array.isArray(backupData.produtos) ? backupData.produtos : [];
+      let rawProdutos = Array.isArray(backupData.produtos) ? backupData.produtos : 
+                        Array.isArray(backupData.products) ? backupData.products : [];
+      if (rawProdutos.length === 0) {
+        const fromDump = parseDumpKey("NUCLEO_PRODUCTS") || parseDumpKey("NUCLEO_PRODUTOS");
+        if (Array.isArray(fromDump)) rawProdutos = fromDump;
+      }
       if (rawProdutos.length > 0) {
         const batchProdutos = rawProdutos.map((p: any) => {
           const id = p.id || "prod_" + Math.random().toString(36).substring(2, 9);
@@ -2349,7 +2378,8 @@ ${JSON.stringify(sales, null, 2)}
             sale_price: sale,
             profit: profit,
             min_stock: minStock,
-            current_stock: currentStock
+            current_stock: currentStock,
+            image: p.image || p.foto || p.imagem || null
           };
         });
 
@@ -2379,8 +2409,18 @@ ${JSON.stringify(sales, null, 2)}
       }
 
       // 5. Sales & Budgets
-      const rawSales = Array.isArray(backupData.sales) ? backupData.sales : [];
-      const rawBudgets = Array.isArray(backupData.budgets) ? backupData.budgets : [];
+      let rawSales = Array.isArray(backupData.sales) ? backupData.sales : 
+                     Array.isArray(backupData.vendas) ? backupData.vendas : [];
+      let rawBudgets = Array.isArray(backupData.budgets) ? backupData.budgets : 
+                       Array.isArray(backupData.orcamentos) ? backupData.orcamentos : [];
+      if (rawSales.length === 0) {
+        const fromDump = parseDumpKey("NUCLEO_SALES") || parseDumpKey("NUCLEO_VENDAS");
+        if (Array.isArray(fromDump)) rawSales = fromDump;
+      }
+      if (rawBudgets.length === 0) {
+        const fromDump = parseDumpKey("NUCLEO_BUDGETS") || parseDumpKey("NUCLEO_ORCAMENTOS");
+        if (Array.isArray(fromDump)) rawBudgets = fromDump;
+      }
       const allSales = [...rawSales];
       rawBudgets.forEach((b: any) => {
         if (!allSales.some((s: any) => s.id === b.id)) {
@@ -2451,7 +2491,13 @@ ${JSON.stringify(sales, null, 2)}
       }
 
       // 6. Expenses
-      const rawExpenses = Array.isArray(backupData.expenses) ? backupData.expenses : [];
+      let rawExpenses = Array.isArray(backupData.expenses) ? backupData.expenses : 
+                        Array.isArray(backupData.despesas) ? backupData.despesas : 
+                        Array.isArray(backupData.gastos) ? backupData.gastos : [];
+      if (rawExpenses.length === 0) {
+        const fromDump = parseDumpKey("NUCLEO_EXPENSES") || parseDumpKey("NUCLEO_DESPESAS");
+        if (Array.isArray(fromDump)) rawExpenses = fromDump;
+      }
       if (rawExpenses.length > 0) {
         const batchExpenses = rawExpenses.map((e: any) => ({
           id: e.id || "exp_" + Math.random().toString(36).substring(2, 9),
@@ -2471,7 +2517,13 @@ ${JSON.stringify(sales, null, 2)}
       }
 
       // 7. Gastos Mensais (Recurring / Monthly Bills)
-      const rawGastos = Array.isArray(backupData.gastos_mensais) ? backupData.gastos_mensais : [];
+      let rawGastos = Array.isArray(backupData.gastos_mensais) ? backupData.gastos_mensais : 
+                      Array.isArray(backupData.faturas) ? backupData.faturas : 
+                      Array.isArray(backupData.recurring_expenses) ? backupData.recurring_expenses : [];
+      if (rawGastos.length === 0) {
+        const fromDump = parseDumpKey("NUCLEO_RECURRING_EXPENSES") || parseDumpKey("NUCLEO_GASTOS_MENSAIS");
+        if (Array.isArray(fromDump)) rawGastos = fromDump;
+      }
       if (rawGastos.length > 0) {
         const batchGastos = rawGastos.map((g: any) => ({
           id: g.id || "bill_" + Math.random().toString(36).substring(2, 9),
@@ -2492,8 +2544,11 @@ ${JSON.stringify(sales, null, 2)}
       }
 
       // 8. Cash Register State
-      if (backupData.cash_register_state || backupData.cash_register) {
-        const regState = backupData.cash_register_state || backupData.cash_register;
+      let regState = backupData.cash_register_state || backupData.cash_register || backupData.cashRegister;
+      if (!regState) {
+        regState = parseDumpKey("NUCLEO_CASH_REGISTER") || parseDumpKey("NUCLEO_CASH_REGISTER_STATE");
+      }
+      if (regState) {
         const nowISO = new Date().toISOString();
         const createPayload = (rowId: string) => ({
           id: rowId,
@@ -2520,15 +2575,19 @@ ${JSON.stringify(sales, null, 2)}
       }
 
       // BROADCAST REALTIME SYNC ACROSS ALL COMPUTERS AND TERMINALS
-      broadcastSyncEvent(canonicalOwnerId, "backup_restored", { counts, timestamp: Date.now() });
-      broadcastSyncEvent(canonicalOwnerId, "products_updated", { count: counts.produtos });
-      broadcastSyncEvent(canonicalOwnerId, "sales_updated", { count: counts.sales });
-      broadcastSyncEvent(canonicalOwnerId, "expenses_updated", { count: counts.expenses });
-      broadcastSyncEvent(canonicalOwnerId, "clients_updated", { count: counts.clientes });
-      broadcastSyncEvent(userId, "backup_restored", { counts, timestamp: Date.now() });
+      const targets = Array.from(new Set([canonicalOwnerId, userId, ...(companyUserIds || [])]));
+      targets.forEach((targetId: string) => {
+        broadcastSyncEvent(targetId, "backup_restored", { counts, timestamp: Date.now() });
+        broadcastSyncEvent(targetId, "products_updated", { count: counts.produtos });
+        broadcastSyncEvent(targetId, "sales_updated", { count: counts.sales });
+        broadcastSyncEvent(targetId, "expenses_updated", { count: counts.expenses });
+        broadcastSyncEvent(targetId, "clients_updated", { count: counts.clientes });
+      });
       broadcastSyncEvent("global", "backup_restored", { counts, timestamp: Date.now() });
       broadcastSyncEvent("global", "products_updated", { count: counts.produtos });
       broadcastSyncEvent("global", "sales_updated", { count: counts.sales });
+      broadcastSyncEvent("global", "expenses_updated", { count: counts.expenses });
+      broadcastSyncEvent("global", "clients_updated", { count: counts.clientes });
 
       return res.json({ success: true, counts });
     } catch (err: any) {

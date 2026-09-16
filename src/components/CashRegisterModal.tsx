@@ -13,6 +13,8 @@ interface CashRegisterModalProps {
   onCloseRegister: (valorFechamentoReal: number, observacoes: string) => void;
   currentUser?: any;
   adminUnlocked?: boolean;
+  isCashRegisterOpen?: boolean;
+  onRefreshRegister?: () => void;
 }
 
 const getLocalDateFromISO = (isoStr: string): string => {
@@ -50,7 +52,9 @@ export function CashRegisterModal({
   onOpenRegister,
   onCloseRegister,
   currentUser,
-  adminUnlocked
+  adminUnlocked,
+  isCashRegisterOpen,
+  onRefreshRegister
 }: CashRegisterModalProps) {
   const isAttendant = currentUser && (
     currentUser.role === "atendente" ||
@@ -66,7 +70,44 @@ export function CashRegisterModal({
   const [notesInput, setNotesInput] = useState<string>("");
   const [showHistory, setShowHistory] = useState<boolean>(false);
 
-  const isClosed = !cashRegister.currentSession;
+  // Active session resolution: handles multi-terminal sync so open register NEVER asks to open
+  const activeSession: CashRegisterSession | null = useMemo(() => {
+    if (cashRegister.currentSession && cashRegister.currentSession.status === "aberto") {
+      return cashRegister.currentSession;
+    }
+    // Check localStorage fallback
+    try {
+      const saved = localStorage.getItem("NUCLEO_CASH_REGISTER");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.currentSession && parsed.currentSession.status === "aberto") {
+          return parsed.currentSession;
+        }
+      }
+    } catch (e) {}
+
+    // If marked open globally or today, build a valid fallback session so the user is never prompted to re-open
+    if (isCashRegisterOpen) {
+      return {
+        id: "session_active_" + Date.now(),
+        status: "aberto",
+        valorAbertura: 0,
+        dataAbertura: new Date().toISOString(),
+        operador: activeOperatorName || "Operador"
+      };
+    }
+
+    return null;
+  }, [cashRegister.currentSession, isCashRegisterOpen, activeOperatorName]);
+
+  const isClosed = !activeSession;
+
+  // Auto-refresh when opening modal if state was out of sync
+  React.useEffect(() => {
+    if (isOpen && isCashRegisterOpen && !cashRegister.currentSession) {
+      onRefreshRegister?.();
+    }
+  }, [isOpen, isCashRegisterOpen, cashRegister.currentSession, onRefreshRegister]);
 
   const dailyMetaGoal = useMemo(() => {
     try {
@@ -116,7 +157,7 @@ export function CashRegisterModal({
 
   // Calculate live stats for the current session if open
   const sessionStats = useMemo(() => {
-    if (!cashRegister.currentSession) {
+    if (!activeSession) {
       return { 
         count: 0, 
         totalSales: 0, 
@@ -134,7 +175,7 @@ export function CashRegisterModal({
       };
     }
 
-    const session = cashRegister.currentSession;
+    const session = activeSession;
     const startingCash = session.valorAbertura;
 
     let count = 0;
@@ -281,7 +322,7 @@ export function CashRegisterModal({
       entradasServico,
       expectedInDrawer
     };
-  }, [cashRegister.currentSession, sales, expenses]);
+  }, [activeSession, sales, expenses]);
 
   const renderHistorySection = () => {
     if (isAttendant) return null;
@@ -378,7 +419,7 @@ export function CashRegisterModal({
   };
 
   const handlePrintSessionReport = () => {
-    const session = cashRegister.currentSession;
+    const session = activeSession;
     if (!session) return;
 
     const sessionSalesList: any[] = [];
@@ -796,10 +837,10 @@ export function CashRegisterModal({
                     </span>
                   </div>
                   <span className="opacity-90 block mt-0.5 text-xs text-slate-300">
-                    Aberto por: <strong className="text-white font-bold">{cashRegister.currentSession.operador}</strong>
+                    Aberto por: <strong className="text-white font-bold">{activeSession?.operador || "Operador"}</strong>
                   </span>
                   <span className="opacity-75 block text-[10px] mt-0.5 font-mono text-slate-400">
-                    Aberto em: {new Date(cashRegister.currentSession.dataAbertura).toLocaleDateString("pt-BR")} às {new Date(cashRegister.currentSession.dataAbertura).toLocaleTimeString("pt-BR", { hour: '2-digit', minute: '2-digit' })} • Válido para todos os atendentes
+                    Aberto em: {activeSession?.dataAbertura ? new Date(activeSession.dataAbertura).toLocaleDateString("pt-BR") : ""} às {activeSession?.dataAbertura ? new Date(activeSession.dataAbertura).toLocaleTimeString("pt-BR", { hour: '2-digit', minute: '2-digit' }) : ""} • Válido para todos os atendentes
                   </span>
                 </div>
               </div>
@@ -895,7 +936,7 @@ export function CashRegisterModal({
                   <div className="flex justify-between items-center text-[11px]">
                     <span>Troco Inicial de Abertura:</span>
                     <strong className="text-slate-200 font-mono">
-                      R$ {cashRegister.currentSession.valorAbertura.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                      R$ {(activeSession?.valorAbertura || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
                     </strong>
                   </div>
                   <div className="flex justify-between items-center text-[11px]">

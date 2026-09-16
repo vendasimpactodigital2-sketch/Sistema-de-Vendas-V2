@@ -1120,6 +1120,26 @@ export default function App() {
             try {
               localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remoteState));
             } catch (e) {}
+          } else {
+            // Register is verified open globally, ensure local session reflects it so clicking NEVER asks to open
+            const existingOpen = (cashRegisterRef.current?.currentSession && isCashSessionActiveOrOpen(cashRegisterRef.current.currentSession))
+              ? cashRegisterRef.current.currentSession
+              : {
+                  id: `session_${Date.now()}`,
+                  status: "aberto" as const,
+                  valorAbertura: 0,
+                  dataAbertura: new Date().toISOString(),
+                  operador: currentUser?.name || "Operador"
+                };
+            const ensuredState: CashRegisterState = {
+              currentSession: existingOpen,
+              history: remoteState?.history || cashRegisterRef.current?.history || []
+            };
+            setCashRegister(ensuredState);
+            cashRegisterRef.current = ensuredState;
+            try {
+              localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(ensuredState));
+            } catch (e) {}
           }
           return true;
         }
@@ -2397,12 +2417,18 @@ export default function App() {
         {
           event: "*",
           schema: "public",
-          table: "sessoes_caixa",
-          filter: companyOwnerId ? `company_id=eq.${companyOwnerId}` : undefined
+          table: "sessoes_caixa"
         },
         (payload) => {
           console.log("[Supabase Realtime] Mudança detectada na tabela 'sessoes_caixa':", payload.eventType, payload.new);
           const companyOwnerId = currentUser?.owner_id || currentUser?.id;
+          const targetRow = (payload.new || payload.old) as any;
+          if (companyOwnerId && targetRow) {
+            const rowOwner = targetRow.company_id || targetRow.user_id;
+            if (rowOwner && rowOwner !== companyOwnerId) {
+              return; // Event is for a different organization
+            }
+          }
 
           // Atualização reativa imediata do estado do caixa para múltiplos terminais
           if (payload.eventType === "DELETE") {
@@ -2630,6 +2656,136 @@ export default function App() {
       window.removeEventListener("app_remote_sync" as any, handleRemoteEvent);
     };
   }, [handleApplyRemoteSystemStructure]);
+
+  // Instant Real-Time Cross-Terminal Synchronizer (SSE Stream + Custom Event Bus)
+  useEffect(() => {
+    if (!currentUser) return;
+    const companyOwnerId = currentUser.owner_id || currentUser.id;
+    if (!companyOwnerId) return;
+
+    // 1. Window custom event listener for cash register sync
+    const handleCashRegisterSync = (evt: any) => {
+      const detail = evt.detail;
+      if (detail?.state) {
+        const remoteState = detail.state;
+        const isOpen = !!remoteState.currentSession && isCashSessionActiveOrOpen(remoteState.currentSession);
+        setCashRegister(remoteState);
+        cashRegisterRef.current = remoteState;
+        setIsGlobalRegisterOpen(isOpen);
+        try {
+          localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remoteState));
+        } catch (e) {}
+      } else if (detail?.closed) {
+        setIsGlobalRegisterOpen(false);
+        setCashRegister((prev) => {
+          const updated = { ...prev, currentSession: null };
+          cashRegisterRef.current = updated;
+          try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
+          return updated;
+        });
+      } else if (detail?.session) {
+        const s = detail.session;
+        setIsGlobalRegisterOpen(true);
+        setCashRegister((prev) => {
+          const updated: CashRegisterState = {
+            currentSession: {
+              id: s.id || `session_${Date.now()}`,
+              status: "aberto",
+              valorAbertura: Number(s.valorAbertura) || 0,
+              dataAbertura: s.dataAbertura || new Date().toISOString(),
+              operador: s.operador || currentUser.name || "Operador"
+            },
+            history: prev?.history || []
+          };
+          cashRegisterRef.current = updated;
+          try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
+          return updated;
+        });
+      }
+    };
+
+    // 2. Window custom event listener for sales sync
+    const handleSalesSync = () => {
+      fetchSales();
+    };
+
+    window.addEventListener("cash_register_remote_sync" as any, handleCashRegisterSync);
+    window.addEventListener("sales_remote_sync" as any, handleSalesSync);
+
+    // 3. Continuous Server-Sent Events (SSE) stream for instant real-time synchronization (<100ms) across machines
+    let eventSource: EventSource | null = null;
+    let reconnectTimeout: any = null;
+
+    const connectSSE = () => {
+      try {
+        const url = `/api/realtime/stream?companyId=${encodeURIComponent(companyOwnerId)}`;
+        eventSource = new EventSource(url);
+
+        eventSource.onmessage = (event) => {
+          try {
+            if (!event.data || event.data.startsWith(":")) return;
+            const parsed = JSON.parse(event.data);
+            if (parsed.type === "connected") return;
+
+            const evType = parsed.event || parsed.type;
+            const data = parsed.data || {};
+
+            if (evType === "cash_register_updated" || evType === "cash_register_broadcast") {
+              if (data.state) {
+                const remoteState = data.state;
+                const isOpen = !!remoteState.currentSession && isCashSessionActiveOrOpen(remoteState.currentSession);
+                setCashRegister(remoteState);
+                cashRegisterRef.current = remoteState;
+                setIsGlobalRegisterOpen(isOpen);
+                try {
+                  localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remoteState));
+                } catch (e) {}
+              } else if (data.closed) {
+                setIsGlobalRegisterOpen(false);
+                setCashRegister((prev) => {
+                  const updated = { ...prev, currentSession: null };
+                  cashRegisterRef.current = updated;
+                  try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
+                  return updated;
+                });
+              } else {
+                checkGlobalRegisterStatus(companyOwnerId);
+              }
+            } else if (evType === "sales_updated" || evType === "sales_broadcast") {
+              fetchSales();
+            } else if (evType === "expenses_updated" || evType === "expenses_broadcast") {
+              fetchExpenses();
+            } else if (evType === "products_updated" || evType === "products_broadcast") {
+              window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: data }));
+            } else if (evType === "clients_updated" || evType === "clients_broadcast") {
+              window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: data }));
+            }
+          } catch (err) {}
+        };
+
+        eventSource.onerror = () => {
+          if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+          }
+          reconnectTimeout = setTimeout(connectSSE, 3000);
+        };
+      } catch (e) {}
+    };
+
+    connectSSE();
+
+    return () => {
+      window.removeEventListener("cash_register_remote_sync" as any, handleCashRegisterSync);
+      window.removeEventListener("sales_remote_sync" as any, handleSalesSync);
+      if (eventSource) {
+        eventSource.close();
+      }
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+    };
+  }, [currentUser, fetchSales, fetchExpenses]);
 
   // Terminal Heartbeat Poller: synchronizes cash register and data across all terminals logged into the account
   useEffect(() => {
@@ -6788,6 +6944,10 @@ export default function App() {
         onCloseRegister={handleCloseRegister}
         currentUser={currentUser}
         adminUnlocked={adminUnlocked}
+        isCashRegisterOpen={isRegisterOpenForToday}
+        onRefreshRegister={() => {
+          checkGlobalRegisterStatus();
+        }}
       />
 
       {/* Weekday goal indicator checklist overview dashboard */}
