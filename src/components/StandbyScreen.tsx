@@ -12,7 +12,9 @@ import {
   Package, 
   CheckCircle,
   Maximize,
-  Minimize
+  Minimize,
+  Lock,
+  ShieldAlert
 } from "lucide-react";
 import { CompanyProfile, User } from "../types";
 
@@ -69,7 +71,7 @@ export function StandbyScreen({
     }
   };
 
-  // Keyboard shortcut listener: Enter or Space to start new sale
+  // Keyboard shortcut listener: Enter or Space to start new sale or open register
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
@@ -80,12 +82,16 @@ export function StandbyScreen({
       }
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        onStartNewSale();
+        if (isCashRegisterOpen) {
+          onStartNewSale();
+        } else if (onOpenCashRegister) {
+          onOpenCashRegister();
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onStartNewSale]);
+  }, [onStartNewSale, isCashRegisterOpen, onOpenCashRegister]);
 
   const hours = time.toLocaleTimeString("pt-BR", { hour: "2-digit", hour12: false });
   const minutes = time.toLocaleTimeString("pt-BR", { minute: "2-digit" });
@@ -264,42 +270,78 @@ export function StandbyScreen({
           </div>
         </motion.div>
 
-        {/* MAIN "INICIAR NOVA VENDA" BUTTON */}
+        {/* MAIN BUTTON: "INICIAR NOVA VENDA" (if open) OR "ABRIR CAIXA" (if closed) */}
         <motion.div
           initial={{ scale: 0.9, opacity: 0, y: 15 }}
           animate={{ scale: 1, opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.15 }}
           className="w-full space-y-2"
         >
-          <button
-            type="button"
-            onClick={onStartNewSale}
-            className="group relative w-full overflow-hidden rounded-xl p-[2px] focus:outline-none focus:ring-2 focus:ring-brand-cyan/50 cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98]"
-          >
-            {/* Animated Gradient Border Ring */}
-            <span className="absolute inset-0 bg-gradient-to-r from-brand-cyan via-emerald-400 to-brand-magenta animate-spin duration-[3000ms] rounded-xl" />
-            
-            {/* Inner Button Content */}
-            <div className="relative w-full bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 py-3.5 px-5 rounded-[10px] flex items-center justify-center gap-3 shadow-xl shadow-emerald-500/25 transition-all font-sans">
-              <div className="p-2 bg-slate-950/20 rounded-lg text-slate-950 group-hover:scale-110 transition-transform">
-                <ShoppingCart className="h-5 w-5 text-slate-950 font-black fill-slate-950/20" />
-              </div>
+          {isCashRegisterOpen ? (
+            <button
+              type="button"
+              onClick={onStartNewSale}
+              className="group relative w-full overflow-hidden rounded-xl p-[2px] focus:outline-none focus:ring-2 focus:ring-brand-cyan/50 cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98]"
+            >
+              {/* Animated Gradient Border Ring */}
+              <span className="absolute inset-0 bg-gradient-to-r from-brand-cyan via-emerald-400 to-brand-magenta animate-spin duration-[3000ms] rounded-xl" />
               
-              <div className="text-left">
-                <span className="text-sm sm:text-base font-black uppercase tracking-wider block leading-none">
-                  INICIAR NOVA VENDA
-                </span>
-                <span className="text-[10px] font-bold text-slate-950/80 tracking-wide uppercase block mt-0.5">
-                  Clique aqui ou pressione ENTER
-                </span>
-              </div>
+              {/* Inner Button Content */}
+              <div className="relative w-full bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 hover:from-emerald-400 hover:to-teal-400 text-slate-950 py-3.5 px-5 rounded-[10px] flex items-center justify-center gap-3 shadow-xl shadow-emerald-500/25 transition-all font-sans">
+                <div className="p-2 bg-slate-950/20 rounded-lg text-slate-950 group-hover:scale-110 transition-transform">
+                  <ShoppingCart className="h-5 w-5 text-slate-950 font-black fill-slate-950/20" />
+                </div>
+                
+                <div className="text-left">
+                  <span className="text-sm sm:text-base font-black uppercase tracking-wider block leading-none">
+                    INICIAR NOVA VENDA
+                  </span>
+                  <span className="text-[10px] font-bold text-slate-950/80 tracking-wide uppercase block mt-0.5">
+                    Clique aqui ou pressione ENTER
+                  </span>
+                </div>
 
-              <Sparkles className="h-4 w-4 text-slate-950/70 ml-auto animate-pulse" />
-            </div>
-          </button>
+                <Sparkles className="h-4 w-4 text-slate-950/70 ml-auto animate-pulse" />
+              </div>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onOpenCashRegister}
+              className="group relative w-full overflow-hidden rounded-xl p-[2px] focus:outline-none focus:ring-2 focus:ring-red-500/50 cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98]"
+            >
+              {/* Pulsing Border Ring */}
+              <span className="absolute inset-0 bg-gradient-to-r from-red-500 via-amber-500 to-red-600 animate-pulse duration-[2000ms] rounded-xl" />
+              
+              {/* Inner Button Content */}
+              <div className="relative w-full bg-gradient-to-r from-red-600 via-rose-600 to-red-700 hover:from-red-500 hover:to-rose-500 text-white py-3.5 px-5 rounded-[10px] flex items-center justify-center gap-3 shadow-xl shadow-red-950/50 transition-all font-sans">
+                <div className="p-2 bg-slate-950/30 rounded-lg text-white group-hover:scale-110 transition-transform">
+                  <Lock className="h-5 w-5 text-white" />
+                </div>
+                
+                <div className="text-left">
+                  <span className="text-sm sm:text-base font-black uppercase tracking-wider block leading-none">
+                    CAIXA FECHADO • ABRIR CAIXA
+                  </span>
+                  <span className="text-[10px] font-bold text-red-100 tracking-wide uppercase block mt-0.5">
+                    Clique para abrir o expediente e liberar o sistema
+                  </span>
+                </div>
+
+                <Wallet className="h-4 w-4 text-red-100 ml-auto animate-pulse" />
+              </div>
+            </button>
+          )}
 
           <p className="text-[10px] text-slate-400 font-sans">
-            Pressione <kbd className="px-1.5 py-0.5 bg-slate-900 border border-slate-800 rounded font-mono text-[9px] text-white font-bold">ENTER</kbd> ou <kbd className="px-1.5 py-0.5 bg-slate-900 border border-slate-800 rounded font-mono text-[9px] text-white font-bold">ESPAÇO</kbd>
+            {isCashRegisterOpen ? (
+              <>Pressione <kbd className="px-1.5 py-0.5 bg-slate-900 border border-slate-800 rounded font-mono text-[9px] text-white font-bold">ENTER</kbd> ou <kbd className="px-1.5 py-0.5 bg-slate-900 border border-slate-800 rounded font-mono text-[9px] text-white font-bold">ESPAÇO</kbd></>
+            ) : (
+              <span className="text-amber-400 flex items-center justify-center gap-1">
+                <ShieldAlert className="h-3 w-3" />
+                Sistema bloqueado até a abertura do caixa do dia
+              </span>
+            )}
           </p>
         </motion.div>
 

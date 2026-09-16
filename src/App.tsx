@@ -3,6 +3,7 @@ import confetti from "canvas-confetti";
 import ReactMarkdown from "react-markdown";
 import { Header } from "./components/Header";
 import { StandbyScreen } from "./components/StandbyScreen";
+import { ClosedRegisterGate } from "./components/ClosedRegisterGate";
 import { AdminUnlockModal } from "./components/AdminUnlockModal";
 import { MetricsCards } from "./components/MetricsCards";
 import { SaleForm } from "./components/SaleForm";
@@ -4653,6 +4654,10 @@ export default function App() {
   };
 
   const handleSwitchTab = (tab: "sale" | "dashboard" | "company" | "gastos" | "usuarios" | "relatorios" | "produtos" | "gastosMeta" | "clientes") => {
+    if (!isRegisterOpenForToday) {
+      setShowCashRegisterModal(true);
+      return;
+    }
     const isRestrictedTab = ["gastos", "gastosMeta", "produtos", "relatorios", "company", "usuarios", "clientes"].includes(tab);
     if (isAttendant && isRestrictedTab && !adminUnlocked) {
       const messages: Record<string, string> = {
@@ -4915,14 +4920,17 @@ export default function App() {
         companyProfile={company}
         currentUser={currentUser}
         onStartNewSale={() => {
+          if (!isRegisterOpenForToday) {
+            setShowCashRegisterModal(true);
+            return;
+          }
           setIsStandbyActive(false);
           setActiveTab("sale");
         }}
         onLogout={handleLogout}
-        isCashRegisterOpen={!!cashRegister.currentSession}
+        isCashRegisterOpen={isRegisterOpenForToday}
         onOpenCashRegister={() => {
-          setIsStandbyActive(false);
-          setActiveTab("sale");
+          setShowCashRegisterModal(true);
         }}
         pendingSalesCount={sales.filter(isPendingRetiradaOrBaixa).length}
         todaysDeliveriesCount={todaysDeliveries.length}
@@ -5013,7 +5021,7 @@ export default function App() {
         pendingSalesCount={sales.filter(isPendingRetiradaOrBaixa).length}
         onRetiradasClick={() => setShowPendingModal(true)}
         onMetasSemanaClick={() => setShowWeeklyGoalModal(true)}
-        isCashRegisterOpen={!!cashRegister.currentSession}
+        isCashRegisterOpen={isRegisterOpenForToday}
         onCashRegisterClick={() => setShowCashRegisterModal(true)}
         dbSyncing={dbSyncing}
       />
@@ -5032,6 +5040,12 @@ export default function App() {
             <RefreshCw className="h-8 w-8 animate-spin text-cyan-500 stroke-[1.5]" />
             <p className="text-xs font-mono uppercase tracking-widest text-slate-455">Sincronizando painel operacional...</p>
           </div>
+        ) : !isRegisterOpenForToday ? (
+          /* HARD BLOCK SCREEN WHEN CASH REGISTER IS CLOSED */
+          <ClosedRegisterGate
+            onOpenRegisterClick={() => setShowCashRegisterModal(true)}
+            operatorName={currentUser?.name || currentUser?.username}
+          />
         ) : (
           /* REGULAR OPERATIONAL VIEWPORTS CONTENT */
           <>

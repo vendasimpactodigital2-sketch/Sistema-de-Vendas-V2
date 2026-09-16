@@ -270,6 +270,13 @@ export function Header({
     tab: "sale" | "dashboard" | "company" | "gastos" | "usuarios" | "relatorios" | "produtos" | "gastosMeta" | "clientes" | "suporte" | "atendentes",
     message: string
   ) => {
+    if (!isCashRegisterOpen) {
+      if (onCashRegisterClick) {
+        onCashRegisterClick();
+      }
+      return;
+    }
+
     const isRestrictedTab = ["gastos", "gastosMeta", "produtos", "relatorios", "company", "usuarios", "clientes", "atendentes"].includes(tab);
     
     if (isAttendant && isRestrictedTab && !adminUnlocked) {
@@ -352,7 +359,7 @@ export function Header({
               <>
                 <button
                   type="button"
-                  onClick={() => setActiveTab("clientes")}
+                  onClick={() => handleTabClick("clientes", "Acesso a Clientes")}
                   className={`flex-grow sm:flex-grow-0 flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200 cursor-pointer whitespace-nowrap ${
                     activeTab === "clientes"
                       ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/25 border border-cyan-550/20"
@@ -366,7 +373,7 @@ export function Header({
 
                 <button
                   type="button"
-                  onClick={() => setActiveTab("gastos")}
+                  onClick={() => handleTabClick("gastos", "Acesso a Despesas")}
                   className={`flex-grow sm:flex-grow-0 flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200 cursor-pointer whitespace-nowrap ${
                     activeTab === "gastos"
                       ? "bg-gradient-to-r from-red-500 to-red-600 text-white shadow-lg shadow-red-500/25 border border-red-500/20"
@@ -879,7 +886,13 @@ export function Header({
           {onDeliveriesClick && (
             <button
               type="button"
-              onClick={onDeliveriesClick}
+              onClick={() => {
+                if (!isCashRegisterOpen) {
+                  onCashRegisterClick?.();
+                  return;
+                }
+                onDeliveriesClick();
+              }}
               className={`p-1.5 px-3 border rounded-xl flex items-center justify-between gap-2.5 text-left transition-all duration-200 hover:scale-[1.02] cursor-pointer shrink-0 h-9 ${
                 todaysDeliveriesCount > 0
                   ? "bg-brand-cyan/15 hover:bg-brand-cyan/25 border-brand-cyan/50 text-brand-cyan shadow-[0_0_12px_rgba(34,211,238,0.15)] animate-pulse hover:animate-none"
@@ -909,7 +922,13 @@ export function Header({
           {onLocateClientClick && (
             <button
               type="button"
-              onClick={onLocateClientClick}
+              onClick={() => {
+                if (!isCashRegisterOpen) {
+                  onCashRegisterClick?.();
+                  return;
+                }
+                onLocateClientClick();
+              }}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 active:scale-95 transition-all duration-200 cursor-pointer shadow-md border border-cyan-400/20 shrink-0 h-9"
               title="Buscar Cliente & Histórico de Pedidos"
             >
@@ -922,7 +941,13 @@ export function Header({
           {pendingSalesCount > 0 && onRetiradasClick && (
             <button
               type="button"
-              onClick={onRetiradasClick}
+              onClick={() => {
+                if (!isCashRegisterOpen) {
+                  onCashRegisterClick?.();
+                  return;
+                }
+                onRetiradasClick();
+              }}
               className="px-3 py-1.5 bg-yellow-500/10 hover:bg-yellow-500/15 rounded-xl border border-yellow-500/20 flex items-center gap-1.5 text-yellow-500 transition-all cursor-pointer text-xs font-bold shrink-0 animate-pulse hover:animate-none h-9"
               title="Vendas com retirada pendente ou saldo a receber"
             >
@@ -938,7 +963,13 @@ export function Header({
           {(!isAttendant || adminUnlocked) && onMetasSemanaClick && (
             <button
               type="button"
-              onClick={onMetasSemanaClick}
+              onClick={() => {
+                if (!isCashRegisterOpen) {
+                  onCashRegisterClick?.();
+                  return;
+                }
+                onMetasSemanaClick();
+              }}
               className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/15 rounded-xl border border-emerald-500/20 flex items-center gap-1.5 text-emerald-400 hover:text-emerald-300 transition-all cursor-pointer text-xs font-bold shrink-0 h-9"
               title="Ver Metas da Semana"
             >
