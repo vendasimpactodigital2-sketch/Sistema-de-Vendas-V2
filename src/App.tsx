@@ -5357,46 +5357,6 @@ export default function App() {
               ) : activeTab === "sale" ? (
                 /* Creation and operational tab list view */
                 <div className="space-y-6">
-                  {(!cashRegister.currentSession && !isGlobalRegisterOpen) ? (
-                    <div id="cash-register-closed-banner" className="p-4 bg-gradient-to-r from-red-950/20 to-rose-950/20 border border-red-500/15 rounded-2xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 shadow-xl animate-fade-in">
-                      <div className="flex items-start gap-3">
-                        <div className="p-2 rounded-xl bg-red-500/10 text-red-450 mt-0.5 animate-pulse animate-duration-1000">
-                          <Wallet className="h-5 w-5" />
-                        </div>
-                        <div>
-                          <h4 className="text-sm font-black text-rose-100 uppercase tracking-wider flex items-center gap-1.5">
-                            <span className="w-2 h-2 rounded-full bg-red-500 animate-ping shrink-0" />
-                            Caixa Fechado Sincronizado
-                          </h4>
-                          <p className="text-xs text-slate-400 mt-0.5 max-w-xl">
-                            Sua sessão de vendas de hoje não foi inicializada ainda. Abra o caixa para registrar e sincronizar faturamentos com controle de quebras de caixa.
-                          </p>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowCashRegisterModal(true)}
-                        className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-black text-xs uppercase tracking-wider rounded-xl shadow-lg shadow-rose-950/10 cursor-pointer active:scale-95 transition-all self-start sm:self-center shrink-0 border border-rose-500/20 select-none"
-                      >
-                        Abrir Caixa Sincronizado 🚀
-                      </button>
-                    </div>
-                  ) : (
-                    <div id="cash-register-open-status" className="px-4 py-2.5 bg-emerald-950/20 border border-emerald-500/20 rounded-xl flex items-center justify-between text-xs text-emerald-300">
-                      <div className="flex items-center gap-2 font-semibold">
-                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                        <span>Caixa Aberto em Tempo Real • Sincronizado em todos os computadores</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowCashRegisterModal(true)}
-                        className="text-emerald-400 hover:text-emerald-300 underline font-bold cursor-pointer"
-                      >
-                        Ver Detalhes do Turno
-                      </button>
-                    </div>
-                  )}
-
                   <SaleForm
                     onSaleSaved={handleSaleSaved}
                     onBudgetSaved={handleBudgetSaved}
