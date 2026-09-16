@@ -997,12 +997,12 @@ export default function App() {
         const { data } = await supabase
           .from("sessoes_caixa")
           .select("id, status, valor_abertura, data_abertura, operador")
-          .eq("user_id", companyId)
+          .eq("company_id", companyId)
           .order("data_abertura", { ascending: false })
           .limit(1)
           .maybeSingle();
 
-        const isOpen = (data?.status || "").toLowerCase() === "aberto";
+        const isOpen = (data?.status || "").trim().toLowerCase() === "aberto";
         setIsGlobalRegisterOpen(isOpen);
 
         if (isOpen && data) {
@@ -1035,7 +1035,7 @@ export default function App() {
           event: "*",
           schema: "public",
           table: "sessoes_caixa",
-          filter: `user_id=eq.${companyId}`
+          filter: `company_id=eq.${companyId}`
         },
         (payload) => {
           if (payload.eventType === "DELETE") {
@@ -1045,7 +1045,7 @@ export default function App() {
           }
 
           const row = payload.new as any;
-          const status = (row?.status || "").toLowerCase();
+          const status = (row?.status || "").trim().toLowerCase();
           const isOpen = status === "aberto";
 
           // Alterna imediatamente o React entre Standby e Nova Venda em todos os PCs
