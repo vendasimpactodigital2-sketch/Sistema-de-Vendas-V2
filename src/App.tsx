@@ -2231,6 +2231,8 @@ export default function App() {
     const supabase = getSupabase();
     if (!supabase) return;
 
+    const companyOwnerId = currentUser?.owner_id || currentUser?.id;
+
     console.log("[Supabase Realtime] Registrando canais de sincronização em tempo real...");
 
     // Subscribes to insert, update and delete events on 'sales' and 'expenses' in real-time
@@ -2385,7 +2387,12 @@ export default function App() {
       )
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "sessoes_caixa" },
+        {
+          event: "*",
+          schema: "public",
+          table: "sessoes_caixa",
+          filter: companyOwnerId ? `company_id=eq.${companyOwnerId}` : undefined
+        },
         (payload) => {
           console.log("[Supabase Realtime] Mudança detectada na tabela 'sessoes_caixa':", payload.eventType, payload.new);
           const companyOwnerId = currentUser?.owner_id || currentUser?.id;
