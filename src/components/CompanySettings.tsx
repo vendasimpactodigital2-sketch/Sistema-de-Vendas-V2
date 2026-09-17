@@ -535,20 +535,11 @@ export function CompanySettings({
     if (!supabase) return;
     setLoadingCloudBackups(true);
     try {
-      let { data, error } = await supabase
+      const { data, error } = await supabase
         .from("meus_dados")
         .select("*")
-        .eq("empresa_id", UNIFIED_EMPRESA_ID)
+        .eq("user_id", UNIFIED_EMPRESA_ID)
         .order("created_at", { ascending: false });
-
-      if (error && (error.code === "42703" || error.message?.includes("empresa_id"))) {
-        const fallback = await supabase
-          .from("meus_dados")
-          .select("*")
-          .eq("user_id", UNIFIED_EMPRESA_ID)
-          .order("created_at", { ascending: false });
-        data = fallback.data;
-      }
 
       if (data) {
         setCloudBackups(data);
@@ -619,20 +610,8 @@ export function CompanySettings({
         user_id: UNIFIED_EMPRESA_ID
       };
 
-      try {
-        const { error } = await supabase.from("meus_dados").insert({
-          ...payloadRecord,
-          empresa_id: UNIFIED_EMPRESA_ID
-        });
-        if (error) throw error;
-      } catch (err: any) {
-        if (err?.code === "42703" || err?.message?.includes("empresa_id")) {
-          const { error: fallbackErr } = await supabase.from("meus_dados").insert(payloadRecord);
-          if (fallbackErr) throw fallbackErr;
-        } else {
-          throw err;
-        }
-      }
+      const { error } = await supabase.from("meus_dados").insert(payloadRecord);
+      if (error) throw error;
 
       setBackupSuccessMsg(`Backup "${file.name}" salvo na nuvem com sucesso! Sincronizado para todas as máquinas.`);
       setTimeout(() => setBackupSuccessMsg(null), 6000);
@@ -726,14 +705,7 @@ export function CompanySettings({
             valor: jsonString.length,
             user_id: UNIFIED_EMPRESA_ID
           };
-          try {
-            await supabase.from("meus_dados").insert({
-              ...payloadRecord,
-              empresa_id: UNIFIED_EMPRESA_ID
-            });
-          } catch (err: any) {
-            await supabase.from("meus_dados").insert(payloadRecord);
-          }
+          await supabase.from("meus_dados").insert(payloadRecord);
           fetchCloudBackups();
         } catch (dbErr) {
           console.warn("Aviso ao salvar backup na tabela meus_dados:", dbErr);
