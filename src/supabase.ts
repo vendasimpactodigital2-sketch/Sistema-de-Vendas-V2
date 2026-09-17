@@ -1,10 +1,44 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { User, CompanyProfile, Sale, Expense, CashRegisterState, CashRegisterSession, SupportFeedback, SupportConfig, CatalogProduct } from "./types";
 
-// @ts-ignore
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "";
-// @ts-ignore
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
+// Prioritize VITE_ prefix (standard for Vite) as well as NEXT_PUBLIC_ (common in Vercel migrations)
+// and window.__ENV__ or process.env if injected by build systems.
+const getEnvVar = (viteKey: string, nextKey: string): string => {
+  try {
+    // @ts-ignore
+    if (typeof import.meta !== "undefined" && import.meta.env) {
+      // @ts-ignore
+      if (import.meta.env[viteKey]) return import.meta.env[viteKey];
+      // @ts-ignore
+      if (import.meta.env[nextKey]) return import.meta.env[nextKey];
+    }
+  } catch (e) {}
+
+  try {
+    // @ts-ignore
+    if (typeof window !== "undefined" && (window as any).__ENV__) {
+      // @ts-ignore
+      if ((window as any).__ENV__[viteKey]) return (window as any).__ENV__[viteKey];
+      // @ts-ignore
+      if ((window as any).__ENV__[nextKey]) return (window as any).__ENV__[nextKey];
+    }
+  } catch (e) {}
+
+  try {
+    // @ts-ignore
+    if (typeof process !== "undefined" && process.env) {
+      // @ts-ignore
+      if (process.env[viteKey]) return process.env[viteKey];
+      // @ts-ignore
+      if (process.env[nextKey]) return process.env[nextKey];
+    }
+  } catch (e) {}
+
+  return "";
+};
+
+const supabaseUrl = getEnvVar("VITE_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL");
+const supabaseAnonKey = getEnvVar("VITE_SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY");
 
 let clientInstance: SupabaseClient | null = null;
 

@@ -529,17 +529,22 @@ export function CompanySettings({
 
   const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
 
-  // 1. SELECT na tabela meus_dados forçando estritamente o filtro por empresa_id = '62f892b2-3855-4ae9-8b2d-42d4b6223815'
+  // 1. SELECT na tabela meus_dados
   const fetchCloudBackups = async () => {
     const supabase = getSupabase();
     if (!supabase) return;
     setLoadingCloudBackups(true);
     try {
-      const { data, error } = await supabase
-        .from("meus_dados")
-        .select("*")
-        .eq("user_id", UNIFIED_EMPRESA_ID)
-        .order("created_at", { ascending: false });
+      const { data: authData } = await supabase.auth.getUser();
+      const activeUserId = authData?.user?.id || (await supabase.auth.getSession()).data.session?.user?.id || currentUser?.id;
+
+      let query = supabase.from("meus_dados").select("*");
+      if (activeUserId) {
+        query = query.or(`user_id.eq.${activeUserId},user_id.eq.${UNIFIED_EMPRESA_ID}`);
+      } else {
+        query = query.eq("user_id", UNIFIED_EMPRESA_ID);
+      }
+      const { data, error } = await query.order("created_at", { ascending: false });
 
       if (data) {
         setCloudBackups(data);
@@ -588,8 +593,9 @@ export function CompanySettings({
 
     try {
       const text = await file.text();
+      let parsedData: any;
       try {
-        JSON.parse(text);
+        parsedData = JSON.parse(text);
       } catch (jsonErr) {
         setBackupError("O arquivo selecionado não é um JSON válido.");
         setUploadingCloud(false);
@@ -603,11 +609,59 @@ export function CompanySettings({
         return;
       }
 
+      // Obter ID do usuário autenticado atual via supabase.auth.getUser() ou da sessão ativa
+      const { data: authData } = await supabase.auth.getUser();
+      let activeUserId = authData?.user?.id;
+      if (!activeUserId) {
+        const { data: sessionData } = await supabase.auth.getSession();
+        activeUserId = sessionData?.session?.user?.id;
+      }
+      if (!activeUserId && currentUser?.id) {
+        activeUserId = currentUser.id;
+      }
+
+      if (!activeUserId) {
+        setBackupError("Usuário autenticado não encontrado. Faça login novamente para realizar o upload.");
+        setUploadingCloud(false);
+        return;
+      }
+
+      // Interceptar o array de objetos do backup e substituir o campo 'user_id' pelo ID do usuário autenticado atual
+      if (Array.isArray(parsedData)) {
+        parsedData = parsedData.map((item: any) => {
+          if (item && typeof item === "object") {
+            return { ...item, user_id: activeUserId };
+          }
+          return item;
+        });
+      } else if (parsedData && typeof parsedData === "object") {
+        if ("user_id" in parsedData) {
+          parsedData.user_id = activeUserId;
+        }
+        // Interceptar quaisquer arrays/coleções de entidades contidas no backup
+        for (const key of Object.keys(parsedData)) {
+          if (Array.isArray(parsedData[key])) {
+            parsedData[key] = parsedData[key].map((item: any) => {
+              if (item && typeof item === "object") {
+                return { ...item, user_id: activeUserId };
+              }
+              return item;
+            });
+          } else if (parsedData[key] && typeof parsedData[key] === "object" && parsedData[key] !== null) {
+            if ("user_id" in parsedData[key]) {
+              parsedData[key].user_id = activeUserId;
+            }
+          }
+        }
+      }
+
+      const updatedText = JSON.stringify(parsedData);
+
       const payloadRecord: any = {
         titulo: file.name,
-        descricao: text,
-        valor: file.size || text.length,
-        user_id: UNIFIED_EMPRESA_ID
+        descricao: updatedText,
+        valor: file.size || updatedText.length,
+        user_id: activeUserId
       };
 
       const { error } = await supabase.from("meus_dados").insert(payloadRecord);
@@ -698,12 +752,14 @@ export function CompanySettings({
       const supabase = getSupabase();
       if (supabase) {
         try {
+          const { data: authData } = await supabase.auth.getUser();
+          const activeUserId = authData?.user?.id || (await supabase.auth.getSession()).data.session?.user?.id || currentUser?.id || UNIFIED_EMPRESA_ID;
           const jsonString = JSON.stringify(data);
           const payloadRecord: any = {
             titulo: `nexvolt_backup_${sanitizedName}_${dateStr}.json`,
             descricao: jsonString,
             valor: jsonString.length,
-            user_id: UNIFIED_EMPRESA_ID
+            user_id: activeUserId
           };
           await supabase.from("meus_dados").insert(payloadRecord);
           fetchCloudBackups();
