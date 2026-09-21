@@ -452,7 +452,18 @@ export function SupportPanel({ currentUser, addToast }: SupportPanelProps) {
           </p>
         </div>
 
-        <div className="flex items-center gap-2 self-start md:self-auto">
+        <div className="flex items-center gap-2 self-start md:self-auto flex-wrap">
+          <a
+            href="/PRD-Remix-PDV.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Visualizar, Imprimir em PDF ou Baixar o PRD Completo"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700/60 text-xs text-brand-cyan hover:text-white rounded-lg transition-all cursor-pointer font-medium"
+          >
+            <FileText className="h-3 w-3" />
+            <span>Baixar PRD (PDF/MD)</span>
+          </a>
+
           {isAdmin && !isComposeOpen && (
             <button
               onClick={() => setIsComposeOpen(true)}

@@ -1,15 +1,27 @@
 {
   "rewrites": [
     {
+      "source": "/api",
+      "destination": "/api"
+    },
+    {
       "source": "/api/(.*)",
       "destination": "/api"
     },
     {
-      "source": "/items(.*)",
+      "source": "/root",
       "destination": "/api"
     },
     {
-      "source": "/item(.*)",
+      "source": "/root/(.*)",
+      "destination": "/api"
+    },
+    {
+      "source": "/roots",
+      "destination": "/api"
+    },
+    {
+      "source": "/roots/(.*)",
       "destination": "/api"
     },
     {
@@ -26,6 +38,18 @@
     },
     {
       "source": "/root_item(.*)",
+      "destination": "/api"
+    },
+    {
+      "source": "/items(.*)",
+      "destination": "/api"
+    },
+    {
+      "source": "/item(.*)",
+      "destination": "/api"
+    },
+    {
+      "source": "/v1",
       "destination": "/api"
     },
     {

@@ -3568,6 +3568,23 @@ ${JSON.stringify(sales, null, 2)}
     }
   };
 
+  // Endpoint to download PRD document
+  app.get(["/api/download-prd", "/api/prd", "/api/prd/download"], (_req, res) => {
+    const prdPath = path.join(process.cwd(), "public", "PRD.md");
+    if (fs.existsSync(prdPath)) {
+      res.setHeader("Content-Disposition", 'attachment; filename="PRD-Remix-Sistema-PDV.md"');
+      res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+      return res.sendFile(prdPath);
+    }
+    const rootPrdPath = path.join(process.cwd(), "PRD.md");
+    if (fs.existsSync(rootPrdPath)) {
+      res.setHeader("Content-Disposition", 'attachment; filename="PRD-Remix-Sistema-PDV.md"');
+      res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+      return res.sendFile(rootPrdPath);
+    }
+    return res.status(404).json({ error: "PRD file not found" });
+  });
+
   // Seed default item if store is empty
   loadRootItemsFromDisk();
   if (rootItemsMemoryStore.size === 0) {
@@ -3587,14 +3604,18 @@ ${JSON.stringify(sales, null, 2)}
 
   // Auth validator for protected root-item routes
   const checkRootItemAuth = (req: express.Request): boolean => {
-    const auth =
+    const rawAuth =
       req.headers["authorization"] ||
       req.headers["x-api-key"] ||
       req.headers["apikey"] ||
-      req.headers["x-auth-token"];
+      req.headers["x-auth-token"] ||
+      req.query.token ||
+      req.query.apiKey ||
+      req.query.api_key ||
+      req.query.access_token;
 
-    if (!auth) return false;
-    const token = (Array.isArray(auth) ? auth[0] : String(auth)).trim();
+    if (!rawAuth) return false;
+    const token = (Array.isArray(rawAuth) ? String(rawAuth[0]) : String(rawAuth)).trim();
     if (!token) return false;
 
     const lower = token.toLowerCase();
@@ -3606,41 +3627,68 @@ ${JSON.stringify(sales, null, 2)}
       lower === "bearer null" ||
       lower === "bearer undefined" ||
       lower === "undefined" ||
-      lower === "none"
+      lower === "none" ||
+      lower === "false"
     ) {
       return false;
     }
     return true;
   };
 
-  // All supported route variants for root items
+  // All supported route variants for root items collection
   const rootItemCollectionRoutes = [
-    "/api/items",
-    "/items",
+    // /api variants
+    "/api",
+    "/api/",
+    "/api/root",
+    "/api/roots",
     "/api/root-items",
-    "/root-items",
-    "/api/root_items",
-    "/root_items",
     "/api/root-item",
-    "/root-item",
+    "/api/root_items",
     "/api/root_item",
-    "/root_item",
+    "/api/items",
     "/api/item",
+
+    // direct root variants
+    "/root",
+    "/roots",
+    "/root-items",
+    "/root-item",
+    "/root_items",
+    "/root_item",
+    "/items",
     "/item",
-    "/api/v1/items",
-    "/v1/items",
+
+    // v1 variants
+    "/api/v1",
+    "/api/v1/",
+    "/v1",
+    "/v1/",
+    "/api/v1/root",
+    "/api/v1/roots",
     "/api/v1/root-items",
-    "/v1/root-items",
-    "/api/v1/root_items",
-    "/v1/root_items",
     "/api/v1/root-item",
-    "/v1/root-item"
+    "/api/v1/root_items",
+    "/api/v1/root_item",
+    "/api/v1/items",
+    "/api/v1/item",
+    "/v1/root",
+    "/v1/roots",
+    "/v1/root-items",
+    "/v1/root-item",
+    "/v1/root_items",
+    "/v1/root_item",
+    "/v1/items",
+    "/v1/item"
   ];
 
-  const rootItemDetailRoutes = rootItemCollectionRoutes.map((r) => `${r}/:id`);
+  // Map each collection route to a detail route :id
+  const rootItemDetailRoutes = rootItemCollectionRoutes.map((r) =>
+    r.endsWith("/") ? `${r.slice(0, -1)}/:id` : `${r}/:id`
+  );
 
   // 1) CREATE ROOT ITEM (POST)
-  app.post(rootItemCollectionRoutes, (req, res) => {
+  const handleCreateRootItem = (req: express.Request, res: express.Response) => {
     const auth = req.headers["authorization"] || req.headers["x-api-key"] || req.headers["apikey"];
     if (auth && !checkRootItemAuth(req)) {
       return res.status(401).json({ error: "Unauthorized", message: "Invalid authorization token" });
@@ -3674,10 +3722,12 @@ ${JSON.stringify(sales, null, 2)}
       data: newItem,
       success: true
     });
-  });
+  };
+
+  app.post(rootItemCollectionRoutes, handleCreateRootItem);
 
   // 2) LIST ROOT ITEMS (GET collection) & DETAIL BY QUERY
-  app.get(rootItemCollectionRoutes, (req, res) => {
+  const handleListRootItems = (req: express.Request, res: express.Response) => {
     if (!checkRootItemAuth(req)) {
       return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
     }
@@ -3698,10 +3748,42 @@ ${JSON.stringify(sales, null, 2)}
     }
 
     return res.status(200).json(items);
+  };
+
+  app.get(rootItemCollectionRoutes, handleListRootItems);
+
+  // Also support root path "/" when called by API clients
+  app.post("/", (req, res, next) => {
+    return handleCreateRootItem(req, res);
+  });
+
+  app.get("/", (req, res, next) => {
+    const hasAuth = Boolean(
+      req.headers["authorization"] ||
+      req.headers["x-api-key"] ||
+      req.headers["apikey"] ||
+      req.query.token ||
+      req.query.api_key
+    );
+    const isExplicitApi = Boolean(
+      req.headers["accept"] === "application/json" ||
+      req.query.format === "json" ||
+      req.query.envelope === "true" ||
+      (req.headers["user-agent"] && !req.headers["user-agent"].includes("Mozilla") && !req.headers["accept"]?.includes("text/html"))
+    );
+
+    if (hasAuth || isExplicitApi) {
+      return handleListRootItems(req, res);
+    }
+    return next();
   });
 
   // 3) GET ROOT ITEM BY ID (GET detail)
-  app.get(rootItemDetailRoutes, (req, res) => {
+  app.get(rootItemDetailRoutes, (req, res, next) => {
+    if (req.params.id === "health" || req.params.id === "realtime" || req.params.id.includes(".")) {
+      return next();
+    }
+
     if (!checkRootItemAuth(req)) {
       return res.status(401).json({ error: "Unauthorized", message: "Authentication required" });
     }
@@ -3730,7 +3812,11 @@ ${JSON.stringify(sales, null, 2)}
   });
 
   // 4) DELETE ROOT ITEM (DELETE detail)
-  app.delete(rootItemDetailRoutes, (req, res) => {
+  app.delete(rootItemDetailRoutes, (req, res, next) => {
+    if (req.params.id === "health" || req.params.id === "realtime" || req.params.id.includes(".")) {
+      return next();
+    }
+
     const auth = req.headers["authorization"] || req.headers["x-api-key"] || req.headers["apikey"];
     if (auth && !checkRootItemAuth(req)) {
       return res.status(401).json({ error: "Unauthorized", message: "Invalid authorization token" });
@@ -3776,7 +3862,11 @@ ${JSON.stringify(sales, null, 2)}
   });
 
   // 5) UPDATE ROOT ITEM (PUT & PATCH detail)
-  const handleUpdate = (req: express.Request, res: express.Response) => {
+  const handleUpdate = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (req.params.id === "health" || req.params.id === "realtime" || req.params.id.includes(".")) {
+      return next();
+    }
+
     const auth = req.headers["authorization"] || req.headers["x-api-key"] || req.headers["apikey"];
     if (auth && !checkRootItemAuth(req)) {
       return res.status(401).json({ error: "Unauthorized", message: "Invalid authorization token" });
