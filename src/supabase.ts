@@ -3719,7 +3719,25 @@ export async function dbOpenGlobalCashRegister(userId: string, session: any): Pr
 
   const nowISO = new Date().toISOString();
 
-  // 1. Primary: upsert into public.sessoes_caixa
+  // 1. Primary: open via server API with service_role privileges
+  try {
+    const apiRes = await fetch("/api/cash-register/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: effectiveUserId,
+        session,
+        state: { currentSession: session }
+      })
+    });
+    if (apiRes.ok) {
+      console.log("[dbOpenGlobalCashRegister] Successfully opened register via server API");
+    }
+  } catch (apiErr) {
+    console.warn("[dbOpenGlobalCashRegister] /api/cash-register/open notice:", apiErr);
+  }
+
+  // 2. Direct client backup: upsert into public.sessoes_caixa
   if (supabase) {
     try {
       const isUUID = typeof session.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session.id);
@@ -3774,10 +3792,10 @@ export async function dbOpenGlobalCashRegister(userId: string, session: any): Pr
   }
 
   // 2. Realtime notification broadcast
-  notifyRealtimeSync(effectiveUserId, "cash_register_updated", { session });
-  notifyRealtimeSync("global", "cash_register_updated", { session });
+  notifyRealtimeSync(effectiveUserId, "cash_register_updated", { session, isOpen: true, state: { currentSession: session } });
+  notifyRealtimeSync("global", "cash_register_updated", { session, isOpen: true, state: { currentSession: session } });
   if (typeof window !== "undefined") {
-    window.dispatchEvent(new CustomEvent("cash_register_remote_sync", { detail: { session } }));
+    window.dispatchEvent(new CustomEvent("cash_register_remote_sync", { detail: { session, isOpen: true, state: { currentSession: session } } }));
   }
 
   return true;

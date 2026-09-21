@@ -909,11 +909,18 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   
   const addToast = (message: string, type: "success" | "info" | "warning" | "error" | "goal" | "reminder" = "success") => {
-    const id = Math.random().toString(36).substring(2, 9);
-    setToasts((prev) => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 5000);
+    setToasts((prev) => {
+      // Prevent identical message spamming
+      if (prev.some((t) => t.message === message)) {
+        return prev;
+      }
+      const id = Math.random().toString(36).substring(2, 9);
+      setTimeout(() => {
+        setToasts((current) => current.filter((t) => t.id !== id));
+      }, 5000);
+      const next = [...prev, { id, message, type }];
+      return next.slice(-4);
+    });
   };
 
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
@@ -1195,118 +1202,45 @@ export default function App() {
 
     const checkPromise = (async () => {
       const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
-      const supabase = getSupabase();
-      if (supabase) {
-        try {
-          const { data } = await supabase
-            .from("sessoes_caixa")
-            .select("id, status, valor_abertura, data_abertura, data_fechamento, aberto_por_usuario_id")
-            .eq("empresa_id", UNIFIED_EMPRESA_ID)
-            .order("data_abertura", { ascending: false })
-            .limit(1)
-            .maybeSingle();
+      const companyOwnerId = currentUser?.owner_id || currentUser?.id || userIdToUse || UNIFIED_EMPRESA_ID;
 
-          const isLatestClosed = !data || (data.status || "").trim().toLowerCase() === "fechado" || !!data.data_fechamento;
-
-          if (data && (data.status || "").trim().toLowerCase() === "aberto" && !data.data_fechamento) {
-            const openDate = data.data_abertura ? data.data_abertura.split("T")[0] : "";
-            const todayDate = new Date().toISOString().split("T")[0];
-            if (openDate === todayDate) {
-              setIsGlobalRegisterOpen(true);
-              const activeSession: CashRegisterSession = {
-                id: data.id,
-                status: "aberto",
-                valorAbertura: Number(data.valor_abertura) || 0,
-                dataAbertura: data.data_abertura || new Date().toISOString(),
-                operador: currentUser?.name || "Operador"
-              };
-              setCashRegister((prev) => {
-                const updated = { ...prev, currentSession: activeSession };
-                cashRegisterRef.current = updated;
-                try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
-                return updated;
-              });
-              return true;
-            } else if (openDate < todayDate) {
-              dbCloseGlobalCashRegister(UNIFIED_EMPRESA_ID).catch(() => {});
-              setIsGlobalRegisterOpen(false);
-              setCashRegister((prev) => {
-                if (prev.currentSession) {
-                  const closed: CashRegisterSession = {
-                    ...prev.currentSession,
-                    status: "fechado",
-                    dataFechamento: prev.currentSession.dataFechamento || new Date().toISOString()
-                  };
-                  const updated = {
-                    currentSession: null,
-                    history: prev.history ? [closed, ...prev.history.filter(h => h.id !== closed.id)] : [closed]
-                  };
-                  cashRegisterRef.current = updated;
-                  try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
-                  return updated;
-                }
-                return prev;
-              });
-              return false;
-            }
-          }
-
-          if (isLatestClosed) {
-            setIsGlobalRegisterOpen(false);
-            setCashRegister((prev) => {
-              if (prev.currentSession) {
-                const updated = { ...prev, currentSession: null };
-                cashRegisterRef.current = updated;
-                try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
-                return updated;
-              }
-              return prev;
-            });
-            return false;
-          } else {
-            const isLocalOpen = !!cashRegisterRef.current?.currentSession && isCashSessionActiveOrOpen(cashRegisterRef.current.currentSession);
-            setIsGlobalRegisterOpen(isLocalOpen);
-            return isLocalOpen;
-          }
-        } catch (err) {
-          console.warn("Aviso ao checar sessoes_caixa unificado:", err);
-        }
-      }
-
-      const companyOwnerId = currentUser?.owner_id || currentUser?.id || userIdToUse;
-      const userToVerify = companyOwnerId;
-      let isLocalOpen = !!cashRegisterRef.current?.currentSession && isCashSessionActiveOrOpen(cashRegisterRef.current.currentSession);
-      if (!isLocalOpen) {
-        try {
-          const saved = localStorage.getItem("NUCLEO_CASH_REGISTER");
-          if (saved) {
-            const parsed = JSON.parse(saved);
-            if (parsed?.currentSession && isCashSessionActiveOrOpen(parsed.currentSession)) {
-              isLocalOpen = true;
-              cashRegisterRef.current = parsed;
-            }
-          }
-        } catch (e) {}
-      }
-
-      if (!userToVerify || !isSupabaseConfigured()) {
-        setIsGlobalRegisterOpen(isLocalOpen);
-        return isLocalOpen;
-      }
       try {
-        const open = await dbCheckGlobalCashRegister(userToVerify);
-        if (open || isLocalOpen) {
-          setIsGlobalRegisterOpen(true);
-          return true;
+        const remoteState = await dbGetCashRegister(companyOwnerId);
+        if (remoteState) {
+          const isRemoteOpen = !!remoteState.currentSession && isCashSessionActiveOrOpen(remoteState.currentSession);
+          if (isRemoteOpen) {
+            setIsGlobalRegisterOpen(true);
+            setIsStandbyActive(false);
+            setShowCashRegisterModal(false);
+            setCashRegister(remoteState);
+            cashRegisterRef.current = remoteState;
+            try {
+              localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remoteState));
+              if (remoteState.currentSession?.dataAbertura) {
+                localStorage.setItem("NUCLEO_LAST_CASH_REGISTER_SYNCED_DATE", remoteState.currentSession.dataAbertura);
+              }
+            } catch (e) {}
+            return true;
+          } else {
+            // Remote state is definitively closed or has no active session
+            setIsGlobalRegisterOpen(false);
+            setCashRegister(remoteState);
+            cashRegisterRef.current = remoteState;
+            try {
+              localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remoteState));
+            } catch (e) {}
+            return false;
+          }
         }
-
-        setIsGlobalRegisterOpen(false);
-        return false;
       } catch (err) {
-        console.error("Error checking global register status:", err);
-        setIsGlobalRegisterOpen(isLocalOpen);
-        return isLocalOpen;
+        console.warn("Aviso ao sincronizar status do caixa via dbGetCashRegister:", err);
       }
+
+      // Safe offline / local fallback: do NOT close unexpectedly on network error!
+      const currentLocal = cashRegisterRef.current || cashRegister;
+      const isLocalOpen = !!currentLocal?.currentSession && isCashSessionActiveOrOpen(currentLocal.currentSession);
+      setIsGlobalRegisterOpen(isLocalOpen);
+      return isLocalOpen;
     })();
 
     checkingRegisterRef.current = checkPromise;
@@ -2079,15 +2013,13 @@ export default function App() {
 
               // Manter todas as vendas que estão na máquina local mas ainda não no retorno remoto
               const localPendingSales = prevLocalSales.filter((s) => !remoteMap.has(s.id));
-              if (localPendingSales.length > 0) {
-                console.warn(`[Sync Protection] Preservando ${localPendingSales.length} vendas locais recém-registradas. Sincronizando com servidor...`);
-                localPendingSales.forEach((pending) => {
-                  dbSaveSale(companyOwnerId, pending).catch((err) => console.error("Error auto-saving pending local sale:", err));
-                });
-              }
-
               const merged = [...localPendingSales, ...finalSales];
+
+              const isSame = prevLocalSales.length === merged.length && prevLocalSales.every((s, i) => s.id === merged[i]?.id && s.totalValue === merged[i]?.totalValue && s.balanceDue === merged[i]?.balanceDue && s.date === merged[i]?.date);
+              if (isSame) return prevLocalSales;
+
               localStorage.setItem("NUCLEO_SALES", JSON.stringify(merged));
+              salesRef.current = merged;
               return merged;
             });
 
@@ -2096,7 +2028,12 @@ export default function App() {
               finalBudgets.forEach((b: Sale) => remoteMap.set(b.id, b));
               const localPendingBudgets = prevLocalBudgets.filter((b) => !remoteMap.has(b.id));
               const merged = [...localPendingBudgets, ...finalBudgets];
+
+              const isSame = prevLocalBudgets.length === merged.length && prevLocalBudgets.every((b, i) => b.id === merged[i]?.id && b.totalValue === merged[i]?.totalValue);
+              if (isSame) return prevLocalBudgets;
+
               localStorage.setItem("NUCLEO_BUDGETS", JSON.stringify(merged));
+              budgetsRef.current = merged;
               return merged;
             });
           }
@@ -2106,8 +2043,12 @@ export default function App() {
         if (expensesPromiseIdx !== -1) {
           const remoteExpenses = dataResults[expensesPromiseIdx];
           if (remoteExpenses) {
-            setExpenses(remoteExpenses);
-            localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(remoteExpenses));
+            setExpenses((prev) => {
+              const isSame = prev.length === remoteExpenses.length && prev.every((e, i) => e.id === remoteExpenses[i]?.id && e.value === remoteExpenses[i]?.value && e.date === remoteExpenses[i]?.date);
+              if (isSame) return prev;
+              localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(remoteExpenses));
+              return remoteExpenses;
+            });
           }
         }
 
@@ -2144,17 +2085,21 @@ export default function App() {
                 setIsGlobalRegisterOpen(false);
                 localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remote));
               } else {
-                // Preservar a sessão local aberta e garantir que ela esteja salva no servidor
-                console.log("[Cash Register Sync] Preservando caixa local aberto ativo.");
-                const combinedState: CashRegisterState = {
-                  currentSession: cashRegisterRef.current!.currentSession,
-                  history: remote.history && remote.history.length > 0 ? remote.history : (cashRegisterRef.current?.history || [])
-                };
-                setCashRegister(combinedState);
-                cashRegisterRef.current = combinedState;
-                setIsGlobalRegisterOpen(true);
-                localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(combinedState));
-                dbSaveCashRegister(companyOwnerId, combinedState).catch(console.error);
+                // Preservar a sessão local aberta sem re-salvar em loop no servidor
+                const currSession = cashRegisterRef.current!.currentSession;
+                const hist = remote.history && remote.history.length > 0 ? remote.history : (cashRegisterRef.current?.history || []);
+                const sameSession = cashRegisterRef.current?.currentSession?.id === currSession?.id && cashRegisterRef.current?.currentSession?.status === currSession?.status;
+                const sameHist = (cashRegisterRef.current?.history?.length || 0) === hist.length;
+                if (!sameSession || !sameHist) {
+                  const combinedState: CashRegisterState = {
+                    currentSession: currSession,
+                    history: hist
+                  };
+                  setCashRegister(combinedState);
+                  cashRegisterRef.current = combinedState;
+                  setIsGlobalRegisterOpen(true);
+                  localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(combinedState));
+                }
               }
             } else {
               // Local está fechado
@@ -2224,15 +2169,13 @@ export default function App() {
     }
   }, [currentUser]);
 
-  // Active real-time background sync loop to keep data perfectly synchronized across multiple machines (every 15s fallback)
+  // Active real-time background sync loop to keep data perfectly synchronized across multiple machines (every 45s fallback)
   useEffect(() => {
     if (!currentUser || !isSupabaseConfigured()) return;
 
-    console.log("Registering active real-time background synchronization interval (15s fallback)...");
-    
     const syncInterval = setInterval(() => {
       triggerRemoteSync(currentUser, true);
-    }, 15000); // Polls every 15 seconds in the background as a lightweight connection-drop failsafe
+    }, 45000); // Polls every 45 seconds in the background as a lightweight connection-drop failsafe
 
     return () => {
       clearInterval(syncInterval);
@@ -2244,59 +2187,88 @@ export default function App() {
     // Intentionally left empty - cash register must remain open once opened until manual closure
   }, []);
 
-  // Busca e sincroniza vendas e orçamentos da tabela 'sales' em tempo real
-  const fetchSales = useCallback(async () => {
+  const fetchSalesTimeoutRef = useRef<any>(null);
+  const fetchExpensesTimeoutRef = useRef<any>(null);
+
+  // Busca e sincroniza vendas e orçamentos da tabela 'sales' em tempo real (com debounce e checagem de igualdade)
+  const fetchSales = useCallback(async (immediate = false) => {
     if (!currentUser || !isSupabaseConfigured()) return;
     const companyOwnerId = currentUser.owner_id || currentUser.id;
     if (!companyOwnerId) return;
 
-    try {
-      console.log("[Supabase Realtime] Executando fetchSales() automaticamente...");
-      const remoteSales = await dbGetSales(companyOwnerId);
-      if (remoteSales) {
-        const finalSales = remoteSales.filter((s: any) => !s.isBudget);
-        const finalBudgets = remoteSales.filter((s: any) => s.isBudget);
+    const doFetch = async () => {
+      try {
+        const remoteSales = await dbGetSales(companyOwnerId);
+        if (remoteSales) {
+          const finalSales = remoteSales.filter((s: any) => !s.isBudget);
+          const finalBudgets = remoteSales.filter((s: any) => s.isBudget);
 
-        setSales((prevLocalSales) => {
-          const remoteMap = new Map<string, Sale>();
-          finalSales.forEach((s: Sale) => remoteMap.set(s.id, s));
-          const localPending = prevLocalSales.filter((s) => !remoteMap.has(s.id));
-          const merged = [...localPending, ...finalSales];
-          localStorage.setItem("NUCLEO_SALES", JSON.stringify(merged));
-          salesRef.current = merged;
-          return merged;
-        });
+          setSales((prevLocalSales) => {
+            const remoteMap = new Map<string, Sale>();
+            finalSales.forEach((s: Sale) => remoteMap.set(s.id, s));
+            const localPending = prevLocalSales.filter((s) => !remoteMap.has(s.id));
+            const merged = [...localPending, ...finalSales];
+            const isSame = prevLocalSales.length === merged.length && prevLocalSales.every((s, i) => s.id === merged[i]?.id && s.totalValue === merged[i]?.totalValue && s.balanceDue === merged[i]?.balanceDue && s.date === merged[i]?.date);
+            if (isSame) return prevLocalSales;
+            localStorage.setItem("NUCLEO_SALES", JSON.stringify(merged));
+            salesRef.current = merged;
+            return merged;
+          });
 
-        setBudgets((prevLocalBudgets) => {
-          const remoteMap = new Map<string, Sale>();
-          finalBudgets.forEach((b: Sale) => remoteMap.set(b.id, b));
-          const localPending = prevLocalBudgets.filter((b) => !remoteMap.has(b.id));
-          const merged = [...localPending, ...finalBudgets];
-          localStorage.setItem("NUCLEO_BUDGETS", JSON.stringify(merged));
-          budgetsRef.current = merged;
-          return merged;
-        });
+          setBudgets((prevLocalBudgets) => {
+            const remoteMap = new Map<string, Sale>();
+            finalBudgets.forEach((b: Sale) => remoteMap.set(b.id, b));
+            const localPending = prevLocalBudgets.filter((b) => !remoteMap.has(b.id));
+            const merged = [...localPending, ...finalBudgets];
+            const isSame = prevLocalBudgets.length === merged.length && prevLocalBudgets.every((b, i) => b.id === merged[i]?.id && b.totalValue === merged[i]?.totalValue);
+            if (isSame) return prevLocalBudgets;
+            localStorage.setItem("NUCLEO_BUDGETS", JSON.stringify(merged));
+            budgetsRef.current = merged;
+            return merged;
+          });
+        }
+      } catch (err) {
+        console.error("[Realtime] Erro ao buscar vendas via fetchSales:", err);
       }
-    } catch (err) {
-      console.error("[Realtime] Erro ao buscar vendas via fetchSales:", err);
+    };
+
+    if (immediate) {
+      if (fetchSalesTimeoutRef.current) clearTimeout(fetchSalesTimeoutRef.current);
+      await doFetch();
+    } else {
+      if (fetchSalesTimeoutRef.current) clearTimeout(fetchSalesTimeoutRef.current);
+      fetchSalesTimeoutRef.current = setTimeout(doFetch, 300);
     }
   }, [currentUser]);
 
-  // Busca e sincroniza despesas da tabela 'expenses' em tempo real
-  const fetchExpenses = useCallback(async () => {
+  // Busca e sincroniza despesas da tabela 'expenses' em tempo real (com debounce e checagem de igualdade)
+  const fetchExpenses = useCallback(async (immediate = false) => {
     if (!currentUser || !isSupabaseConfigured()) return;
     const companyOwnerId = currentUser.owner_id || currentUser.id;
     if (!companyOwnerId) return;
 
-    try {
-      console.log("[Supabase Realtime] Executando fetchExpenses() automaticamente...");
-      const remoteExpenses = await dbGetExpenses(companyOwnerId);
-      if (remoteExpenses) {
-        setExpenses(remoteExpenses);
-        localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(remoteExpenses));
+    const doFetch = async () => {
+      try {
+        const remoteExpenses = await dbGetExpenses(companyOwnerId);
+        if (remoteExpenses) {
+          setExpenses((prev) => {
+            const isSame = prev.length === remoteExpenses.length && prev.every((e, i) => e.id === remoteExpenses[i]?.id && e.value === remoteExpenses[i]?.value && e.date === remoteExpenses[i]?.date);
+            if (isSame) return prev;
+            localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(remoteExpenses));
+            return remoteExpenses;
+          });
+        }
+      } catch (err) {
+        console.error("[Realtime] Erro ao buscar despesas via fetchExpenses:", err);
       }
-    } catch (err) {
-      console.error("[Realtime] Erro ao buscar despesas via fetchExpenses:", err);
+    };
+
+    if (immediate) {
+      if (fetchExpensesTimeoutRef.current) clearTimeout(fetchExpensesTimeoutRef.current);
+      await doFetch();
+    } else {
+      if (fetchExpensesTimeoutRef.current) clearTimeout(fetchExpensesTimeoutRef.current);
+      fetchExpensesTimeoutRef.current = setTimeout(doFetch, 300);
     }
   }, [currentUser]);
 
@@ -2491,7 +2463,6 @@ export default function App() {
 
           // Executa fetchSales() automaticamente para atualizar a tela
           fetchSales();
-          triggerRemoteSync(currentUser, true);
         }
       )
       .on(
@@ -2554,7 +2525,6 @@ export default function App() {
         (payload) => {
           console.log("[Supabase Realtime] Mudança detectada na tabela 'expenses':", payload.eventType);
           fetchExpenses();
-          triggerRemoteSync(currentUser, true);
         }
       )
       .on(
@@ -2743,13 +2713,11 @@ export default function App() {
       })
       .on("broadcast", { event: "sales_broadcast" }, () => {
         fetchSales();
-        triggerRemoteSync(currentUser, true);
         window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: {} }));
         window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: {} }));
       })
       .on("broadcast", { event: "expenses_broadcast" }, () => {
         fetchExpenses();
-        triggerRemoteSync(currentUser, true);
         window.dispatchEvent(new CustomEvent("expenses_remote_sync", { detail: {} }));
       })
       .on("broadcast", { event: "products_broadcast" }, () => {
@@ -2880,17 +2848,55 @@ export default function App() {
             const data = parsed.data || {};
 
             if (evType === "cash_register_updated" || evType === "cash_register_broadcast") {
+              const currentIsOpen = !!cashRegisterRef.current?.currentSession && isCashSessionActiveOrOpen(cashRegisterRef.current.currentSession);
               if (data.state) {
                 const remoteState = data.state;
                 const isOpen = !!remoteState.currentSession && isCashSessionActiveOrOpen(remoteState.currentSession);
                 setCashRegister(remoteState);
                 cashRegisterRef.current = remoteState;
                 setIsGlobalRegisterOpen(isOpen);
+                if (isOpen) {
+                  setIsStandbyActive(false);
+                  setShowCashRegisterModal(false);
+                  if (!currentIsOpen) {
+                    addToast("🔓 Caixa aberto! Sistema liberado para todos os computadores em tempo real.", "success");
+                  }
+                } else {
+                  if (currentIsOpen) {
+                    addToast("🔒 Caixa encerrado em outro terminal.", "info");
+                  }
+                }
                 try {
                   localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remoteState));
                 } catch (e) {}
+              } else if (data.session) {
+                const s = data.session;
+                setIsGlobalRegisterOpen(true);
+                setIsStandbyActive(false);
+                setShowCashRegisterModal(false);
+                if (!currentIsOpen) {
+                  addToast(`🔓 Caixa aberto por ${s.operador || "Operador"}! Sincronizado em tempo real.`, "success");
+                }
+                setCashRegister((prev) => {
+                  const updated: CashRegisterState = {
+                    currentSession: {
+                      id: s.id || `session_${Date.now()}`,
+                      status: "aberto",
+                      valorAbertura: Number(s.valorAbertura) || 0,
+                      dataAbertura: s.dataAbertura || new Date().toISOString(),
+                      operador: s.operador || "Operador"
+                    },
+                    history: prev?.history || []
+                  };
+                  cashRegisterRef.current = updated;
+                  try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
+                  return updated;
+                });
               } else if (data.closed) {
                 setIsGlobalRegisterOpen(false);
+                if (currentIsOpen) {
+                  addToast("🔒 Caixa encerrado em outro terminal.", "info");
+                }
                 setCashRegister((prev) => {
                   const updated = { ...prev, currentSession: null };
                   cashRegisterRef.current = updated;
@@ -2900,17 +2906,42 @@ export default function App() {
               } else {
                 checkGlobalRegisterStatus(companyOwnerId);
               }
+              window.dispatchEvent(new CustomEvent("cash_register_remote_sync", { detail: data }));
             } else if (evType === "sales_updated" || evType === "sales_broadcast") {
               fetchSales();
+              window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: data }));
+              // Keep product stock updated in real time across all logged-in machines
+              if (companyOwnerId && isSupabaseConfigured()) {
+                dbGetCatalogProducts(companyOwnerId).then((prods) => {
+                  if (prods && prods.length > 0) {
+                    setCatalogProducts(prods);
+                    try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(prods)); } catch (e) {}
+                  }
+                }).catch(() => {});
+              }
             } else if (evType === "expenses_updated" || evType === "expenses_broadcast") {
               fetchExpenses();
+              window.dispatchEvent(new CustomEvent("expenses_remote_sync", { detail: data }));
             } else if (evType === "products_updated" || evType === "products_broadcast") {
               window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: data }));
+              if (companyOwnerId && isSupabaseConfigured()) {
+                dbGetCatalogProducts(companyOwnerId).then((prods) => {
+                  if (prods && prods.length > 0) {
+                    setCatalogProducts(prods);
+                    try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(prods)); } catch (e) {}
+                  }
+                }).catch(() => {});
+              }
             } else if (evType === "clients_updated" || evType === "clients_broadcast") {
               window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: data }));
             } else if (evType === "cloud_backups_updated" || evType === "backup_sync" || evType === "backup_restored") {
               window.dispatchEvent(new CustomEvent("cloud_backups_updated", { detail: data }));
               window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: data }));
+              const backupTitle = data?.backup?.titulo || data?.title || "Cópia de Segurança";
+              addToast(`💾 Novo Backup realizado: "${backupTitle}"! Sincronizado para todos os computadores.`, "info");
+              fetchSales();
+              fetchExpenses();
+              checkGlobalRegisterStatus(companyOwnerId);
             }
           } catch (err) {}
         };
@@ -2960,23 +2991,15 @@ export default function App() {
           setIsGlobalRegisterOpen(true);
           localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remote));
         }
-        // Case 2: Local is open, remote is closed:
-        // ONLY close if the CURRENT local session is explicitly recorded as closed in remote history
+        // Case 2: Local is open, remote is closed -> sync remote closure smoothly without re-opening fight
         else if (localIsOpen && !remoteIsOpen) {
-          const localSessionId = currentLocal?.currentSession?.id;
-          const isExplicitlyClosedInRemote = !!localSessionId && (remote.history || []).some(
-            (s: any) => s.id === localSessionId && s.status === "fechado"
-          );
-          if (isExplicitlyClosedInRemote) {
-            console.log("[Auto-Sync Terminal] Sessão atual foi fechada.");
-            setCashRegister(remote);
-            cashRegisterRef.current = remote;
-            setIsGlobalRegisterOpen(false);
+          console.log("[Auto-Sync Terminal] Caixa fechado remotamente detectado. Sincronizando estado fechado...");
+          setCashRegister(remote);
+          cashRegisterRef.current = remote;
+          setIsGlobalRegisterOpen(false);
+          try {
             localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remote));
-          } else {
-            // Local is legitimately open; re-affirm open state to server to prevent unexpected closure
-            dbSaveCashRegister(companyOwnerId, currentLocal!).catch(console.error);
-          }
+          } catch (e) {}
         }
         // Case 3: Both open, sync session if different session id
         else if (localIsOpen && remoteIsOpen) {
@@ -2984,11 +3007,13 @@ export default function App() {
             setCashRegister(remote);
             cashRegisterRef.current = remote;
             setIsGlobalRegisterOpen(true);
-            localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remote));
+            try {
+              localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remote));
+            } catch (e) {}
           }
         }
       }).catch(() => {});
-    }, 4000);
+    }, 30000);
 
     return () => clearInterval(interval);
   }, [currentUser]);
@@ -4008,17 +4033,8 @@ export default function App() {
           }
         }
 
-        // 3. CHECK CASH CLOSING REMINDER / CLOSING AT END OF BUSINESS HOURS
+        // 3. CHECK CASH CLOSING REMINDER AT END OF BUSINESS HOURS
         if (cashRegister?.currentSession && isCashSessionActiveOrOpen(cashRegister.currentSession)) {
-          const currentSession = cashRegister.currentSession;
-          const sessionDateStr = getLocalDateFromISO(currentSession.dataAbertura);
-          
-          // Se a sessão for de um dia anterior, arquivar/fechar a sessão do dia anterior para respeitar o ciclo diário
-          if (sessionDateStr < todayDateStr) {
-            handleAutoCloseConfirm();
-            return;
-          }
-
           const dismissedDate = localStorage.getItem("NUCLEO_DISMISSED_AUTOCLOSE_DATE");
           const snoozeUntil = localStorage.getItem("NUCLEO_SNOOZE_CASH_CLOSING_UNTIL");
           const isSnoozed = snoozeUntil ? Date.now() < Number(snoozeUntil) : false;
@@ -4040,17 +4056,11 @@ export default function App() {
             effectiveTime = company?.closingTime || "18:00";
           }
 
-          // A tela SÓ PODE ABRIR QUANDO ESTIVER FORA DO HORÁRIO DE FECHAMENTO (horário atual >= encerramento configurado)
+          // A tela de lembrete só aparece quando o horário atual >= encerramento configurado
           const isPastClosing = currentHHMM >= effectiveTime;
           const isReminderEnabled = company?.cashClosingReminderEnabled ?? true;
 
-          // Se a empresa configurou fechamento automático ao término do expediente, encerrar autonomamente
-          if (company?.autoCloseRegisterEnabled && isPastClosing) {
-            handleAutoCloseConfirm();
-            return;
-          }
-
-          // Trigger continuous alarm & notification SOMENTE fora do horário de fechamento
+          // Trigger reminder prompt SOMENTE quando ativado e fora do horário, sem fechar sozinho
           if (isReminderEnabled && isPastClosing && !isDismissedToday && !isSnoozed && !showAutoClosePrompt) {
             setClosingAlarmMuted(false);
             setShowAutoClosePrompt(true);

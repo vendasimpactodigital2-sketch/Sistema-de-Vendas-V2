@@ -89,60 +89,75 @@ function registerApiRoutes(app: express.Express) {
       }
 
       const ai = getAiInstance();
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: [
-          {
-            inlineData: {
-              data: imageBase64,
-              mimeType: mimeType || "image/jpeg",
-            },
-          },
-          {
-            text: "Analise esta imagem, que é uma nota fiscal, cupom fiscal, recibo ou lista de produtos. Extraia até no máximo 10 produtos ou itens descritos no texto da imagem. Para cada item identificado, você deve obrigatoriamente preencher:\n" +
-                  "1. 'nome': Nome ou descrição curta do produto/item.\n" +
-                  "2. 'preco_custo': O preço unitário pago/custo em Reais (R$). Se não encontrar, use 0.\n" +
-                  "3. 'preco_venda': Preço de venda sugerido em Reais (R$). Se houver preço de custo, aplique uma margem saudável de mercado como custo * 1.5 a 1.8, ou use o valor comercial sugerido. Se for impossível estimar, use 0.\n" +
-                  "4. 'estoque_atual': A quantidade comprada ou identificada na nota. Caso não haja quantidade explícita na imagem, defina obrigatoriamente o valor padrão como 5.\n\n" +
-                  "Retorne exatamente a lista de objetos no JSON sob o campo 'items'.",
-          },
-        ],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              items: {
-                type: Type.ARRAY,
-                description: "List of up to 10 products extracted from the image.",
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    nome: {
-                      type: Type.STRING,
-                      description: "Name or short description of the item.",
-                    },
-                    preco_custo: {
-                      type: Type.NUMBER,
-                      description: "Unit cost price of the item. Returns 0 if not present.",
-                    },
-                    preco_venda: {
-                      type: Type.NUMBER,
-                      description: "Suggested sale price. Use standard markup (e.g. cost * 1.5) or suggested sales price.",
-                    },
-                    estoque_atual: {
-                      type: Type.INTEGER,
-                      description: "Quantity purchased or identified. Defaults to 5 if not explicitly mentioned.",
-                    },
-                  },
-                  required: ["nome", "preco_custo", "preco_venda", "estoque_atual"],
+      const modelsToTry = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"];
+      let response: any = null;
+      let lastErr: any = null;
+
+      for (const m of modelsToTry) {
+        try {
+          response = await ai.models.generateContent({
+            model: m,
+            contents: [
+              {
+                inlineData: {
+                  data: imageBase64,
+                  mimeType: mimeType || "image/jpeg",
                 },
               },
+              {
+                text: "Analise esta imagem, que é uma nota fiscal, cupom fiscal, recibo ou lista de produtos. Extraia até no máximo 10 produtos ou itens descritos no texto da imagem. Para cada item identificado, você deve obrigatoriamente preencher:\n" +
+                      "1. 'nome': Nome ou descrição curta do produto/item.\n" +
+                      "2. 'preco_custo': O preço unitário pago/custo em Reais (R$). Se não encontrar, use 0.\n" +
+                      "3. 'preco_venda': Preço de venda sugerido em Reais (R$). Se houver preço de custo, aplique uma margem saudável de mercado como custo * 1.5 a 1.8, ou use o valor comercial sugerido. Se for impossível estimar, use 0.\n" +
+                      "4. 'estoque_atual': A quantidade comprada ou identificada na nota. Caso não haja quantidade explícita na imagem, defina obrigatoriamente o valor padrão como 5.\n\n" +
+                      "Retorne exatamente a lista de objetos no JSON sob o campo 'items'.",
+              },
+            ],
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  items: {
+                    type: Type.ARRAY,
+                    description: "List of up to 10 products extracted from the image.",
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        nome: {
+                          type: Type.STRING,
+                          description: "Name or short description of the item.",
+                        },
+                        preco_custo: {
+                          type: Type.NUMBER,
+                          description: "Unit cost price of the item. Returns 0 if not present.",
+                        },
+                        preco_venda: {
+                          type: Type.NUMBER,
+                          description: "Suggested sale price. Use standard markup (e.g. cost * 1.5) or suggested sales price.",
+                        },
+                        estoque_atual: {
+                          type: Type.INTEGER,
+                          description: "Quantity purchased or identified. Defaults to 5 if not explicitly mentioned.",
+                        },
+                      },
+                      required: ["nome", "preco_custo", "preco_venda", "estoque_atual"],
+                    },
+                  },
+                },
+                required: ["items"],
+              },
             },
-            required: ["items"],
-          },
-        },
-      });
+          });
+          if (response) break;
+        } catch (e: any) {
+          lastErr = e;
+        }
+      }
+
+      if (!response) {
+        throw lastErr || new Error("Falha ao analisar imagem da nota fiscal.");
+      }
 
       const responseText = response.text || "{}";
       const data = JSON.parse(responseText.trim());
@@ -786,62 +801,98 @@ function registerApiRoutes(app: express.Express) {
 
       const activeApiKey = process.env.GEMINI_API_KEY;
       if (!activeApiKey) {
-        return res.status(500).json({ error: "A chave GEMINI_API_KEY não está configurada no servidor. Cadastre-a nas Configurações de Segredos para ativar." });
+        return res.json({
+          descricao: "",
+          valor: 0,
+          categoria: "Outros",
+          aviso: "Comprovante anexado com sucesso! Preencha a descrição e o valor da despesa."
+        });
       }
 
       const ai = getAiInstance();
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [
-          {
-            inlineData: {
-              data: imageBase64,
-              mimeType: mimeType || "image/jpeg",
-            },
-          },
-          {
-            text: "Analise esta imagem que é um comprovante ou cupom de gasto enviada pelo usuário, faça a análise de visão computacional e extraia os dados realizando obrigatoriamente as seguintes 4 etapas:\n\n" +
-                  "1. IDENTIFICAÇÃO DO ESTABELECIMENTO (CABEÇALHO): Leia o cabeçalho da imagem para identificar o nome do local/estabelecimento (Ex: Posto Ipiranga, Supermercado Extra, Kalunga).\n" +
-                  "2. DESCRIÇÃO DO GASTO: Analise o corpo do cupom para entender o que foi comprado (Ex: Combustível, Papel A4, Almoço). A descrição final retornada deve ser a junção do Local + Itens principais (Ex: 'Kalunga - Papel A4 e Canetas').\n" +
-                  "3. VALOR TOTAL: Localize o valor total final pago no cupom e formate como um número decimal puro (Ex: 25.00).\n" +
-                  "4. CATEGORIA: Classifique automaticamente o gasto com base nos itens lidos em uma destas categorias padrão: 'Materiais/Insumos', 'Alimentação', 'Combustível/Viagem', 'Manutenção' ou 'Outros'.\n\n" +
-                  "Retorne estritamente um JSON válido seguindo a estrutura abaixo, sem textos extras ou Markdown:\n" +
-                  "{\n" +
-                  "  \"descricao\": \"Nome do Local - Descrição dos Itens\",\n" +
-                  "  \"valor\": 25.00,\n" +
-                  "  \"categoria\": \"Materiais/Insumos\"\n" +
-                  "}",
-          },
-        ],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              descricao: {
-                type: Type.STRING,
-                description: "Establishment name + description of main items (Format: 'Nome do Local - Descrição dos Itens').",
-              },
-              valor: {
-                type: Type.NUMBER,
-                description: "The grand total value as a pure decimal float/number.",
-              },
-              categoria: {
-                type: Type.STRING,
-                description: "Classified category. Must be strictly one of: 'Materiais/Insumos', 'Alimentação', 'Combustível/Viagem', 'Manutenção', 'Outros'.",
-              },
-            },
-            required: ["descricao", "valor", "categoria"],
-          },
-        },
-      });
+      const modelsToTry = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"];
+      let parsedData: any = null;
+      let lastError: any = null;
 
-      const responseText = response.text || "{}";
-      const data = JSON.parse(responseText.trim());
-      return res.json(data);
+      for (const modelName of modelsToTry) {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: [
+              {
+                inlineData: {
+                  data: imageBase64,
+                  mimeType: mimeType || "image/jpeg",
+                },
+              },
+              {
+                text: "Analise esta imagem que é um comprovante, cupom fiscal, nota fiscal ou recibo de despesa enviada pelo usuário. Faça a análise de visão computacional e extraia os dados realizando obrigatoriamente:\n\n" +
+                      "1. IDENTIFICAÇÃO DO ESTABELECIMENTO (CABEÇALHO): Leia o cabeçalho da imagem para identificar o nome do local/estabelecimento (Ex: Posto Ipiranga, Supermercado Extra, Kalunga, Padaria).\n" +
+                      "2. DESCRIÇÃO DO GASTO: Analise o corpo do comprovante para entender o que foi comprado ou pago (Ex: Combustível, Papel A4, Almoço, Manutenção). A descrição final retornada deve ser a junção do Local + Itens principais (Ex: 'Kalunga - Papel A4 e Canetas').\n" +
+                      "3. VALOR TOTAL: Localize o valor total final pago no comprovante e formate como um número decimal puro (Ex: 25.00).\n" +
+                      "4. CATEGORIA: Classifique automaticamente o gasto com base nos itens lidos em uma destas categorias padrão: 'Materiais/Insumos', 'Alimentação', 'Combustível/Viagem', 'Manutenção' ou 'Outros'.\n" +
+                      "5. DATA: Se houver data no comprovante, extraia no formato YYYY-MM-DD. Se não encontrar, deixe vazio.\n\n" +
+                      "Retorne estritamente um JSON válido.",
+              },
+            ],
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  descricao: {
+                    type: Type.STRING,
+                    description: "Establishment name + description of main items (Format: 'Nome do Local - Descrição dos Itens').",
+                  },
+                  valor: {
+                    type: Type.NUMBER,
+                    description: "The grand total value as a pure decimal float/number.",
+                  },
+                  categoria: {
+                    type: Type.STRING,
+                    description: "Classified category. Must be strictly one of: 'Materiais/Insumos', 'Alimentação', 'Combustível/Viagem', 'Manutenção', 'Outros'.",
+                  },
+                  data: {
+                    type: Type.STRING,
+                    description: "Date of expense in YYYY-MM-DD format if detected, or empty string.",
+                  }
+                },
+                required: ["descricao", "valor", "categoria"],
+              },
+            },
+          });
+
+          const rawText = (response.text || "").trim();
+          const cleanText = rawText.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
+          parsedData = JSON.parse(cleanText);
+          if (parsedData && typeof parsedData.descricao === "string") {
+            break;
+          }
+        } catch (mErr: any) {
+          console.warn(`[analyze-expense] Modelo ${modelName} falhou, tentando fallback:`, mErr.message);
+          lastError = mErr;
+        }
+      }
+
+      if (!parsedData) {
+        console.warn("[analyze-expense] Modelos falharam, gerando preenchimento com anexo.");
+        return res.json({
+          descricao: "",
+          valor: 0,
+          categoria: "Outros",
+          aviso: "Comprovante anexado! Preencha ou confirme os dados da despesa."
+        });
+      }
+
+      return res.json(parsedData);
     } catch (error: any) {
       console.error("Gemini expense analysis error:", error);
-      return res.status(500).json({ error: error.message || "Erro interno no servidor de IA despesas." });
+      return res.json({
+        descricao: "",
+        valor: 0,
+        categoria: "Outros",
+        aviso: "Comprovante anexado! Preencha a descrição e valor abaixo."
+      });
     }
   });
 
@@ -872,16 +923,16 @@ ${JSON.stringify(sales, null, 2)}
         try {
           const ai = getAiInstance();
           const response = await ai.models.generateContent({
-            model: "gemini-3.5-flash",
+            model: "gemini-3.8-flash",
             contents: promptText,
           });
           responseText = response.text || "";
         } catch (error: any) {
-          console.log("Aviso: Modelo gemini-3.5-flash com alta demanda. Acionando fallback...");
+          console.log("Aviso: Modelo gemini-3.8-flash com alta demanda. Acionando fallback...");
           try {
             const ai = getAiInstance();
             const response = await ai.models.generateContent({
-              model: "gemini-2.5-flash",
+              model: "gemini-3.6-flash",
               contents: promptText,
             });
             responseText = response.text || "";
@@ -3145,6 +3196,77 @@ ${JSON.stringify(sales, null, 2)}
       return res.json({ success: true, date: nowISO });
     } catch (err: any) {
       console.error("[Server POST /api/cash-register Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Dedicated Cash Register Opening Endpoint with service_role privileges
+  app.post("/api/cash-register/open", async (req, res) => {
+    try {
+      const { userId, session, state } = req.body;
+      const supabase = getSupabaseClient();
+      const nowISO = new Date().toISOString();
+      const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+      const { canonicalOwnerId } = supabase ? await resolveCompanyScope(supabase, userId || UNIFIED_EMPRESA_ID) : { canonicalOwnerId: UNIFIED_EMPRESA_ID };
+
+      const safeSession = session || (state?.currentSession) || {
+        id: "session_" + Date.now(),
+        status: "aberto",
+        valorAbertura: 0,
+        dataAbertura: nowISO,
+        operador: "Operador"
+      };
+
+      const openState = state || {
+        currentSession: safeSession,
+        history: []
+      };
+
+      if (supabase) {
+        const isUUID = typeof safeSession.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(safeSession.id);
+        if (isUUID) {
+          await supabase.from("sessoes_caixa").upsert({
+            id: safeSession.id,
+            empresa_id: UNIFIED_EMPRESA_ID,
+            status: "aberto",
+            valor_abertura: Number(safeSession.valorAbertura) || 0,
+            data_abertura: safeSession.dataAbertura || nowISO
+          });
+        }
+
+        const createPayload = (name: string, targetId: string) => ({
+          user_id: targetId,
+          client_name: name,
+          client_phone: "CASH_REGISTER",
+          items: openState as any,
+          total_value: 0,
+          is_budget: true,
+          operation_cost: 0,
+          balance_due: 0,
+          net_profit: 0,
+          discount: 0,
+          down_payment: 0,
+          motoboy_cost: 0,
+          date: nowISO
+        });
+
+        await Promise.allSettled([
+          supabase.from("sales").upsert(createPayload(`cash_register_state_${canonicalOwnerId}`, canonicalOwnerId)),
+          supabase.from("sales").upsert(createPayload(`cash_register_state_${userId || UNIFIED_EMPRESA_ID}`, userId || UNIFIED_EMPRESA_ID)),
+          supabase.from("sales").upsert(createPayload("cash_register_state", canonicalOwnerId))
+        ]);
+      }
+
+      // Broadcast instant cash register opening across all terminals in real time
+      broadcastSyncEvent(canonicalOwnerId, "cash_register_updated", { state: openState, session: safeSession, isOpen: true });
+      if (userId && userId !== canonicalOwnerId) {
+        broadcastSyncEvent(userId, "cash_register_updated", { state: openState, session: safeSession, isOpen: true });
+      }
+      broadcastSyncEvent("global", "cash_register_updated", { state: openState, session: safeSession, isOpen: true });
+
+      return res.json({ success: true, date: nowISO, state: openState });
+    } catch (err: any) {
+      console.error("[Server POST /api/cash-register/open Exception]:", err);
       return res.status(500).json({ error: err.message });
     }
   });

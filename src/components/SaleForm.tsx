@@ -224,19 +224,18 @@ export function SaleForm({
     localStorage.setItem("NUCLEO_CART_COST_BREAKDOWN_ITEMS", JSON.stringify(costBreakdownItems));
   }, [clientName, clientPhone, orderDate, deliveryDate, items, useMotoboy, motoboyCostInput, discountInput, downPaymentInput, operationCostInput, clientMode, costBreakdownItems]);
 
-  // Realtime multi-device cart synchronization states
+  // Realtime channel for quick sales configuration updates across devices
   const [sessionClientId] = useState(() => Math.random().toString(36).substring(2, 9));
-  const isApplyingBroadcastRef = useRef(false);
   const channelRef = useRef<any>(null);
 
   useEffect(() => {
-    // Se o usuário não estiver autenticado (currentUser for null ou undefined), encerra imediatamente para impedir subscribe sem sessão ativa
+    // Se o usuário não estiver autenticado, encerra imediatamente
     if (!currentUser || !currentUser.id || !isSupabaseConfigured()) return;
     const supabase = getSupabase();
     if (!supabase) return;
 
     const scopeId = currentUser.owner_id || currentUser.id;
-    const channelName = `quick_sales_cart:${scopeId}`;
+    const channelName = `quick_sales_config:${scopeId}`;
 
     const channel = supabase.channel(channelName, {
       config: {
@@ -245,46 +244,6 @@ export function SaleForm({
     });
 
     channel
-      .on("broadcast", { event: "cart_update" }, (response: any) => {
-        const payload = response.payload;
-        if (payload && payload.senderId !== sessionClientId) {
-          isApplyingBroadcastRef.current = true;
-          
-          if (payload.items) setItems(payload.items);
-          if (payload.costBreakdownItems) setCostBreakdownItems(payload.costBreakdownItems);
-          if (payload.operationCostInput !== undefined) setOperationCostInput(payload.operationCostInput);
-          if (payload.clientName !== undefined) setClientName(payload.clientName);
-          
-          setTimeout(() => {
-            isApplyingBroadcastRef.current = false;
-          }, 80);
-        }
-      })
-      .on("broadcast", { event: "update" }, (response: any) => {
-        const payload = response.payload;
-        if (payload && payload.senderId !== sessionClientId) {
-          isApplyingBroadcastRef.current = true;
-          
-          if (payload.items) setItems(payload.items);
-          if (payload.costBreakdownItems) setCostBreakdownItems(payload.costBreakdownItems);
-          if (payload.operationCostInput !== undefined) setOperationCostInput(payload.operationCostInput);
-          if (payload.clientName !== undefined) setClientName(payload.clientName);
-          
-          setTimeout(() => {
-            isApplyingBroadcastRef.current = false;
-          }, 80);
-        }
-      })
-      .on("broadcast", { event: "new_sale" }, (response: any) => {
-        const payload = response.payload;
-        if (payload && payload.senderId !== sessionClientId) {
-          isApplyingBroadcastRef.current = true;
-          handleResetForm();
-          setTimeout(() => {
-            isApplyingBroadcastRef.current = false;
-          }, 150);
-        }
-      })
       .on("broadcast", { event: "quick_sales_config_update" }, async (response: any) => {
         const payload = response.payload;
         if (payload && payload.senderId !== sessionClientId) {
@@ -297,56 +256,14 @@ export function SaleForm({
           }
         }
       })
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          console.log(`Subscribed to Supabase Realtime channel ${channelName}`);
-        }
-      });
+      .subscribe();
 
     channelRef.current = channel;
 
     return () => {
-      console.log(`Cleaning up and removing broadcast channel: ${channelName}`);
-      supabase.removeChannel(channel).then(() => {
-        console.log(`Broadcast channel ${channelName} removed successfully.`);
-      }).catch((err) => {
-        console.error(`Error removing broadcast channel ${channelName}:`, err);
-      });
+      supabase.removeChannel(channel).catch(() => {});
     };
   }, [currentUser, sessionClientId]);
-
-  useEffect(() => {
-    if (isApplyingBroadcastRef.current) return;
-    if (!isSupabaseConfigured()) return;
-
-    const supabase = getSupabase();
-    const channel = channelRef.current;
-    if (!supabase || !channel) return;
-
-    const payload = {
-      senderId: sessionClientId,
-      items,
-      costBreakdownItems,
-      operationCostInput,
-      clientName
-    };
-
-    channel.send({
-      type: "broadcast",
-      event: "update",
-      payload
-    }).catch((err: any) => {
-      console.warn("Could not broadcast update", err);
-    });
-
-    channel.send({
-      type: "broadcast",
-      event: "cart_update",
-      payload
-    }).catch((err: any) => {
-      console.warn("Could not broadcast cart update", err);
-    });
-  }, [items, costBreakdownItems, operationCostInput, clientName, sessionClientId]);
 
   // Automatically sum up individual product costs into the total operation cost of the sale
   useEffect(() => {
@@ -385,19 +302,17 @@ export function SaleForm({
         return sum + (qty * unitC);
       }, 0);
       
-      if (Math.abs(Number(operationCostInput) - totalItemsCost) > 0.01) {
-        setOperationCostInput(String(totalItemsCost));
-      }
+      setOperationCostInput(prev => Math.abs(Number(prev) - totalItemsCost) > 0.01 ? String(totalItemsCost) : prev);
     } else {
       // If none of the items has a unit cost but there was an automatic sum before, reset it
-      if (!activeEditingSale && items.length > 0 && items.every(item => Number(item.unitCost) === 0) && Number(operationCostInput) > 0) {
+      if (!activeEditingSale && items.length > 0 && items.every(item => Number(item.unitCost) === 0)) {
         // Only reset if cost items are empty (to preserve manual or detailed costs)
         if (costBreakdownItems.length === 0) {
-          setOperationCostInput("0");
+          setOperationCostInput(prev => Number(prev) > 0 ? "0" : prev);
         }
       }
     }
-  }, [items, catalogProducts, operationCostInput, costBreakdownItems]);
+  }, [items, catalogProducts, costBreakdownItems, activeEditingSale]);
   
   // Client Image Items management
   const [imageItems, setImageItems] = useState<ImageItem[]>([]);
@@ -1248,20 +1163,6 @@ export function SaleForm({
     };
 
     onSaleSaved(savedSale);
-    
-    // Broadcast new_sale event so other instances can sync up immediately
-    if (isSupabaseConfigured() && channelRef.current) {
-      channelRef.current.send({
-        type: "broadcast",
-        event: "new_sale",
-        payload: {
-          senderId: sessionClientId,
-          sale: savedSale,
-          saleId: savedSale.id,
-          clientName: savedSale.clientName
-        }
-      }).catch((err: any) => console.warn("Error broadcasting new_sale event:", err));
-    }
     
     setSuccessMessage(
       activeEditingSale 

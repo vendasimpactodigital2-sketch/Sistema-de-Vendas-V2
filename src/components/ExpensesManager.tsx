@@ -18,7 +18,11 @@ import {
   Camera,
   Upload,
   Loader2,
-  AlertTriangle
+  AlertTriangle,
+  Eye,
+  RefreshCw,
+  FileImage,
+  CheckCircle2
 } from "lucide-react";
 import { Expense, Sale, getSaleOperationCost, CashRegisterState, User } from "../types";
 import { MonthlyBill } from "./MonthlyExpensesMeta";
@@ -189,129 +193,245 @@ export function ExpensesManager({ expenses, onAddExpense, onDeleteExpense, sales
   const [scanError, setScanError] = useState<string | null>(null);
   const [isPreRegistered, setIsPreRegistered] = useState(false);
   const [scannedFileName, setScannedFileName] = useState("");
+  const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
 
-  const compressAndResizeImage = (file: File, maxWidth = 1200, maxHeight = 1200): Promise<{ base64: string, type: string }> => {
+  // Live Camera Viewfinder Modal states
+  const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
+  const [selectedCameraId, setSelectedCameraId] = useState<string>("");
+  const videoRef = React.useRef<HTMLVideoElement | null>(null);
+  const streamRef = React.useRef<MediaStream | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const mobileCameraInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  // View full size receipt modal
+  const [activeViewingReceipt, setActiveViewingReceipt] = useState<string | null>(null);
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    setIsCameraActive(false);
+    setCameraError(null);
+  };
+
+  const startCamera = async (deviceId?: string) => {
+    setCameraError(null);
+    try {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+
+      if (!navigator?.mediaDevices?.getUserMedia) {
+        throw new Error("Câmera ao vivo não suportada neste navegador. Use o envio de arquivo.");
+      }
+
+      const constraints: MediaStreamConstraints = {
+        video: deviceId
+          ? { deviceId: { exact: deviceId } }
+          : { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false,
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
+      setIsCameraActive(true);
+
+      // Enumerate cameras for user selection if multiple cameras exist
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter((d) => d.kind === "videoinput");
+        setAvailableCameras(videoDevices);
+        if (deviceId) {
+          setSelectedCameraId(deviceId);
+        } else if (videoDevices.length > 0) {
+          setSelectedCameraId(videoDevices[0].deviceId);
+        }
+      } catch (e) {}
+
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+      }, 150);
+    } catch (err: any) {
+      console.warn("Live camera start failed, fallback to native picker:", err);
+      setCameraError(err.message || "Não foi possível acessar a câmera do computador.");
+      // If mobile or permission issue, trigger mobile camera directly
+      if (mobileCameraInputRef.current) {
+        mobileCameraInputRef.current.click();
+      }
+    }
+  };
+
+  const captureCameraPhoto = () => {
+    if (!videoRef.current) return;
+    try {
+      const video = videoRef.current;
+      const canvas = document.createElement("canvas");
+      const width = video.videoWidth > 0 ? video.videoWidth : 1280;
+      const height = video.videoHeight > 0 ? video.videoHeight : 720;
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      stopCamera();
+      const parts = dataUrl.split(",");
+      processReceiptImage(parts[1] || "", "image/jpeg", "foto_camera.jpg", dataUrl);
+    } catch (err: any) {
+      console.error("Capture photo error:", err);
+      setScanError("Erro ao capturar foto: " + (err.message || "tente novamente"));
+    }
+  };
+
+  const compressAndResizeImage = (file: File, maxWidth = 1400, maxHeight = 1400): Promise<{ base64: string, type: string, previewUrl: string }> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.readAsDataURL(file);
       reader.onload = (event) => {
+        const resultStr = event.target?.result as string;
+        if (!resultStr) {
+          resolve({ base64: "", type: file.type || "image/jpeg", previewUrl: "" });
+          return;
+        }
+
+        if (!file.type.startsWith("image/")) {
+          const parts = resultStr.split(",");
+          resolve({ base64: parts[1] || "", type: file.type || "application/octet-stream", previewUrl: resultStr });
+          return;
+        }
+
         const img = new Image();
         img.onload = () => {
-          const canvas = document.createElement("canvas");
-          let width = img.width;
-          let height = img.height;
+          try {
+            const canvas = document.createElement("canvas");
+            let width = img.width || 1200;
+            let height = img.height || 800;
 
-          if (width > height) {
-            if (width > maxWidth) {
-              height = Math.round((height * maxWidth) / width);
-              width = maxWidth;
+            if (width > height) {
+              if (width > maxWidth) {
+                height = Math.round((height * maxWidth) / width);
+                width = maxWidth;
+              }
+            } else {
+              if (height > maxHeight) {
+                width = Math.round((width * maxHeight) / height);
+                height = maxHeight;
+              }
             }
-          } else {
-            if (height > maxHeight) {
-              width = Math.round((width * maxHeight) / height);
-              height = maxHeight;
+
+            canvas.width = width;
+            canvas.height = height;
+
+            const ctx = canvas.getContext("2d");
+            if (!ctx) {
+              const parts = resultStr.split(",");
+              resolve({ base64: parts[1] || "", type: file.type || "image/jpeg", previewUrl: resultStr });
+              return;
             }
-          }
 
-          canvas.width = width;
-          canvas.height = height;
-
-          const ctx = canvas.getContext("2d");
-          if (!ctx) {
-            const resultStr = event.target?.result as string;
+            ctx.drawImage(img, 0, 0, width, height);
+            const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+            const parts = dataUrl.split(",");
+            if (parts.length > 1) {
+              resolve({ base64: parts[1], type: "image/jpeg", previewUrl: dataUrl });
+            } else {
+              const fallbackParts = resultStr.split(",");
+              resolve({ base64: fallbackParts[1] || "", type: file.type || "image/jpeg", previewUrl: resultStr });
+            }
+          } catch {
             const parts = resultStr.split(",");
-            resolve({ base64: parts[1] || "", type: file.type || "image/jpeg" });
-            return;
-          }
-
-          ctx.drawImage(img, 0, 0, width, height);
-          const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
-          const parts = dataUrl.split(",");
-          if (parts.length > 1) {
-            resolve({ base64: parts[1], type: "image/jpeg" });
-          } else {
-            const resultStr = event.target?.result as string;
-            const fallbackParts = resultStr.split(",");
-            resolve({ base64: fallbackParts[1] || "", type: file.type || "image/jpeg" });
+            resolve({ base64: parts[1] || "", type: file.type || "image/jpeg", previewUrl: resultStr });
           }
         };
         img.onerror = () => {
-          const resultStr = event.target?.result as string;
           const parts = resultStr.split(",");
-          resolve({ base64: parts[1] || "", type: file.type || "image/jpeg" });
+          resolve({ base64: parts[1] || "", type: file.type || "image/jpeg", previewUrl: resultStr });
         };
-        img.src = event.target?.result as string;
+        img.src = resultStr;
       };
       reader.onerror = () => reject(reader.error || new Error("Falha ao ler o arquivo de imagem."));
     });
   };
 
-  const handleScanReceipt = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  const processReceiptImage = async (base64: string, type: string, fileName: string, previewUrl?: string) => {
     setIsScanning(true);
     setScanError(null);
-    setScannedFileName(file.name);
+    setScannedFileName(fileName);
+    const preview = previewUrl || (base64.startsWith("data:") ? base64 : `data:${type || "image/jpeg"};base64,${base64}`);
+    setReceiptPreview(preview);
+    setIsPreRegistered(true);
 
     try {
-      const { base64, type } = await compressAndResizeImage(file);
-
+      const pureBase64 = base64.includes(",") ? base64.split(",")[1] : base64;
       const response = await fetch("/api/analyze-expense", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          imageBase64: base64,
-          mimeType: type,
+          imageBase64: pureBase64,
+          mimeType: type || "image/jpeg",
         }),
       });
 
-      if (!response.ok) {
-        const errText = await response.text();
-        let errMsg = "Erro ao analisar o comprovante.";
-        try {
-          const errData = JSON.parse(errText);
-          errMsg = errData.error || errMsg;
-        } catch {
-          errMsg = `${errMsg} (Status: ${response.status})`;
+      if (response.ok) {
+        const data = await response.json();
+        if (data.descricao && typeof data.descricao === "string" && data.descricao.trim()) {
+          setDescription(data.descricao.trim());
         }
-        throw new Error(errMsg);
-      }
+        if (data.valor !== undefined && data.valor !== null && Number(data.valor) > 0) {
+          setValue(String(data.valor));
+        }
+        if (data.data) {
+          setDate(data.data);
+        } else {
+          const localDate = new Date();
+          const year = localDate.getFullYear();
+          const month = String(localDate.getMonth() + 1).padStart(2, '0');
+          const day = String(localDate.getDate()).padStart(2, '0');
+          setDate(`${year}-${month}-${day}`);
+        }
+        if (data.categoria && CATEGORIES.includes(data.categoria)) {
+          setCategory(data.categoria);
+        }
 
-      const data = await response.json();
-      
-      if (data.descricao) {
-        setDescription(data.descricao);
-      }
-      if (data.valor && data.valor > 0) {
-        setValue(String(data.valor));
-      }
-      if (data.data) {
-        setDate(data.data);
+        if (data.aviso) {
+          setSuccessMsg(data.aviso);
+        } else {
+          setSuccessMsg("Comprovante anexado e analisado com sucesso! Revise os dados abaixo.");
+        }
+        setTimeout(() => setSuccessMsg(null), 5000);
       } else {
-        // use default date (today) if not found on receipt
-        const localDate = new Date();
-        const year = localDate.getFullYear();
-        const month = String(localDate.getMonth() + 1).padStart(2, '0');
-        const day = String(localDate.getDate()).padStart(2, '0');
-        setDate(`${year}-${month}-${day}`);
+        setSuccessMsg("Comprovante anexado com sucesso! Preencha a descrição e valor.");
+        setTimeout(() => setSuccessMsg(null), 5000);
       }
-      if (data.categoria && CATEGORIES.includes(data.categoria)) {
-        setCategory(data.categoria);
-      } else {
-        setCategory("Outros");
-      }
-
-      setIsPreRegistered(true);
-      setSuccessMsg("Comprovante analisado com sucesso! Revise os dados abaixo antes de confirmar o registro.");
-      setTimeout(() => setSuccessMsg(null), 6000);
     } catch (err: any) {
-      console.error(err);
-      setScanError(err.message || "Não foi possível extrair dados do comprovante automaticamente.");
+      console.warn("Aviso na análise com IA:", err);
+      setSuccessMsg("Comprovante anexado com sucesso! Preencha a descrição e valor.");
+      setTimeout(() => setSuccessMsg(null), 5000);
     } finally {
       setIsScanning(false);
+    }
+  };
+
+  const handleScanReceipt = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const { base64, type, previewUrl } = await compressAndResizeImage(file);
+      await processReceiptImage(base64, type, file.name, previewUrl);
+    } catch (err: any) {
+      console.error(err);
+      setScanError(err.message || "Falha ao processar arquivo de imagem.");
+    } finally {
       e.target.value = "";
     }
   };
@@ -328,6 +448,7 @@ export function ExpensesManager({ expenses, onAddExpense, onDeleteExpense, sales
     setDate(`${year}-${month}-${day}`);
     setIsPreRegistered(false);
     setScannedFileName("");
+    setReceiptPreview(null);
     setScanError(null);
   };
   
@@ -409,6 +530,8 @@ export function ExpensesManager({ expenses, onAddExpense, onDeleteExpense, sales
       value: numValue,
       date,
       category,
+      comprovanteUrl: receiptPreview || undefined,
+      receiptImage: receiptPreview || undefined,
     };
 
     onAddExpense(newExpense);
@@ -419,6 +542,7 @@ export function ExpensesManager({ expenses, onAddExpense, onDeleteExpense, sales
     setPaymentMethod("dinheiro");
     setIsPreRegistered(false);
     setScannedFileName("");
+    setReceiptPreview(null);
     setScanError(null);
     setSuccessMsg("Despesa cadastrada com sucesso!");
     setTimeout(() => setSuccessMsg(null), 3000);
@@ -1094,60 +1218,143 @@ export function ExpensesManager({ expenses, onAddExpense, onDeleteExpense, sales
           </div>
 
           {/* AI Receipt Scanner section */}
-          <div className="bg-slate-950/60 border border-slate-850/80 p-3 rounded-xl space-y-2">
+          <div 
+            onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            onDrop={async (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const file = e.dataTransfer.files?.[0];
+              if (file) {
+                try {
+                  const { base64, type, previewUrl } = await compressAndResizeImage(file);
+                  await processReceiptImage(base64, type, file.name, previewUrl);
+                } catch (err: any) {
+                  setScanError(err.message || "Falha ao processar imagem arrastada.");
+                }
+              }
+            }}
+            className="bg-slate-950/80 border border-slate-800 p-3.5 rounded-xl space-y-2.5 transition-all shadow-inner"
+          >
             <div className="flex items-center justify-between">
-              <span className="text-[9px] font-black text-rose-450 uppercase tracking-wider block">
-                ⭐ Leitura de Comprovante via IA
+              <span className="text-[10px] font-black text-rose-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Receipt className="h-3.5 w-3.5 text-rose-500" />
+                Leitura de Comprovante via IA
               </span>
-              <span className="text-[8px] bg-slate-850 text-slate-400 px-1.5 py-0.5 rounded font-mono">
-                Beta
+              <span className="text-[9px] bg-rose-500/10 border border-rose-500/20 text-rose-400 px-2 py-0.5 rounded-full font-bold">
+                Auto-Preenchimento
               </span>
             </div>
-            <p className="text-[10px] text-slate-400">
-              Faça upload ou tire foto do recibo para gerar um pré-cadastro automático para posterior confirmação.
+            <p className="text-[10.5px] text-slate-400 leading-relaxed">
+              Arraste, faça upload ou tire uma foto do recibo para ler o valor, data e descrição automaticamente com IA.
             </p>
-            
-            <div className="flex gap-2 pt-1">
-              {/* Upload Button */}
-              <label className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-slate-700 text-[10.5pt] md:text-[10px] text-slate-200 font-bold uppercase rounded-lg transition-all cursor-pointer">
-                <Upload className="h-3.5 w-3.5 text-rose-500" />
-                <span>Upload</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleScanReceipt}
-                  disabled={isScanning}
-                  className="hidden"
-                />
-              </label>
 
-              {/* Camera Button (for mobile capture) */}
-              <label className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-slate-700 text-[10.5pt] md:text-[10px] text-slate-200 font-bold uppercase rounded-lg transition-all cursor-pointer">
-                <Camera className="h-3.5 w-3.5 text-sky-400" />
+            {/* Hidden file inputs */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,application/pdf"
+              onChange={handleScanReceipt}
+              disabled={isScanning}
+              className="hidden"
+            />
+            <input
+              ref={mobileCameraInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={handleScanReceipt}
+              disabled={isScanning}
+              className="hidden"
+            />
+            
+            <div className="flex gap-2 pt-0.5">
+              {/* Upload Button */}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isScanning}
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 bg-slate-900 hover:bg-slate-850 active:scale-98 border border-slate-800 hover:border-slate-700 text-xs text-slate-200 font-bold uppercase rounded-lg transition-all cursor-pointer disabled:opacity-50"
+              >
+                <Upload className="h-4 w-4 text-rose-500" />
+                <span>Upload</span>
+              </button>
+
+              {/* Camera Button (Live Webcam on desktop or native camera capture) */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (navigator?.mediaDevices?.getUserMedia) {
+                    startCamera();
+                  } else if (mobileCameraInputRef.current) {
+                    mobileCameraInputRef.current.click();
+                  }
+                }}
+                disabled={isScanning}
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 bg-slate-900 hover:bg-slate-850 active:scale-98 border border-slate-800 hover:border-slate-700 text-xs text-slate-200 font-bold uppercase rounded-lg transition-all cursor-pointer disabled:opacity-50"
+              >
+                <Camera className="h-4 w-4 text-sky-400" />
                 <span>Tirar Foto</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  onChange={handleScanReceipt}
-                  disabled={isScanning}
-                  className="hidden"
-                />
-              </label>
+              </button>
             </div>
+
+            {/* Thumbnail preview if receipt is scanned */}
+            {receiptPreview && (
+              <div className="flex items-center justify-between p-2 bg-slate-900/90 border border-slate-700/60 rounded-lg gap-2">
+                <div className="flex items-center gap-2 overflow-hidden">
+                  <img
+                    src={receiptPreview}
+                    alt="Comprovante"
+                    className="h-10 w-10 object-cover rounded border border-slate-700 cursor-pointer hover:opacity-80 transition-opacity shrink-0"
+                    onClick={() => setActiveViewingReceipt(receiptPreview)}
+                    title="Clique para ampliar"
+                  />
+                  <div className="min-w-0">
+                    <span className="text-[10px] font-bold text-slate-200 block truncate">
+                      {scannedFileName || "Comprovante anexado"}
+                    </span>
+                    <span className="text-[9px] text-emerald-400 font-medium flex items-center gap-1">
+                      <CheckCircle2 className="h-3 w-3" /> Imagem vinculada ao gasto
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setActiveViewingReceipt(receiptPreview)}
+                    className="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition-colors"
+                    title="Ver em tamanho real"
+                  >
+                    <Eye className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReceiptPreview(null);
+                      setScannedFileName("");
+                    }}
+                    className="p-1 text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 rounded transition-colors"
+                    title="Remover foto"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Scanning status */}
             {isScanning && (
-              <div className="flex items-center gap-2 p-2 bg-rose-500/5 border border-rose-500/20 rounded-lg text-rose-400 text-[10.5px]">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                <span className="font-medium animate-pulse">Analisando comprovante "{scannedFileName}" com IA...</span>
+              <div className="flex items-center gap-2.5 p-2.5 bg-rose-500/10 border border-rose-500/30 rounded-lg text-rose-300 text-xs">
+                <Loader2 className="h-4 w-4 animate-spin text-rose-400 shrink-0" />
+                <span className="font-semibold animate-pulse">
+                  Analisando comprovante com IA do Google...
+                </span>
               </div>
             )}
 
             {/* Scan Error */}
             {scanError && (
-              <div className="flex items-start gap-2 p-2 bg-red-950/40 border border-red-900/40 rounded-lg text-red-400 text-[10px] leading-snug">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+              <div className="flex items-start gap-2 p-2.5 bg-red-950/50 border border-red-850 rounded-lg text-red-300 text-[11px] leading-snug">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-red-400" />
                 <span>{scanError}</span>
               </div>
             )}
@@ -1399,6 +1606,17 @@ export function ExpensesManager({ expenses, onAddExpense, onDeleteExpense, sales
                               >
                                 GASTO DE META
                               </span>
+                            )}
+                            {((expense as any).comprovanteUrl || (expense as any).receiptImage) && (
+                              <button
+                                type="button"
+                                onClick={() => setActiveViewingReceipt((expense as any).comprovanteUrl || (expense as any).receiptImage)}
+                                className="text-[9px] font-mono uppercase bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 px-1.5 py-0.5 rounded border border-rose-500/20 font-bold max-w-fit flex items-center gap-1 cursor-pointer transition-colors"
+                                title="Visualizar comprovante em anexo"
+                              >
+                                <Eye className="h-2.5 w-2.5" />
+                                <span>VER COMPROVANTE</span>
+                              </button>
                             )}
                           </div>
                         </td>
@@ -1817,6 +2035,144 @@ export function ExpensesManager({ expenses, onAddExpense, onDeleteExpense, sales
           </div>
         )}
       </AnimatePresence>
+
+      {/* LIVE CAMERA CAPTURE MODAL */}
+      {isCameraActive && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md animate-fade-in">
+          <div className="relative max-w-lg w-full bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl space-y-4 p-5">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400">
+                  <Camera className="h-5 w-5" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-white">Tirar Foto do Comprovante</h4>
+                  <p className="text-[11px] text-slate-400">Posicione o recibo ou nota fiscal na frente da câmera</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={stopCamera}
+                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Camera selector if multiple */}
+            {availableCameras.length > 1 && (
+              <div className="flex items-center gap-2">
+                <label className="text-[10px] text-slate-400 uppercase font-bold">Câmera:</label>
+                <select
+                  value={selectedCameraId}
+                  onChange={(e) => startCamera(e.target.value)}
+                  className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1 text-xs text-slate-300"
+                >
+                  {availableCameras.map((cam, idx) => (
+                    <option key={cam.deviceId || idx} value={cam.deviceId}>
+                      {cam.label || `Câmera ${idx + 1}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Video feed */}
+            <div className="relative rounded-xl overflow-hidden bg-black aspect-video flex items-center justify-center border border-slate-800">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full h-full object-cover"
+              />
+              {/* Viewfinder overlay guide */}
+              <div className="absolute inset-4 border-2 border-dashed border-sky-400/40 rounded-lg pointer-events-none flex items-center justify-center">
+                <span className="text-[10px] text-white/60 bg-black/50 px-2 py-1 rounded backdrop-blur-sm">
+                  Alinhe o comprovante aqui
+                </span>
+              </div>
+            </div>
+
+            {cameraError && (
+              <div className="space-y-2">
+                <div className="p-2.5 bg-red-950/40 border border-red-850 rounded-lg text-red-300 text-xs">
+                  {cameraError}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    stopCamera();
+                    mobileCameraInputRef.current?.click();
+                  }}
+                  className="w-full py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer shadow"
+                >
+                  <Camera className="h-4 w-4" />
+                  <span>Abrir Câmera do Dispositivo / Galeria</span>
+                </button>
+              </div>
+            )}
+
+            {/* Capture controls */}
+            <div className="flex items-center justify-between gap-3 pt-2">
+              <button
+                type="button"
+                onClick={stopCamera}
+                className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-white transition-colors"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                onClick={captureCameraPhoto}
+                className="flex-1 py-2.5 bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-sky-500/20 active:scale-98 transition-all cursor-pointer"
+              >
+                <Camera className="h-4 w-4" />
+                <span>Capturar Foto e Analisar</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* VIEW RECEIPT HIGH-RES MODAL */}
+      {activeViewingReceipt && (
+        <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md animate-fade-in">
+          <div className="relative max-w-2xl w-full bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
+              <div className="flex items-center gap-2">
+                <FileImage className="h-4 w-4 text-rose-400" />
+                <h4 className="text-sm font-bold text-white">Comprovante de Despesa</h4>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={activeViewingReceipt}
+                  download="comprovante.jpg"
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+                  title="Baixar imagem"
+                >
+                  <Download className="h-4 w-4" />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setActiveViewingReceipt(null)}
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <div className="p-4 overflow-auto flex items-center justify-center bg-black/40 min-h-[300px]">
+              <img
+                src={activeViewingReceipt}
+                alt="Comprovante"
+                className="max-w-full max-h-[70vh] object-contain rounded-lg border border-slate-800 shadow-lg"
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

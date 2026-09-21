@@ -709,6 +709,11 @@ export function CompanySettings({
         if (error) throw error;
       }
 
+      // Propagar para todos os computadores conectados
+      notifyRealtimeSync(activeUserId, "cloud_backups_updated", { backup: { titulo: file.name }, timestamp: Date.now() });
+      notifyRealtimeSync("global", "cloud_backups_updated", { backup: { titulo: file.name }, timestamp: Date.now() });
+      window.dispatchEvent(new CustomEvent("cloud_backups_updated", { detail: { backup: { titulo: file.name } } }));
+
       setBackupSuccessMsg(`Backup "${file.name}" salvo na nuvem com sucesso! Sincronizado para todos os computadores.`);
       setTimeout(() => setBackupSuccessMsg(null), 6000);
       await fetchCloudBackups();
@@ -850,6 +855,11 @@ export function CompanySettings({
           console.warn("Aviso ao salvar backup na tabela meus_dados:", dbErr);
         }
       }
+
+      // Propagar para todos os computadores conectados
+      notifyRealtimeSync(activeUserId, "cloud_backups_updated", { backup: { titulo: fileName }, timestamp: Date.now() });
+      notifyRealtimeSync("global", "cloud_backups_updated", { backup: { titulo: fileName }, timestamp: Date.now() });
+      window.dispatchEvent(new CustomEvent("cloud_backups_updated", { detail: { backup: { titulo: fileName } } }));
 
       fetchCloudBackups();
       setBackupSuccessMsg("Cópia de segurança exportada com sucesso! O arquivo .json foi salvo na sua pasta de Downloads e sincronizado na Nuvem para todos os computadores.");
@@ -1144,7 +1154,7 @@ export function CompanySettings({
           setGoalsReminderTime(remoteProfile.goalsReminderTime || "09:00");
           setOpeningTime(remoteProfile.openingTime || "08:00");
           setClosingTime(remoteProfile.closingTime || "18:00");
-          setAutoCloseRegisterEnabled(remoteProfile.autoCloseRegisterEnabled ?? true);
+          setAutoCloseRegisterEnabled(remoteProfile.autoCloseRegisterEnabled ?? false);
           setAutoBackupDownloadEnabled(remoteProfile.autoBackupDownloadEnabled ?? true);
           setCashClosingReminderEnabled(remoteProfile.cashClosingReminderEnabled ?? true);
           setCashClosingReminderTime(remoteProfile.cashClosingReminderTime || "");
@@ -1175,7 +1185,7 @@ export function CompanySettings({
           setGoalsReminderTime("09:00");
           setOpeningTime("08:00");
           setClosingTime("18:00");
-          setAutoCloseRegisterEnabled(true);
+          setAutoCloseRegisterEnabled(false);
           setAutoBackupDownloadEnabled(true);
           setCashClosingReminderEnabled(true);
           setCashClosingReminderTime("");
@@ -1214,7 +1224,7 @@ export function CompanySettings({
       setGoalsReminderTime(company.goalsReminderTime || "09:00");
       setOpeningTime(company.openingTime || "08:00");
       setClosingTime(company.closingTime || "18:00");
-      setAutoCloseRegisterEnabled(company.autoCloseRegisterEnabled ?? true);
+      setAutoCloseRegisterEnabled(company.autoCloseRegisterEnabled ?? false);
       setAutoBackupDownloadEnabled(company.autoBackupDownloadEnabled ?? true);
       setCashClosingReminderEnabled(company.cashClosingReminderEnabled ?? true);
       setCashClosingReminderTime(company.cashClosingReminderTime || "");

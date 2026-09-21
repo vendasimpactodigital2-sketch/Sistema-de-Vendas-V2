@@ -139,6 +139,8 @@ export interface Expense {
   value: number;
   date: string; // ISO string or YYYY-MM-DD
   category: string;
+  comprovanteUrl?: string;
+  receiptImage?: string;
 }
 
 export interface User {
