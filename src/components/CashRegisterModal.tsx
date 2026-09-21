@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { X, Wallet, ShieldAlert, CheckCircle, Info, Calculator, FileText, ArrowRightLeft, Landmark, Users } from "lucide-react";
+import { X, Wallet, ShieldAlert, CheckCircle, Info, Calculator, FileText, ArrowRightLeft, Landmark, Users, Printer, Check } from "lucide-react";
 import { CashRegisterState, Sale, CashRegisterSession, Expense, getSaleOperationCost, getSaleOrderDate } from "../types";
 
 interface CashRegisterModalProps {
@@ -69,6 +69,26 @@ export function CashRegisterModal({
   const [observedCashInput, setObservedCashInput] = useState<string>("");
   const [notesInput, setNotesInput] = useState<string>("");
   const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [closedSessionSummary, setClosedSessionSummary] = useState<{
+    operador: string;
+    dataAbertura: string;
+    dataFechamento: string;
+    valorAbertura: number;
+    totalDinheiro: number;
+    totalPix: number;
+    totalCartao: number;
+    totalDespesas: number;
+    expectedInDrawer: number;
+    valorFechamentoReal: number;
+    difference: number;
+    observacoes: string;
+  } | null>(null);
+
+  React.useEffect(() => {
+    if (!isOpen) {
+      setClosedSessionSummary(null);
+    }
+  }, [isOpen]);
 
   // Active session resolution: handles multi-terminal sync so open register NEVER asks to open
   const activeSession: CashRegisterSession | null = useMemo(() => {
@@ -412,6 +432,21 @@ export function CashRegisterModal({
   const handleCloseSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const observed = Math.max(0, Number(observedCashInput) || 0);
+    const summaryData = {
+      operador: activeSession?.operador || operatorInput || activeOperatorName || "Operador",
+      dataAbertura: activeSession?.dataAbertura || new Date().toISOString(),
+      dataFechamento: new Date().toISOString(),
+      valorAbertura: activeSession?.valorAbertura || 0,
+      totalDinheiro: sessionStats.cashInflow,
+      totalPix: sessionStats.pixInflow,
+      totalCartao: sessionStats.cardInflow,
+      totalDespesas: sessionStats.expensesTotal,
+      expectedInDrawer: sessionStats.expectedInDrawer,
+      valorFechamentoReal: observed,
+      difference: observed - sessionStats.expectedInDrawer,
+      observacoes: notesInput
+    };
+    setClosedSessionSummary(summaryData);
     onCloseRegister(observed, notesInput);
     // Reset inputs
     setObservedCashInput("");
@@ -728,20 +763,23 @@ export function CashRegisterModal({
         {/* Header */}
         <div className="flex items-center justify-between p-3 border-b border-slate-805 bg-slate-905 shrink-0">
           <div className="flex items-center gap-2">
-            <div className={`p-1.5 rounded-lg ${isClosed ? "bg-red-500/10 text-red-400" : "bg-emerald-500/10 text-emerald-400"}`}>
-              <Wallet className="h-4 w-4" />
+            <div className={`p-1.5 rounded-lg ${closedSessionSummary ? "bg-emerald-500/10 text-emerald-400" : isClosed ? "bg-red-500/10 text-red-400" : "bg-emerald-500/10 text-emerald-400"}`}>
+              {closedSessionSummary ? <CheckCircle className="h-4 w-4" /> : <Wallet className="h-4 w-4" />}
             </div>
             <div>
               <h3 className="text-xs sm:text-xs font-black text-slate-100 uppercase tracking-wider">
-                {isClosed ? "Abertura de Caixa" : "Fechamento de Caixa"}
+                {closedSessionSummary ? "Fechamento de Caixa Concluído" : isClosed ? "Abertura de Caixa" : "Fechamento de Caixa"}
               </h3>
               <p className="text-[10px] text-slate-450 font-mono mt-0.5 leading-none">
-                {isClosed ? "Inicie a sessão de hojediária" : "Relatório resumido com conciliação física"}
+                {closedSessionSummary ? "Resumo da conciliação e conferência final" : isClosed ? "Inicie a sessão de hojediária" : "Relatório resumido com conciliação física"}
               </p>
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={() => {
+              setClosedSessionSummary(null);
+              onClose();
+            }}
             className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-all cursor-pointer"
           >
             <X className="h-4 w-4" />
@@ -749,7 +787,127 @@ export function CashRegisterModal({
         </div>
 
         {/* Form Body */}
-        {isClosed ? (
+        {closedSessionSummary ? (
+          <div id="cash-register-reconciliation-summary" className="flex flex-col flex-grow overflow-hidden">
+            <div className="flex-grow overflow-y-auto p-4 space-y-4">
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center gap-2.5">
+                <CheckCircle className="h-5 w-5 text-emerald-400 shrink-0" />
+                <div>
+                  <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Caixa Encerrado com Sucesso!</h4>
+                  <p className="text-[10px] text-slate-300 mt-0.5">
+                    A sessão foi devidamente fechada e a conciliação foi salva no histórico e relatórios.
+                  </p>
+                </div>
+              </div>
+
+              {/* Audit / Operator Info */}
+              <div className="bg-slate-950 p-3 rounded-xl border border-slate-850 space-y-2 text-xs">
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400 text-[10px] uppercase font-bold">Operador:</span>
+                  <span className="font-bold text-white">{closedSessionSummary.operador}</span>
+                </div>
+                <div className="flex justify-between items-center text-slate-300">
+                  <span className="text-slate-400 text-[10px] uppercase font-bold">Fechamento em:</span>
+                  <span className="font-mono text-slate-300 text-[11px]">{new Date(closedSessionSummary.dataFechamento).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</span>
+                </div>
+              </div>
+
+              {/* Reconciliation Breakdown */}
+              <div className="space-y-2">
+                <h5 className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Resumo da Conciliação Financeira</h5>
+                
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-850">
+                    <span className="text-[9px] text-slate-500 uppercase block">Fundo de Abertura</span>
+                    <span className="font-mono font-bold text-slate-300 text-[11px]">R$ {closedSessionSummary.valorAbertura.toFixed(2)}</span>
+                  </div>
+
+                  <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-850">
+                    <span className="text-[9px] text-slate-500 uppercase block">Entradas Dinheiro</span>
+                    <span className="font-mono font-bold text-emerald-400 text-[11px]">R$ {closedSessionSummary.totalDinheiro.toFixed(2)}</span>
+                  </div>
+
+                  <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-850">
+                    <span className="text-[9px] text-slate-500 uppercase block">Entradas PIX</span>
+                    <span className="font-mono font-bold text-cyan-400 text-[11px]">R$ {closedSessionSummary.totalPix.toFixed(2)}</span>
+                  </div>
+
+                  <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-850">
+                    <span className="text-[9px] text-slate-500 uppercase block">Entradas Cartão</span>
+                    <span className="font-mono font-bold text-purple-400 text-[11px]">R$ {closedSessionSummary.totalCartao.toFixed(2)}</span>
+                  </div>
+                </div>
+
+                {closedSessionSummary.totalDespesas > 0 && (
+                  <div className="bg-red-950/20 border border-red-900/30 p-2.5 rounded-lg flex justify-between items-center text-xs">
+                    <span className="text-[10px] text-red-300 font-bold uppercase">Despesas / Sangrias do Turno:</span>
+                    <span className="font-mono font-bold text-red-400 text-[11px]">- R$ {closedSessionSummary.totalDespesas.toFixed(2)}</span>
+                  </div>
+                )}
+
+                {/* Final Count Comparison */}
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2 mt-2">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-slate-400 text-[10px] uppercase font-bold">Esperado na Gaveta:</span>
+                    <span className="font-mono font-bold text-slate-200">R$ {closedSessionSummary.expectedInDrawer.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-slate-400 text-[10px] uppercase font-bold">Contado / Declarado:</span>
+                    <span className="font-mono font-bold text-brand-cyan">R$ {closedSessionSummary.valorFechamentoReal.toFixed(2)}</span>
+                  </div>
+                  <div className={`flex justify-between items-center pt-2 border-t border-slate-850 text-xs font-bold ${
+                    Math.abs(closedSessionSummary.difference) < 0.01
+                      ? "text-emerald-400"
+                      : closedSessionSummary.difference > 0
+                        ? "text-blue-400"
+                        : "text-red-400"
+                  }`}>
+                    <span className="uppercase text-[10px]">
+                      {Math.abs(closedSessionSummary.difference) < 0.01
+                        ? "Conciliação Perfeita (Bateu):"
+                        : closedSessionSummary.difference > 0
+                          ? "Sobra de Caixa:"
+                          : "Quebra de Caixa (Falta):"}
+                    </span>
+                    <span className="font-mono">
+                      {closedSessionSummary.difference >= 0 ? "+ " : "- "}R$ {Math.abs(closedSessionSummary.difference).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
+                {closedSessionSummary.observacoes && (
+                  <div className="bg-slate-950/50 p-2 rounded-lg border border-slate-850 text-[10px] text-slate-400">
+                    <strong className="text-slate-300 block mb-0.5">Observações:</strong>
+                    <span>{closedSessionSummary.observacoes}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="p-3 border-t border-slate-850 bg-slate-905 flex gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handlePrintSessionReport}
+                className="flex-1 py-2 px-3 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+              >
+                <Printer className="h-3.5 w-3.5" />
+                <span>Imprimir</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setClosedSessionSummary(null);
+                  onClose();
+                }}
+                className="flex-1 py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-black text-xs uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <Check className="h-3.5 w-3.5" />
+                <span>Concluir</span>
+              </button>
+            </div>
+          </div>
+        ) : isClosed ? (
           // OPEN CASHER FORM
           <form onSubmit={handleOpenSubmit} className="flex flex-col flex-grow overflow-hidden">
             <div className="flex-grow overflow-y-auto p-3 space-y-3">

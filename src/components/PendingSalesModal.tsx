@@ -1322,11 +1322,15 @@ export function PendingSalesModal({ isOpen, onClose, sales, onSaveSale, company,
                         <div className="flex gap-1.5 pt-1.5 border-t border-slate-900">
                           <button
                             type="button"
+                            id={`confirm-delivery-${sale.id}`}
+                            data-testid="confirm-delivery-button"
+                            aria-label="Confirmar Entrega"
+                            title="Confirmar Entrega do Material"
                             onClick={() => handleConfirmOnlyDelivery(sale)}
                             className="flex-grow bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white py-2 px-2.5 rounded-lg font-black text-xs uppercase tracking-wide flex items-center justify-center gap-1.5 transition-all shadow-md shadow-emerald-950/20 cursor-pointer"
                           >
                             <Check className="h-3.5 w-3.5" />
-                            <span>Confirmar Retirada</span>
+                            <span>Confirmar Entrega</span>
                           </button>
 
                           <button

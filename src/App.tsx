@@ -948,7 +948,10 @@ export default function App() {
             localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(parsed));
           }
         }
-        return parsed;
+        return {
+          currentSession: parsed?.currentSession || null,
+          history: Array.isArray(parsed?.history) ? parsed.history : []
+        };
       } catch (e) {
         console.error("Error parsing NUCLEO_CASH_REGISTER from localStorage", e);
       }
@@ -979,11 +982,12 @@ export default function App() {
       }
     };
     const todayStr = getLocalDateStr(new Date().toISOString());
-    return cashRegister.history.some(session => {
+    const historyList = Array.isArray(cashRegister?.history) ? cashRegister.history : [];
+    return historyList.some(session => {
       const closedDate = getLocalDateStr(session.dataFechamento || session.dataAbertura);
       return closedDate === todayStr && session.status === "fechado";
     });
-  }, [cashRegister.history]);
+  }, [cashRegister?.history]);
 
   const todayClosedSession = useMemo(() => {
     const getLocalDateStr = (isoString?: string) => {
@@ -999,11 +1003,12 @@ export default function App() {
       }
     };
     const todayStr = getLocalDateStr(new Date().toISOString());
-    return cashRegister.history.find(session => {
+    const historyList = Array.isArray(cashRegister?.history) ? cashRegister.history : [];
+    return historyList.find(session => {
       const closedDate = getLocalDateStr(session.dataFechamento || session.dataAbertura);
       return closedDate === todayStr && session.status === "fechado";
     });
-  }, [cashRegister.history]);
+  }, [cashRegister?.history]);
 
   // 1. Estado reativo direto (sem depender de F5 ou cache estático de outro PC)
   const [isGlobalRegisterOpen, setIsGlobalRegisterOpen] = useState<boolean>(false);
@@ -3797,9 +3802,10 @@ export default function App() {
           observacoes: observations
         } as any;
 
+        const existingHist = Array.isArray(cashRegister?.history) ? cashRegister.history : (Array.isArray(cashRegisterRef.current?.history) ? cashRegisterRef.current.history : []);
         const updatedState: CashRegisterState = {
           currentSession: null,
-          history: [closedSession, ...cashRegister.history]
+          history: [closedSession, ...existingHist]
         };
 
         setCashRegister(updatedState);
@@ -4365,9 +4371,10 @@ export default function App() {
       operador
     };
 
+    const currentHistory = Array.isArray(cashRegister?.history) ? cashRegister.history : (Array.isArray(cashRegisterRef.current?.history) ? cashRegisterRef.current.history : []);
     const updatedState: CashRegisterState = {
       currentSession: newSession,
-      history: cashRegister.history
+      history: currentHistory
     };
 
     setCashRegister(updatedState);
@@ -4577,9 +4584,10 @@ export default function App() {
       observacoes: finalNotes
     };
 
+    const existingHist = Array.isArray(cashRegister?.history) ? cashRegister.history : (Array.isArray(cashRegisterRef.current?.history) ? cashRegisterRef.current.history : []);
     const updatedState: CashRegisterState = {
       currentSession: null,
-      history: [closedSession, ...cashRegister.history]
+      history: [closedSession, ...existingHist]
     };
 
     setCashRegister(updatedState);
@@ -4777,9 +4785,10 @@ export default function App() {
       observacoes: observations
     };
 
+    const existingHist = Array.isArray(cashRegister?.history) ? cashRegister.history : (Array.isArray(cashRegisterRef.current?.history) ? cashRegisterRef.current.history : []);
     const updatedState: CashRegisterState = {
       currentSession: null,
-      history: [closedSession, ...cashRegister.history]
+      history: [closedSession, ...existingHist]
     };
 
     setCashRegister(updatedState);

@@ -343,15 +343,30 @@ export function Header({
             )}
 
             <button
-              onClick={() => handleTabClick("sale", "Acesso à Nova Venda liberado por padrão.")}
-              className={`flex-grow sm:flex-grow-0 flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200 cursor-pointer whitespace-nowrap ${
-                activeTab === "sale"
-                  ? "bg-gradient-to-r from-brand-magenta to-brand-magenta/80 text-white shadow-lg shadow-brand-magenta/25"
-                  : "text-slate-400 hover:text-slate-105 hover:bg-slate-800/40"
+              onClick={() => {
+                if (!isCashRegisterOpen) {
+                  onCashRegisterClick?.();
+                  return;
+                }
+                handleTabClick("sale", "Acesso à Nova Venda liberado por padrão.");
+              }}
+              disabled={!isCashRegisterOpen}
+              title={!isCashRegisterOpen ? "O Caixa do Dia Está Fechado. Abertura obrigatória para registrar vendas." : "Nova Venda"}
+              className={`flex-grow sm:flex-grow-0 flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200 whitespace-nowrap ${
+                !isCashRegisterOpen
+                  ? "bg-slate-900/40 text-slate-500 border border-slate-800 opacity-60 cursor-not-allowed"
+                  : activeTab === "sale"
+                    ? "bg-gradient-to-r from-brand-magenta to-brand-magenta/80 text-white shadow-lg shadow-brand-magenta/25 cursor-pointer"
+                    : "text-slate-400 hover:text-slate-105 hover:bg-slate-800/40 cursor-pointer"
               }`}
             >
               <ClipboardList className="h-4 w-4" />
               <span>Nova Venda</span>
+              {!isCashRegisterOpen && (
+                <span className="text-[9px] bg-red-950/80 border border-red-800/60 text-red-400 px-1 py-0.5 rounded font-mono uppercase">
+                  Bloqueado
+                </span>
+              )}
             </button>
 
             {/* Employee Quick Access Buttons */}

@@ -29,7 +29,8 @@ import {
   Zap,
   Settings,
   Wallet,
-  Printer
+  Printer,
+  MapPin
 } from "lucide-react";
 import React, { useState, useEffect, useRef } from "react";
 import { ProductSaleItem, Sale, CompanyProfile, CostItem, CatalogProduct, User, CashRegisterState, SaleAuditEntry } from "../types";
@@ -120,18 +121,8 @@ export function SaleForm({
 
   // Strict Cash Register status check for SaleForm: prevents adding anything when register is closed
   const isRegisterOpen = Boolean(
-    (cashRegister?.currentSession && cashRegister.currentSession.status === "aberto") ||
     isGlobalRegisterOpen ||
-    (() => {
-      try {
-        const saved = localStorage.getItem("NUCLEO_CASH_REGISTER");
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          return parsed?.currentSession?.status === "aberto";
-        }
-      } catch (e) {}
-      return false;
-    })()
+    (cashRegister?.currentSession && cashRegister.currentSession.status === "aberto")
   );
 
   const checkRegisterBeforeAction = (actionDesc = "lançar informações na venda"): boolean => {
@@ -176,13 +167,17 @@ export function SaleForm({
     }
   });
 
-  // Motoboy Cost
+  // Motoboy Cost & Delivery Address
   const [useMotoboy, setUseMotoboy] = useState(() => {
     return localStorage.getItem("NUCLEO_CART_USE_MOTOBOY") === "true";
   });
   const [motoboyCostInput, setMotoboyCostInput] = useState<string>(() => {
     return localStorage.getItem("NUCLEO_CART_MOTOBOY_COST") || "0";
   });
+  const [deliveryAddress, setDeliveryAddress] = useState<string>(() => {
+    return localStorage.getItem("NUCLEO_CART_DELIVERY_ADDRESS") || "";
+  });
+  const [materialEntregue, setMaterialEntregue] = useState<boolean>(false);
 
   // Financial details
   const [discountInput, setDiscountInput] = useState<string>(() => {
@@ -217,12 +212,13 @@ export function SaleForm({
     localStorage.setItem("NUCLEO_CART_ITEMS", JSON.stringify(items));
     localStorage.setItem("NUCLEO_CART_USE_MOTOBOY", String(useMotoboy));
     localStorage.setItem("NUCLEO_CART_MOTOBOY_COST", motoboyCostInput);
+    localStorage.setItem("NUCLEO_CART_DELIVERY_ADDRESS", deliveryAddress);
     localStorage.setItem("NUCLEO_CART_DISCOUNT", discountInput);
     localStorage.setItem("NUCLEO_CART_DOWN_PAYMENT", downPaymentInput);
     localStorage.setItem("NUCLEO_CART_OPERATION_COST", operationCostInput);
     localStorage.setItem("NUCLEO_CART_CLIENT_MODE", String(clientMode));
     localStorage.setItem("NUCLEO_CART_COST_BREAKDOWN_ITEMS", JSON.stringify(costBreakdownItems));
-  }, [clientName, clientPhone, orderDate, deliveryDate, items, useMotoboy, motoboyCostInput, discountInput, downPaymentInput, operationCostInput, clientMode, costBreakdownItems]);
+  }, [clientName, clientPhone, orderDate, deliveryDate, items, useMotoboy, motoboyCostInput, deliveryAddress, discountInput, downPaymentInput, operationCostInput, clientMode, costBreakdownItems]);
 
   // Realtime channel for quick sales configuration updates across devices
   const [sessionClientId] = useState(() => Math.random().toString(36).substring(2, 9));
@@ -626,6 +622,8 @@ export function SaleForm({
       })) : [{ id: "1", description: "", quantity: "1", unitValue: "0", totalValue: 0, unitCost: "0" }]);
       setUseMotoboy(activeEditingSale.useMotoboy);
       setMotoboyCostInput(String(activeEditingSale.motoboyCost || 0));
+      setDeliveryAddress(activeEditingSale.deliveryAddress || "");
+      setMaterialEntregue(Boolean(activeEditingSale.materialEntregue));
       setDiscountInput(String(activeEditingSale.discount || 0));
       setDownPaymentInput(String(activeEditingSale.downPayment || 0));
       setOperationCostInput(String(activeEditingSale.operationCost || 0));
@@ -952,6 +950,9 @@ export function SaleForm({
     setItems([{ id: "1", description: "", quantity: "1", unitValue: "0", totalValue: 0 }]);
     setUseMotoboy(false);
     setMotoboyCostInput("0");
+    setDeliveryAddress("");
+    setMaterialEntregue(false);
+    localStorage.removeItem("NUCLEO_CART_DELIVERY_ADDRESS");
     setDiscountInput("0");
     setDownPaymentInput("0");
     setOperationCostInput("0");
@@ -1049,6 +1050,11 @@ export function SaleForm({
 
   // Save changes to Database/State
   const handleSaveSale = async (isQuickSale = false) => {
+    if (!isRegisterOpen) {
+      alert("⚠️ CAIXA FECHADO!\n\nVocê precisa abrir o caixa antes de registrar vendas no sistema.");
+      onRequestOpenRegister?.();
+      return;
+    }
     if (!checkRegisterBeforeAction("registrar vendas no sistema")) return;
 
     const finalClientName = isQuickSale ? "Venda Rápida" : clientName.trim();
@@ -1102,6 +1108,7 @@ export function SaleForm({
       })),
       useMotoboy,
       motoboyCost: activeMotoboyCost,
+      deliveryAddress: deliveryAddress.trim() || undefined,
       discount,
       downPayment: actualDownPayment,
       operationCost,
@@ -1114,7 +1121,7 @@ export function SaleForm({
       paymentMethod,
       orderDate: actualOrderDate,
       deliveryDate: actualDeliveryDate,
-      materialEntregue: isQuickSale ? true : (activeEditingSale?.materialEntregue || false),
+      materialEntregue: isQuickSale ? true : (materialEntregue || activeEditingSale?.materialEntregue || false),
       sellerId: activeEditingSale?.sellerId || currentUser?.id || "admin",
       sellerName: activeEditingSale?.sellerName || currentOperatorName,
       sellerRole: activeEditingSale?.sellerRole || currentOperatorRole,
@@ -1210,6 +1217,7 @@ export function SaleForm({
       })),
       useMotoboy,
       motoboyCost: activeMotoboyCost,
+      deliveryAddress: deliveryAddress.trim() || undefined,
       discount,
       downPayment,
       operationCost,
@@ -1244,6 +1252,11 @@ export function SaleForm({
 
   // Execute budget and convert into a definitive Sale
   const handleExecuteBudget = async () => {
+    if (!isRegisterOpen) {
+      alert("⚠️ CAIXA FECHADO!\n\nVocê precisa abrir o caixa antes de converter orçamentos em vendas.");
+      onRequestOpenRegister?.();
+      return;
+    }
     if (!checkRegisterBeforeAction("converter orçamento em venda")) return;
 
     if (!clientName.trim()) {
@@ -1273,6 +1286,7 @@ export function SaleForm({
       })),
       useMotoboy,
       motoboyCost: activeMotoboyCost,
+      deliveryAddress: deliveryAddress.trim() || undefined,
       discount,
       downPayment,
       operationCost,
@@ -1846,6 +1860,26 @@ export function SaleForm({
 
   return (
     <div className="space-y-6">
+      {/* Closed register banner */}
+      {!isRegisterOpen && (
+        <div className="p-4 bg-amber-500/10 border-2 border-amber-500/30 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 text-amber-300 animate-fade-in">
+          <div className="flex items-center gap-3">
+            <Lock className="h-6 w-6 text-amber-400 shrink-0" />
+            <div>
+              <h3 className="text-sm font-black uppercase tracking-wider text-amber-200">Caixa do Dia Fechado 🔒</h3>
+              <p className="text-xs text-amber-400/80">O registro de vendas está bloqueado. Abra o caixa para autorizar novos lançamentos.</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onRequestOpenRegister}
+            className="w-full sm:w-auto px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs uppercase tracking-wide rounded-xl transition-all shadow-md cursor-pointer shrink-0"
+          >
+            Abrir Caixa Agora
+          </button>
+        </div>
+      )}
+
       {/* Visual Success Alert */}
       {successMessage && (
         <div className="flex items-center gap-3 p-4 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-xl animate-fade-in">
@@ -2617,22 +2651,38 @@ export function SaleForm({
               </label>
 
               {useMotoboy && (
-                <div className="space-y-1.5 p-3 rounded-xl bg-slate-900 border border-slate-850 animate-fade-in">
-                  <label className="text-xs font-medium text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                    <Truck className="h-3.5 w-3.5 text-slate-500" />
-                    Valor do Motoboy (Para Cliente)
-                  </label>
-                  <div className="relative rounded-lg shadow-sm">
-                    <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
-                      <span className="text-xs font-mono text-slate-500">R$</span>
+                <div className="space-y-3 p-3 rounded-xl bg-slate-900 border border-slate-850 animate-fade-in">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                      <Truck className="h-3.5 w-3.5 text-slate-500" />
+                      Valor do Motoboy (Para Cliente)
+                    </label>
+                    <div className="relative rounded-lg shadow-sm">
+                      <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+                        <span className="text-xs font-mono text-slate-500">R$</span>
+                      </div>
+                      <input
+                        type="number"
+                        step="0.01"
+                        placeholder="0,00"
+                        value={motoboyCostInput === "0" ? "" : motoboyCostInput}
+                        onChange={(e) => setMotoboyCostInput(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg py-2 pl-9 pr-3 text-sm font-mono text-slate-150 focus:outline-none"
+                      />
                     </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                      <MapPin className="h-3.5 w-3.5 text-slate-500" />
+                      Endereço de Entrega (Opcional)
+                    </label>
                     <input
-                      type="number"
-                      step="0.01"
-                      placeholder="0,00"
-                      value={motoboyCostInput === "0" ? "" : motoboyCostInput}
-                      onChange={(e) => setMotoboyCostInput(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg py-2 pl-9 pr-3 text-sm font-mono text-slate-150 focus:outline-none"
+                      type="text"
+                      placeholder="Rua, número, bairro, complemento..."
+                      value={deliveryAddress}
+                      onChange={(e) => setDeliveryAddress(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg py-2 px-3 text-sm text-slate-150 focus:outline-none placeholder:text-slate-600"
                     />
                   </div>
                 </div>
@@ -2992,26 +3042,70 @@ export function SaleForm({
                     </div>
                   ) : (
                     /* We are editing a definitive Sale */
-                    <button
-                      type="button"
-                      disabled={isUploading}
-                      onClick={() => handleSaveSale(false)}
-                      className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-bold text-white bg-gradient-to-r from-brand-magenta to-pink-600 hover:from-pink-600 hover:to-brand-magenta shadow-lg shadow-pink-900/30 transition-all cursor-pointer transform hover:-translate-y-0.5 disabled:opacity-50 disabled:pointer-events-none"
-                    >
-                      {isUploading ? (
-                        <RefreshCw className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Plus className="h-4 w-4" />
-                      )}
-                      <span>{isUploading ? "Atualizando..." : "Atualizar Histórico de Venda"}</span>
-                    </button>
+                    <div className="space-y-2">
+                      <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                            <Truck className="h-4 w-4 text-cyan-400" />
+                            <span>Entrega do Material</span>
+                          </span>
+                          <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded ${
+                            materialEntregue
+                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                              : "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30"
+                          }`}>
+                            {materialEntregue ? "Entregue" : "Pendente"}
+                          </span>
+                        </div>
+
+                        {!materialEntregue ? (
+                          <button
+                            type="button"
+                            id="confirm-delivery-btn"
+                            data-testid="confirm-delivery-button"
+                            aria-label="Confirmar Entrega"
+                            onClick={() => {
+                              setMaterialEntregue(true);
+                            }}
+                            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg font-bold text-xs text-white bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] transition-all cursor-pointer shadow-md uppercase tracking-wide"
+                          >
+                            <Check className="h-3.5 w-3.5" />
+                            <span>Confirmar Entrega</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMaterialEntregue(false);
+                            }}
+                            className="w-full text-center text-[11px] text-slate-400 hover:text-slate-200 underline cursor-pointer py-1"
+                          >
+                            Reverter para Pendente
+                          </button>
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={isUploading || !isRegisterOpen}
+                        onClick={() => handleSaveSale(false)}
+                        className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-bold text-white bg-gradient-to-r from-brand-magenta to-pink-600 hover:from-pink-600 hover:to-brand-magenta shadow-lg shadow-pink-900/30 transition-all cursor-pointer transform hover:-translate-y-0.5 disabled:opacity-50 disabled:pointer-events-none"
+                      >
+                        {isUploading ? (
+                          <RefreshCw className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Plus className="h-4 w-4" />
+                        )}
+                        <span>{isUploading ? "Atualizando..." : "Atualizar Histórico de Venda"}</span>
+                      </button>
+                    </div>
                   )
                 ) : (
                   /* Standard creation mode - Can choose to Save as definitive Sale or Orçamento */
                   <div className="grid grid-cols-2 gap-3">
                     <button
                       type="button"
-                      disabled={isUploading}
+                      disabled={isUploading || !isRegisterOpen}
                       onClick={() => handleSaveSale(false)}
                       className="flex-1 flex items-center justify-center gap-1.5 py-3 px-2 rounded-xl font-bold text-white bg-gradient-to-r from-brand-magenta to-pink-600 hover:from-pink-600 hover:to-brand-magenta shadow-lg shadow-pink-900/30 transition-all cursor-pointer transform hover:-translate-y-0.5 text-xs sm:text-sm disabled:opacity-50 disabled:pointer-events-none"
                     >
@@ -3025,7 +3119,7 @@ export function SaleForm({
 
                     <button
                       type="button"
-                      disabled={isUploading}
+                      disabled={isUploading || !isRegisterOpen}
                       onClick={handleSaveBudget}
                       className="flex-1 flex items-center justify-center gap-1.5 py-3 px-2 rounded-xl font-bold text-slate-950 bg-gradient-to-r from-brand-cyan to-cyan-500 shadow-lg shadow-brand-cyan/20 cursor-pointer transform hover:-translate-y-0.5 transition-all text-xs sm:text-sm disabled:opacity-50 disabled:pointer-events-none"
                     >
