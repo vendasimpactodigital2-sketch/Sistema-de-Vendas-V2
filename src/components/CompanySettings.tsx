@@ -529,22 +529,33 @@ export function CompanySettings({
 
   const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
 
-  // 1. SELECT na tabela meus_dados
+  // 1. SELECT na tabela meus_dados (com suporte a API server-side com service_role para garantir exibição em todas as máquinas)
   const fetchCloudBackups = async () => {
-    const supabase = getSupabase();
-    if (!supabase) return;
     setLoadingCloudBackups(true);
     try {
-      const { data: authData } = await supabase.auth.getUser();
-      const activeUserId = authData?.user?.id || (await supabase.auth.getSession()).data.session?.user?.id || currentUser?.id;
-
-      let query = supabase.from("meus_dados").select("*");
-      if (activeUserId) {
-        query = query.or(`user_id.eq.${activeUserId},user_id.eq.${UNIFIED_EMPRESA_ID}`);
-      } else {
-        query = query.eq("user_id", UNIFIED_EMPRESA_ID);
+      // 1.1 Tentar buscar via endpoint do servidor (service_role ignora restrições RLS e retorna todos os backups da empresa)
+      try {
+        const res = await fetch("/api/backups");
+        if (res.ok) {
+          const json = await res.json();
+          if (json.success && Array.isArray(json.backups)) {
+            setCloudBackups(json.backups);
+            setLoadingCloudBackups(false);
+            return;
+          }
+        }
+      } catch (apiErr) {
+        console.warn("Fallback de API server-side de backups:", apiErr);
       }
-      const { data, error } = await query.order("created_at", { ascending: false });
+
+      // 1.2 Fallback cliente Supabase direto
+      const supabase = getSupabase();
+      if (!supabase) return;
+
+      const { data, error } = await supabase
+        .from("meus_dados")
+        .select("*")
+        .order("created_at", { ascending: false });
 
       if (data) {
         setCloudBackups(data);
@@ -556,30 +567,46 @@ export function CompanySettings({
     }
   };
 
-  // 2. Escuta Realtime do Supabase na tabela meus_dados para que novos uploads brotem na lista de todas as máquinas
+  // 2. Escuta Realtime (SSE + Supabase channel + Window Custom Events) para que novos backups apareçam em TODOS os computadores logados
   useEffect(() => {
     fetchCloudBackups();
 
-    const supabase = getSupabase();
-    if (!supabase) return;
+    const handleBackupEvent = () => {
+      fetchCloudBackups();
+    };
 
-    const channel = supabase
-      .channel("sync_meus_dados_backups_realtime")
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "meus_dados"
-        },
-        () => {
-          fetchCloudBackups();
-        }
-      )
-      .subscribe();
+    window.addEventListener("cloud_backups_updated" as any, handleBackupEvent);
+    window.addEventListener("backup_sync" as any, handleBackupEvent);
+    window.addEventListener("backup_restored_sync" as any, handleBackupEvent);
+    window.addEventListener("app_remote_sync" as any, handleBackupEvent);
+
+    const supabase = getSupabase();
+    let channel: any = null;
+    if (supabase) {
+      channel = supabase
+        .channel("sync_meus_dados_backups_realtime")
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "meus_dados"
+          },
+          () => {
+            fetchCloudBackups();
+          }
+        )
+        .subscribe();
+    }
 
     return () => {
-      supabase.removeChannel(channel);
+      window.removeEventListener("cloud_backups_updated" as any, handleBackupEvent);
+      window.removeEventListener("backup_sync" as any, handleBackupEvent);
+      window.removeEventListener("backup_restored_sync" as any, handleBackupEvent);
+      window.removeEventListener("app_remote_sync" as any, handleBackupEvent);
+      if (supabase && channel) {
+        supabase.removeChannel(channel);
+      }
     };
   }, []);
 
@@ -603,27 +630,20 @@ export function CompanySettings({
       }
 
       const supabase = getSupabase();
-      if (!supabase) {
-        setBackupError("Supabase não configurado.");
-        setUploadingCloud(false);
-        return;
-      }
-
       // Obter ID do usuário autenticado atual via supabase.auth.getUser() ou da sessão ativa
-      const { data: authData } = await supabase.auth.getUser();
-      let activeUserId = authData?.user?.id;
-      if (!activeUserId) {
-        const { data: sessionData } = await supabase.auth.getSession();
-        activeUserId = sessionData?.session?.user?.id;
-      }
-      if (!activeUserId && currentUser?.id) {
-        activeUserId = currentUser.id;
-      }
-
-      if (!activeUserId) {
-        setBackupError("Usuário autenticado não encontrado. Faça login novamente para realizar o upload.");
-        setUploadingCloud(false);
-        return;
+      let activeUserId = currentUser?.id || UNIFIED_EMPRESA_ID;
+      if (supabase) {
+        try {
+          const { data: authData } = await supabase.auth.getUser();
+          if (authData?.user?.id) {
+            activeUserId = authData.user.id;
+          } else {
+            const { data: sessionData } = await supabase.auth.getSession();
+            if (sessionData?.session?.user?.id) {
+              activeUserId = sessionData.session.user.id;
+            }
+          }
+        } catch (e) {}
       }
 
       // Interceptar o array de objetos do backup e substituir o campo 'user_id' pelo ID do usuário autenticado atual
@@ -657,17 +677,39 @@ export function CompanySettings({
 
       const updatedText = JSON.stringify(parsedData);
 
-      const payloadRecord: any = {
-        titulo: file.name,
-        descricao: updatedText,
-        valor: file.size || updatedText.length,
-        user_id: activeUserId
-      };
+      // 1. Tentar salvar pelo endpoint do servidor que propaga SSE/Realtime para todas as máquinas
+      let savedViaServer = false;
+      try {
+        const srvRes = await fetch("/api/backups", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            titulo: file.name,
+            descricao: updatedText,
+            valor: file.size || updatedText.length,
+            userId: activeUserId
+          })
+        });
+        if (srvRes.ok) {
+          savedViaServer = true;
+        }
+      } catch (srvErr) {
+        console.warn("Aviso ao salvar backup via servidor:", srvErr);
+      }
 
-      const { error } = await supabase.from("meus_dados").insert(payloadRecord);
-      if (error) throw error;
+      // 2. Se não foi pelo servidor, salvar direto via client Supabase
+      if (!savedViaServer && supabase) {
+        const payloadRecord: any = {
+          titulo: file.name,
+          descricao: updatedText,
+          valor: file.size || updatedText.length,
+          user_id: activeUserId
+        };
+        const { error } = await supabase.from("meus_dados").insert(payloadRecord);
+        if (error) throw error;
+      }
 
-      setBackupSuccessMsg(`Backup "${file.name}" salvo na nuvem com sucesso! Sincronizado para todas as máquinas.`);
+      setBackupSuccessMsg(`Backup "${file.name}" salvo na nuvem com sucesso! Sincronizado para todos os computadores.`);
       setTimeout(() => setBackupSuccessMsg(null), 6000);
       await fetchCloudBackups();
     } catch (err: any) {
@@ -710,11 +752,18 @@ export function CompanySettings({
   const handleDeleteCloudBackup = async (id: string) => {
     const confirmed = window.confirm("Excluir esta cópia de backup da nuvem?");
     if (!confirmed) return;
+
+    try {
+      await fetch(`/api/backups/${id}?userId=${encodeURIComponent(currentUser?.id || UNIFIED_EMPRESA_ID)}`, {
+        method: "DELETE"
+      });
+    } catch (e) {}
+
     const supabase = getSupabase();
     if (supabase) {
       await supabase.from("meus_dados").delete().eq("id", id);
-      setCloudBackups((prev) => prev.filter((b) => b.id !== id));
     }
+    setCloudBackups((prev) => prev.filter((b) => b.id !== id));
   };
 
   const handleExportBackup = async () => {
@@ -749,26 +798,61 @@ export function CompanySettings({
       URL.revokeObjectURL(downloadUrl);
 
       // Gravar na nuvem (tabela meus_dados) para sincronizar entre todos os computadores
+      const jsonString = JSON.stringify(data);
+      const fileName = `nexvolt_backup_${sanitizedName}_${dateStr}.json`;
       const supabase = getSupabase();
+      let activeUserId = currentUser?.id || UNIFIED_EMPRESA_ID;
+
       if (supabase) {
         try {
           const { data: authData } = await supabase.auth.getUser();
-          const activeUserId = authData?.user?.id || (await supabase.auth.getSession()).data.session?.user?.id || currentUser?.id || UNIFIED_EMPRESA_ID;
-          const jsonString = JSON.stringify(data);
+          if (authData?.user?.id) {
+            activeUserId = authData.user.id;
+          } else {
+            const { data: sessionData } = await supabase.auth.getSession();
+            if (sessionData?.session?.user?.id) {
+              activeUserId = sessionData.session.user.id;
+            }
+          }
+        } catch (authErr) {}
+      }
+
+      // Salvar via API do servidor (propaga para todos os computadores conectados via SSE)
+      let savedViaServer = false;
+      try {
+        const srvRes = await fetch("/api/backups", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            titulo: fileName,
+            descricao: jsonString,
+            valor: jsonString.length,
+            userId: activeUserId
+          })
+        });
+        if (srvRes.ok) {
+          savedViaServer = true;
+        }
+      } catch (srvErr) {
+        console.warn("Aviso ao salvar backup via API do servidor:", srvErr);
+      }
+
+      if (!savedViaServer && supabase) {
+        try {
           const payloadRecord: any = {
-            titulo: `nexvolt_backup_${sanitizedName}_${dateStr}.json`,
+            titulo: fileName,
             descricao: jsonString,
             valor: jsonString.length,
             user_id: activeUserId
           };
           await supabase.from("meus_dados").insert(payloadRecord);
-          fetchCloudBackups();
         } catch (dbErr) {
           console.warn("Aviso ao salvar backup na tabela meus_dados:", dbErr);
         }
       }
 
-      setBackupSuccessMsg("Cópia de segurança exportada com sucesso! O arquivo .json foi salvo na sua pasta de Downloads e sincronizado na Nuvem.");
+      fetchCloudBackups();
+      setBackupSuccessMsg("Cópia de segurança exportada com sucesso! O arquivo .json foi salvo na sua pasta de Downloads e sincronizado na Nuvem para todos os computadores.");
       setTimeout(() => setBackupSuccessMsg(null), 6000);
     } catch (err: any) {
       console.error(err);

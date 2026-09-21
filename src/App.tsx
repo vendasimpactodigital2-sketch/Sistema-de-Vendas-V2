@@ -925,7 +925,23 @@ export default function App() {
     const saved = localStorage.getItem("NUCLEO_CASH_REGISTER");
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.currentSession) {
+          const openDate = (parsed.currentSession.dataAbertura || "").split("T")[0];
+          const todayDate = new Date().toISOString().split("T")[0];
+          if (openDate && openDate < todayDate) {
+            // Sessão de dia anterior deixada aberta: arquiva automaticamente como fechada
+            const closedPast: CashRegisterSession = {
+              ...parsed.currentSession,
+              status: "fechado",
+              dataFechamento: parsed.currentSession.dataFechamento || new Date(parsed.currentSession.dataAbertura).toISOString()
+            };
+            parsed.currentSession = null;
+            parsed.history = [closedPast, ...(parsed.history || [])];
+            localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(parsed));
+          }
+        }
+        return parsed;
       } catch (e) {
         console.error("Error parsing NUCLEO_CASH_REGISTER from localStorage", e);
       }
@@ -992,13 +1008,12 @@ export default function App() {
     const supabase = getSupabase();
     if (!supabase) return;
 
-    // 2. Select inicial em public.sessoes_caixa buscando por status = 'aberto' e empresa_id = '62f892b2-3855-4ae9-8b2d-42d4b6223815'
+    // 2. Select inicial em public.sessoes_caixa da empresa unificada
     const checkInitialSession = async () => {
       try {
         const { data } = await supabase
           .from("sessoes_caixa")
-          .select("id, status, valor_abertura, data_abertura, aberto_por_usuario_id")
-          .eq("status", "aberto")
+          .select("id, status, valor_abertura, data_abertura, data_fechamento, aberto_por_usuario_id")
           .eq("empresa_id", UNIFIED_EMPRESA_ID)
           .order("data_abertura", { ascending: false })
           .limit(1)
@@ -1006,37 +1021,80 @@ export default function App() {
 
         if (!isMounted) return;
 
-        if (data && (data.status || "").trim().toLowerCase() === "aberto") {
-          // Se encontrar, force o estado inicial da tela a iniciar como ABERTO automaticamente em qualquer máquina, sem pedir nova abertura
-          setIsGlobalRegisterOpen(true);
-          const activeSession: CashRegisterSession = {
-            id: data.id,
-            status: "aberto",
-            valorAbertura: Number(data.valor_abertura) || 0,
-            dataAbertura: data.data_abertura || new Date().toISOString(),
-            operador: currentUser?.name || "Operador"
-          };
-          setCashRegister((prev) => {
-            const updated = {
-              ...prev,
-              currentSession: activeSession
+        const isLatestClosed = !data || (data.status || "").trim().toLowerCase() === "fechado" || !!data.data_fechamento;
+
+        if (data && (data.status || "").trim().toLowerCase() === "aberto" && !data.data_fechamento) {
+          const openDate = data.data_abertura ? data.data_abertura.split("T")[0] : "";
+          const todayDate = new Date().toISOString().split("T")[0];
+          // Apenas abrir automaticamente se a sessão for de hoje
+          if (openDate === todayDate) {
+            setIsGlobalRegisterOpen(true);
+            const activeSession: CashRegisterSession = {
+              id: data.id,
+              status: "aberto",
+              valorAbertura: Number(data.valor_abertura) || 0,
+              dataAbertura: data.data_abertura || new Date().toISOString(),
+              operador: currentUser?.name || "Operador"
             };
-            cashRegisterRef.current = updated;
-            try {
-              localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated));
-            } catch (e) {}
-            return updated;
+            setCashRegister((prev) => {
+              const updated = {
+                ...prev,
+                currentSession: activeSession
+              };
+              cashRegisterRef.current = updated;
+              try {
+                localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated));
+              } catch (e) {}
+              return updated;
+            });
+            return;
+          } else if (openDate < todayDate) {
+            // Sessão de dia anterior deixada aberta no banco: encerrar formalmente no banco e localmente
+            dbCloseGlobalCashRegister(UNIFIED_EMPRESA_ID).catch(() => {});
+            setIsGlobalRegisterOpen(false);
+            setCashRegister((prev) => {
+              const pastSession = prev.currentSession || {
+                id: data.id,
+                status: "fechado" as const,
+                valorAbertura: Number(data.valor_abertura) || 0,
+                dataAbertura: data.data_abertura,
+                dataFechamento: new Date(data.data_abertura).toISOString(),
+                operador: "Operador"
+              };
+              const closed: CashRegisterSession = {
+                ...pastSession,
+                status: "fechado",
+                dataFechamento: pastSession.dataFechamento || new Date().toISOString()
+              };
+              const updated = {
+                currentSession: null,
+                history: prev.history ? [closed, ...prev.history.filter(h => h.id !== closed.id)] : [closed]
+              };
+              cashRegisterRef.current = updated;
+              try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
+              return updated;
+            });
+            return;
+          }
+        }
+
+        // Se a sessão mais recente no banco estiver fechada, forçar fechamento
+        if (isLatestClosed) {
+          setIsGlobalRegisterOpen(false);
+          setCashRegister((prev) => {
+            if (prev.currentSession) {
+              const updated = { ...prev, currentSession: null };
+              cashRegisterRef.current = updated;
+              try {
+                localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated));
+              } catch (e) {}
+              return updated;
+            }
+            return prev;
           });
         } else {
-          // CRÍTICO: Se o caixa estiver aberto localmente, NUNCA zerar ou fechar sozinho!
-          // Uma vez aberto, ele fica aberto durante todo o expediente até o fechamento manual pelo operador.
           const isLocalOpen = !!cashRegisterRef.current?.currentSession && isCashSessionActiveOrOpen(cashRegisterRef.current.currentSession);
-          if (isLocalOpen) {
-            console.log("[sessoes_caixa check] Mantendo caixa local aberto ativo.");
-            setIsGlobalRegisterOpen(true);
-          } else {
-            setIsGlobalRegisterOpen(false);
-          }
+          setIsGlobalRegisterOpen(isLocalOpen);
         }
       } catch (err) {
         console.warn("Aviso ao carregar status inicial de sessoes_caixa:", err);
@@ -1142,38 +1200,73 @@ export default function App() {
         try {
           const { data } = await supabase
             .from("sessoes_caixa")
-            .select("id, status, valor_abertura, data_abertura, aberto_por_usuario_id")
-            .eq("status", "aberto")
+            .select("id, status, valor_abertura, data_abertura, data_fechamento, aberto_por_usuario_id")
             .eq("empresa_id", UNIFIED_EMPRESA_ID)
             .order("data_abertura", { ascending: false })
             .limit(1)
             .maybeSingle();
 
-          if (data && (data.status || "").trim().toLowerCase() === "aberto") {
-            setIsGlobalRegisterOpen(true);
-            const activeSession: CashRegisterSession = {
-              id: data.id,
-              status: "aberto",
-              valorAbertura: Number(data.valor_abertura) || 0,
-              dataAbertura: data.data_abertura || new Date().toISOString(),
-              operador: currentUser?.name || "Operador"
-            };
-            setCashRegister((prev) => {
-              const updated = { ...prev, currentSession: activeSession };
-              cashRegisterRef.current = updated;
-              try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
-              return updated;
-            });
-            return true;
-          } else {
-            // Se local estiver com caixa aberto, NUNCA zerar o caixa! Fica aberto até o expediente acabar ou fechamento manual.
-            const isLocalOpen = !!cashRegisterRef.current?.currentSession && isCashSessionActiveOrOpen(cashRegisterRef.current.currentSession);
-            if (isLocalOpen) {
+          const isLatestClosed = !data || (data.status || "").trim().toLowerCase() === "fechado" || !!data.data_fechamento;
+
+          if (data && (data.status || "").trim().toLowerCase() === "aberto" && !data.data_fechamento) {
+            const openDate = data.data_abertura ? data.data_abertura.split("T")[0] : "";
+            const todayDate = new Date().toISOString().split("T")[0];
+            if (openDate === todayDate) {
               setIsGlobalRegisterOpen(true);
+              const activeSession: CashRegisterSession = {
+                id: data.id,
+                status: "aberto",
+                valorAbertura: Number(data.valor_abertura) || 0,
+                dataAbertura: data.data_abertura || new Date().toISOString(),
+                operador: currentUser?.name || "Operador"
+              };
+              setCashRegister((prev) => {
+                const updated = { ...prev, currentSession: activeSession };
+                cashRegisterRef.current = updated;
+                try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
+                return updated;
+              });
               return true;
+            } else if (openDate < todayDate) {
+              dbCloseGlobalCashRegister(UNIFIED_EMPRESA_ID).catch(() => {});
+              setIsGlobalRegisterOpen(false);
+              setCashRegister((prev) => {
+                if (prev.currentSession) {
+                  const closed: CashRegisterSession = {
+                    ...prev.currentSession,
+                    status: "fechado",
+                    dataFechamento: prev.currentSession.dataFechamento || new Date().toISOString()
+                  };
+                  const updated = {
+                    currentSession: null,
+                    history: prev.history ? [closed, ...prev.history.filter(h => h.id !== closed.id)] : [closed]
+                  };
+                  cashRegisterRef.current = updated;
+                  try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
+                  return updated;
+                }
+                return prev;
+              });
+              return false;
             }
+          }
+
+          if (isLatestClosed) {
             setIsGlobalRegisterOpen(false);
+            setCashRegister((prev) => {
+              if (prev.currentSession) {
+                const updated = { ...prev, currentSession: null };
+                cashRegisterRef.current = updated;
+                try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
+                return updated;
+              }
+              return prev;
+            });
             return false;
+          } else {
+            const isLocalOpen = !!cashRegisterRef.current?.currentSession && isCashSessionActiveOrOpen(cashRegisterRef.current.currentSession);
+            setIsGlobalRegisterOpen(isLocalOpen);
+            return isLocalOpen;
           }
         } catch (err) {
           console.warn("Aviso ao checar sessoes_caixa unificado:", err);
@@ -2815,6 +2908,9 @@ export default function App() {
               window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: data }));
             } else if (evType === "clients_updated" || evType === "clients_broadcast") {
               window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: data }));
+            } else if (evType === "cloud_backups_updated" || evType === "backup_sync" || evType === "backup_restored") {
+              window.dispatchEvent(new CustomEvent("cloud_backups_updated", { detail: data }));
+              window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: data }));
             }
           } catch (err) {}
         };
@@ -3917,12 +4013,18 @@ export default function App() {
           const currentSession = cashRegister.currentSession;
           const sessionDateStr = getLocalDateFromISO(currentSession.dataAbertura);
           
+          // Se a sessão for de um dia anterior, arquivar/fechar a sessão do dia anterior para respeitar o ciclo diário
+          if (sessionDateStr < todayDateStr) {
+            handleAutoCloseConfirm();
+            return;
+          }
+
           const dismissedDate = localStorage.getItem("NUCLEO_DISMISSED_AUTOCLOSE_DATE");
           const snoozeUntil = localStorage.getItem("NUCLEO_SNOOZE_CASH_CLOSING_UNTIL");
           const isSnoozed = snoozeUntil ? Date.now() < Number(snoozeUntil) : false;
           const isDismissedToday = dismissedDate === todayDateStr;
 
-          // Determine effective reminder / closing time
+          // Determinar horário de fechamento efetivo de acordo com a configuração da empresa
           let effectiveTime = (company?.cashClosingReminderTime || "").trim();
           if (!effectiveTime) {
             if (company?.businessHours) {
@@ -3938,11 +4040,17 @@ export default function App() {
             effectiveTime = company?.closingTime || "18:00";
           }
 
-          // Trigger when current time is past effective closing time, or if session was left open from a previous day
-          const isPastClosing = (currentHHMM >= effectiveTime) || (sessionDateStr < todayDateStr);
+          // A tela SÓ PODE ABRIR QUANDO ESTIVER FORA DO HORÁRIO DE FECHAMENTO (horário atual >= encerramento configurado)
+          const isPastClosing = currentHHMM >= effectiveTime;
           const isReminderEnabled = company?.cashClosingReminderEnabled ?? true;
 
-          // Trigger continuous alarm & notification if enabled, past closing time, and not dismissed/snoozed
+          // Se a empresa configurou fechamento automático ao término do expediente, encerrar autonomamente
+          if (company?.autoCloseRegisterEnabled && isPastClosing) {
+            handleAutoCloseConfirm();
+            return;
+          }
+
+          // Trigger continuous alarm & notification SOMENTE fora do horário de fechamento
           if (isReminderEnabled && isPastClosing && !isDismissedToday && !isSnoozed && !showAutoClosePrompt) {
             setClosingAlarmMuted(false);
             setShowAutoClosePrompt(true);
@@ -4266,6 +4374,7 @@ export default function App() {
 
     // Sync with Supabase sessoes_caixa
     const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+    const companyId = currentUser?.owner_id || currentUser?.id || UNIFIED_EMPRESA_ID;
     const supabaseClient = getSupabase();
     if (supabaseClient) {
       try {
@@ -4281,8 +4390,7 @@ export default function App() {
       }
     }
 
-    if (currentUser && isSupabaseConfigured()) {
-      const companyId = currentUser.owner_id || currentUser.id;
+    if (isSupabaseConfigured()) {
       await dbSaveCashRegister(companyId, updatedState);
       await dbOpenGlobalCashRegister(companyId, newSession);
     }
@@ -4292,9 +4400,25 @@ export default function App() {
   };
 
   const handleCloseRegister = async (valorFechamentoReal: number, observacoes: string) => {
-    if (!cashRegister.currentSession) return;
-
-    const currentSession = cashRegister.currentSession;
+    let currentSession = cashRegister.currentSession || cashRegisterRef.current?.currentSession;
+    if (!currentSession) {
+      try {
+        const saved = localStorage.getItem("NUCLEO_CASH_REGISTER");
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed?.currentSession) currentSession = parsed.currentSession;
+        }
+      } catch (e) {}
+    }
+    if (!currentSession) {
+      currentSession = {
+        id: "session_" + Date.now(),
+        status: "aberto",
+        valorAbertura: 0,
+        dataAbertura: new Date().toISOString(),
+        operador: currentUser?.name || "Operador"
+      };
+    }
 
     let cashInflow = 0;
     let pixInflow = 0;
@@ -4459,6 +4583,23 @@ export default function App() {
 
     // Sincronização direta na tabela sessoes_caixa da empresa unificada
     const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+    const companyId = currentUser?.owner_id || currentUser?.id || UNIFIED_EMPRESA_ID;
+
+    // Chamada prioritária ao endpoint com service_role para fechamento definitivo no servidor e banco
+    try {
+      await fetch("/api/cash-register/close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: companyId,
+          closingData: closedSession,
+          state: updatedState
+        })
+      });
+    } catch (err) {
+      console.warn("Aviso ao chamar /api/cash-register/close:", err);
+    }
+
     const supabaseClient = getSupabase();
     if (supabaseClient) {
       try {
@@ -4476,8 +4617,7 @@ export default function App() {
     }
 
     // Sync with Supabase
-    if (currentUser && isSupabaseConfigured()) {
-      const companyId = currentUser.owner_id || currentUser.id;
+    if (isSupabaseConfigured()) {
       await dbSaveCashRegister(companyId, updatedState);
       await dbCloseGlobalCashRegister(companyId, currentSession.id, closedSession);
     }
@@ -4633,6 +4773,8 @@ export default function App() {
     };
 
     setCashRegister(updatedState);
+    cashRegisterRef.current = updatedState;
+    setIsGlobalRegisterOpen(false);
     localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updatedState));
 
     try {
@@ -4641,6 +4783,9 @@ export default function App() {
       console.warn(soundErr);
     }
 
+    const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+    dbCloseGlobalCashRegister(currentUser?.owner_id || currentUser?.id || UNIFIED_EMPRESA_ID).catch(() => {});
+
     if (currentUser && isSupabaseConfigured()) {
       const companyId = currentUser.owner_id || currentUser.id;
       dbSaveCashRegister(companyId, updatedState).catch((syncErr) => {
@@ -4648,7 +4793,7 @@ export default function App() {
       });
     }
 
-    addToast(`🔒 O caixa da empresa foi fechado automaticamente. Contabilidade realizada com Valor Líquido de R$ ${expectedInDrawer.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} em caixa.`, "success");
+    addToast(`🔒 O caixa da empresa foi fechado com sucesso. Contabilidade realizada com Valor Líquido de R$ ${expectedInDrawer.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} em caixa.`, "success");
     setShowAutoClosePrompt(false);
   };
 

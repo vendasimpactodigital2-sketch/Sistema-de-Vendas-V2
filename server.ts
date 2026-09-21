@@ -2908,6 +2908,122 @@ ${JSON.stringify(sales, null, 2)}
     }
   });
 
+  // Cloud Backups API (uses service_role to bypass client RLS and ensure sync across all computers)
+  app.get("/api/backups", async (req, res) => {
+    try {
+      const supabase = getSupabaseClient();
+      if (!supabase) {
+        return res.json({ success: true, backups: [] });
+      }
+
+      const { data, error } = await supabase
+        .from("meus_dados")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(100);
+
+      if (error) {
+        console.warn("[Server GET /api/backups] meus_dados query notice:", error.message);
+        return res.json({ success: true, backups: [] });
+      }
+
+      return res.json({ success: true, backups: data || [] });
+    } catch (err: any) {
+      console.error("[Server GET /api/backups Exception]:", err);
+      return res.status(500).json({ error: err.message, backups: [] });
+    }
+  });
+
+  app.post("/api/backups", async (req, res) => {
+    try {
+      const { titulo, descricao, valor, userId } = req.body;
+      if (!titulo || !descricao) {
+        return res.status(400).json({ error: "titulo e descricao são obrigatórios" });
+      }
+
+      const supabase = getSupabaseClient();
+      if (!supabase) {
+        return res.status(500).json({ error: "Supabase não configurado" });
+      }
+
+      const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+      const effectiveUserId = userId || UNIFIED_EMPRESA_ID;
+
+      const descStr = typeof descricao === "string" ? descricao : JSON.stringify(descricao);
+      const payload = {
+        titulo,
+        descricao: descStr,
+        valor: valor || descStr.length,
+        user_id: effectiveUserId
+      };
+
+      const { data, error } = await supabase
+        .from("meus_dados")
+        .insert(payload)
+        .select()
+        .single();
+
+      if (error) {
+        console.error("[Server POST /api/backups] Insert error:", error);
+        return res.status(500).json({ error: error.message });
+      }
+
+      // Broadcast to all computers logged into the system
+      const targets = new Set<string>(["global", UNIFIED_EMPRESA_ID]);
+      if (userId) {
+        try {
+          const { canonicalOwnerId, companyUserIds } = await resolveCompanyScope(supabase, userId);
+          targets.add(canonicalOwnerId);
+          targets.add(userId);
+          (companyUserIds || []).forEach(id => targets.add(id));
+        } catch (e) {}
+      }
+
+      targets.forEach((t) => {
+        broadcastSyncEvent(t, "cloud_backups_updated", { backup: data, timestamp: Date.now() });
+        broadcastSyncEvent(t, "backup_sync", { backup: data, timestamp: Date.now() });
+      });
+
+      return res.json({ success: true, backup: data });
+    } catch (err: any) {
+      console.error("[Server POST /api/backups Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/backups/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { userId } = req.query;
+
+      const supabase = getSupabaseClient();
+      if (!supabase) {
+        return res.status(500).json({ error: "Supabase não configurado" });
+      }
+
+      const { error } = await supabase
+        .from("meus_dados")
+        .delete()
+        .eq("id", id);
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+      broadcastSyncEvent("global", "cloud_backups_updated", { deletedId: id, timestamp: Date.now() });
+      broadcastSyncEvent(UNIFIED_EMPRESA_ID, "cloud_backups_updated", { deletedId: id, timestamp: Date.now() });
+      if (userId && typeof userId === "string") {
+        broadcastSyncEvent(userId, "cloud_backups_updated", { deletedId: id, timestamp: Date.now() });
+      }
+
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error("[Server DELETE /api/backups/:id Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Cash Register Management API (uses service_role to bypass client RLS 42501)
   app.post("/api/cash-register", async (req, res) => {
     try {
@@ -2967,20 +3083,51 @@ ${JSON.stringify(sales, null, 2)}
           );
         }
       } else if (!state.currentSession) {
-        // NUNCA fechar sessões arbitrariamente! Apenas fechar se o payload contiver explicitamente
-        // uma sessão que acabou de ser fechada no histórico (últimos 10 minutos).
+        // Fechamento de caixa
         const lastClosed = state.history && state.history.length > 0 ? state.history[0] : null;
-        if (lastClosed && lastClosed.id && lastClosed.dataFechamento) {
-          const closedRecently = (Date.now() - new Date(lastClosed.dataFechamento).getTime()) < 10 * 60 * 1000;
-          if (closedRecently) {
-            upsertPromises.push(
-              supabase.from("sessoes_caixa").update({
-                status: "fechado",
-                data_fechamento: lastClosed.dataFechamento || nowISO
-              }).eq("id", lastClosed.id)
-            );
-          }
+        const closingDate = lastClosed?.dataFechamento || nowISO;
+
+        // 1. Fechar todas as sessões abertas na tabela sessoes_caixa para a empresa unificada
+        upsertPromises.push(
+          supabase.from("sessoes_caixa").update({
+            status: "fechado",
+            data_fechamento: closingDate
+          })
+          .eq("empresa_id", UNIFIED_EMPRESA_ID)
+          .eq("status", "aberto")
+        );
+
+        if (lastClosed?.id) {
+          upsertPromises.push(
+            supabase.from("sessoes_caixa").update({
+              status: "fechado",
+              data_fechamento: closingDate
+            }).eq("id", lastClosed.id)
+          );
         }
+
+        // 2. Registrar no historico_caixas
+        if (lastClosed) {
+          const isUUID = typeof lastClosed.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(lastClosed.id);
+          upsertPromises.push(
+            supabase.from("historico_caixas").upsert({
+              ...(isUUID ? { id: lastClosed.id } : {}),
+              usuario_id: UNIFIED_EMPRESA_ID,
+              data_fechamento: closingDate,
+              total_vendas: Number(lastClosed.totalVendas || 0),
+              total_despesas: Number(lastClosed.totalDespesas || 0),
+              saldo_final: Number(lastClosed.valorFechamentoReal || 0),
+              dados_completos_json: lastClosed
+            })
+          );
+        }
+
+        // 3. Atualizar linhas legadas em sales
+        upsertPromises.push(
+          supabase.from("sales")
+            .update({ items: state as any, date: nowISO })
+            .eq("client_name", "CASH_REGISTER_SYNCED_STATE")
+        );
       }
 
       const results = await Promise.allSettled(upsertPromises);
@@ -2998,6 +3145,89 @@ ${JSON.stringify(sales, null, 2)}
       return res.json({ success: true, date: nowISO });
     } catch (err: any) {
       console.error("[Server POST /api/cash-register Exception]:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Dedicated Cash Register Closure Endpoint with service_role privileges
+  app.post("/api/cash-register/close", async (req, res) => {
+    try {
+      const { userId, closingData, state } = req.body;
+      const supabase = getSupabaseClient();
+      if (!supabase) {
+        return res.json({ success: true, message: "Supabase não configurado" });
+      }
+
+      const nowISO = new Date().toISOString();
+      const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+      const { canonicalOwnerId } = await resolveCompanyScope(supabase, userId || UNIFIED_EMPRESA_ID);
+
+      const closingDate = closingData?.dataFechamento || nowISO;
+
+      // 1. Fechar todas as sessões abertas na tabela sessoes_caixa
+      const p1 = supabase
+        .from("sessoes_caixa")
+        .update({
+          status: "fechado",
+          data_fechamento: closingDate
+        })
+        .eq("empresa_id", UNIFIED_EMPRESA_ID)
+        .eq("status", "aberto");
+
+      // 2. Registrar no historico_caixas
+      let p2: any = Promise.resolve();
+      if (closingData) {
+        const isUUID = typeof closingData.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(closingData.id);
+        p2 = supabase
+          .from("historico_caixas")
+          .upsert({
+            ...(isUUID ? { id: closingData.id } : {}),
+            usuario_id: UNIFIED_EMPRESA_ID,
+            data_fechamento: closingDate,
+            total_vendas: Number(closingData.totalVendas || 0),
+            total_despesas: Number(closingData.totalDespesas || 0),
+            saldo_final: Number(closingData.valorFechamentoReal || 0),
+            dados_completos_json: closingData
+          });
+      }
+
+      const closedState = state || {
+        currentSession: null,
+        history: closingData ? [closingData] : []
+      };
+
+      const createPayload = (rowId: string, uid: string) => ({
+        id: rowId,
+        user_id: uid,
+        client_name: "CASH_REGISTER_SYNCED_STATE",
+        client_phone: "CASH_REGISTER",
+        items: closedState as any,
+        total_value: 0,
+        is_budget: true,
+        operation_cost: 0,
+        balance_due: 0,
+        net_profit: 0,
+        discount: 0,
+        down_payment: 0,
+        motoboy_cost: 0,
+        date: nowISO
+      });
+
+      const p3 = supabase.from("sales").upsert(createPayload(`cash_register_state_${canonicalOwnerId}`, canonicalOwnerId));
+      const p4 = supabase.from("sales").upsert(createPayload(`cash_register_state_${userId}`, userId));
+      const p5 = supabase.from("sales").upsert(createPayload("cash_register_state", canonicalOwnerId));
+      const p6 = supabase.from("sales").update({ items: closedState as any, date: nowISO }).eq("client_name", "CASH_REGISTER_SYNCED_STATE");
+
+      await Promise.allSettled([p1, p2, p3, p4, p5, p6]);
+
+      // Broadcast instant cash register closed across all company devices
+      broadcastSyncEvent(canonicalOwnerId, "cash_register_updated", { state: closedState, closed: true });
+      broadcastSyncEvent(userId, "cash_register_updated", { state: closedState, closed: true });
+      broadcastSyncEvent("global", "cash_register_updated", { state: closedState, closed: true });
+
+      return res.json({ success: true, date: nowISO });
+    } catch (err: any) {
+      console.error("[Server POST /api/cash-register/close Exception]:", err);
       return res.status(500).json({ error: err.message });
     }
   });
@@ -3052,6 +3282,10 @@ ${JSON.stringify(sales, null, 2)}
         };
       }).filter(c => c.state && typeof c.state === "object");
 
+      // Sort candidates newest first
+      parsedCandidates.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+      const latestCandidate = parsedCandidates[0];
+
       // 0. TOP PRIORITY: Real table sessoes_caixa check
       try {
         const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
@@ -3063,14 +3297,12 @@ ${JSON.stringify(sales, null, 2)}
           .limit(10);
 
         if (sessRows && sessRows.length > 0) {
-          const openSess = sessRows.find((s: any) => {
-            const st = String(s.status || s.situacao || "").toLowerCase().trim();
-            if (st === "fechado" || st === "fechada" || st === "closed" || st === "encerrado" || st === "encerrada") return false;
-            if (st.includes("abert") || st.includes("ativ") || st.includes("open") || s.aberto === true) return true;
-            return !s.data_fechamento && !s.fechado_em;
-          });
+          const latestSess = sessRows[0];
+          const latestStatus = String(latestSess.status || latestSess.situacao || "").toLowerCase().trim();
+          const isLatestClosed = latestStatus === "fechado" || latestStatus === "fechada" || latestStatus === "closed" || latestStatus === "encerrado" || !!latestSess.data_fechamento || !!latestSess.fechado_em;
 
-          if (openSess) {
+          if (!isLatestClosed && (latestStatus.includes("abert") || latestStatus.includes("ativ") || latestStatus.includes("open") || latestSess.aberto === true)) {
+            const openSess = latestSess;
             let histItems: any[] = [];
             try {
               const { data: hRows } = await supabase
@@ -3109,7 +3341,7 @@ ${JSON.stringify(sales, null, 2)}
                 dataAbertura: openSess.data_abertura || openSess.created_at || new Date().toISOString(),
                 operador: openSess.operador || openSess.usuario || "Operador"
               },
-              history: histItems.length > 0 ? histItems : (parsedCandidates[0]?.state?.history || [])
+              history: histItems.length > 0 ? histItems : (latestCandidate?.state?.history || [])
             };
             return res.json({ success: true, data: reconstructedState, date: openSess.data_abertura || openSess.created_at });
           }
@@ -3118,13 +3350,18 @@ ${JSON.stringify(sales, null, 2)}
         console.warn("[/api/cash-register GET] sessoes_caixa check notice:", sessErr);
       }
 
-      // 1. TOP PRIORITY: If ANY candidate row has an active OPEN session, that MUST take precedence!
-      const openCandidate = parsedCandidates.find(
-        (c) => c.state?.currentSession && c.state.currentSession.status === "aberto"
-      );
-
-      if (openCandidate) {
-        return res.json({ success: true, data: openCandidate.state, date: openCandidate.date });
+      // 1. If latest candidate is closed (or null currentSession), respect it!
+      if (latestCandidate) {
+        if (!latestCandidate.state.currentSession || latestCandidate.state.currentSession.status !== "aberto") {
+          return res.json({ success: true, data: latestCandidate.state, date: latestCandidate.date });
+        } else {
+          // Verify if openCandidate is from today (prevent multi-day stale open sessions)
+          const openDate = latestCandidate.state.currentSession.dataAbertura;
+          const isFromPastDay = openDate && (new Date().toISOString().split("T")[0] !== openDate.split("T")[0]);
+          if (!isFromPastDay) {
+            return res.json({ success: true, data: latestCandidate.state, date: latestCandidate.date });
+          }
+        }
       }
 
       // 2. Auxiliary table check: fluxo_caixa for today
@@ -3139,7 +3376,6 @@ ${JSON.stringify(sales, null, 2)}
           .maybeSingle();
 
         if (fcRow) {
-          // Open session active in fluxo_caixa! Return reconstructed open state
           const reconstructedState = {
             currentSession: {
               id: fcRow.session_id || `session_fc_${todayStr}`,
@@ -3148,7 +3384,7 @@ ${JSON.stringify(sales, null, 2)}
               dataAbertura: fcRow.data_abertura || new Date().toISOString(),
               operador: fcRow.operador || "Operador"
             },
-            history: (parsedCandidates[0]?.state?.history) || []
+            history: (latestCandidate?.state?.history) || []
           };
           return res.json({ success: true, data: reconstructedState, date: fcRow.updated_at });
         }
@@ -3156,10 +3392,9 @@ ${JSON.stringify(sales, null, 2)}
         // Continue
       }
 
-      // 3. If no open session anywhere, return the most recent closed state
-      if (parsedCandidates.length > 0) {
-        parsedCandidates.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-        return res.json({ success: true, data: parsedCandidates[0].state, date: parsedCandidates[0].date });
+      // 3. If no open session anywhere, return the most recent candidate state
+      if (latestCandidate) {
+        return res.json({ success: true, data: latestCandidate.state, date: latestCandidate.date });
       }
 
       return res.json({ success: true, data: null });

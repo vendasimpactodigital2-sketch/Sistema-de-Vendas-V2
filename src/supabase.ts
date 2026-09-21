@@ -3783,7 +3783,7 @@ export async function dbOpenGlobalCashRegister(userId: string, session: any): Pr
   return true;
 }
 
-export async function dbCloseGlobalCashRegister(userId: string, sessionId: string, closingData: any): Promise<boolean> {
+export async function dbCloseGlobalCashRegister(userId: string, sessionId?: string, closingData: any = {}): Promise<boolean> {
   const supabase = getSupabase();
   let effectiveUserId = userId;
   if (supabase?.auth) {
@@ -3796,6 +3796,21 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
   }
 
   const nowISO = new Date().toISOString();
+  const safeClosingData = closingData || {};
+
+  // 0. High priority server-side closure with service_role privileges
+  try {
+    await fetch("/api/cash-register/close", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: effectiveUserId || "62f892b2-3855-4ae9-8b2d-42d4b6223815",
+        closingData: { id: sessionId, ...safeClosingData }
+      })
+    });
+  } catch (apiErr) {
+    console.warn("[dbCloseGlobalCashRegister] /api/cash-register/close fallback notice:", apiErr);
+  }
 
   // 1. Primary: update public.sessoes_caixa using empresa_id
   if (supabase) {
@@ -3804,7 +3819,7 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
         .from("sessoes_caixa")
         .update({
           status: "fechado",
-          data_fechamento: closingData.dataFechamento || nowISO
+          data_fechamento: safeClosingData.dataFechamento || nowISO
         })
         .eq("empresa_id", "62f892b2-3855-4ae9-8b2d-42d4b6223815")
         .eq("status", "aberto");
@@ -3819,20 +3834,20 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
         .upsert({
           ...(isUUID ? { id: sessionId } : {}),
           usuario_id: "62f892b2-3855-4ae9-8b2d-42d4b6223815",
-          data_fechamento: closingData.dataFechamento || nowISO,
-          total_vendas: Number(closingData.totalVendas || 0),
-          total_despesas: Number(closingData.totalDespesas || 0),
-          saldo_final: Number(closingData.valorFechamentoReal || 0),
+          data_fechamento: safeClosingData.dataFechamento || nowISO,
+          total_vendas: Number(safeClosingData.totalVendas || 0),
+          total_despesas: Number(safeClosingData.totalDespesas || 0),
+          saldo_final: Number(safeClosingData.valorFechamentoReal || 0),
           dados_completos_json: {
             id: sessionId,
             status: "fechado",
-            valorAbertura: closingData.valorAbertura || 0,
-            dataAbertura: closingData.dataAbertura || nowISO,
-            operador: closingData.operador || "Operador",
-            dataFechamento: closingData.dataFechamento || nowISO,
-            valorFechamentoReal: closingData.valorFechamentoReal || 0,
-            valorFechamentoEsperado: closingData.valorFechamentoEsperado || 0,
-            observacoes: closingData.observacoes || ""
+            valorAbertura: safeClosingData.valorAbertura || 0,
+            dataAbertura: safeClosingData.dataAbertura || nowISO,
+            operador: safeClosingData.operador || "Operador",
+            dataFechamento: safeClosingData.dataFechamento || nowISO,
+            valorFechamentoReal: safeClosingData.valorFechamentoReal || 0,
+            valorFechamentoEsperado: safeClosingData.valorFechamentoEsperado || 0,
+            observacoes: safeClosingData.observacoes || ""
           }
         });
       console.log("[dbCloseGlobalCashRegister] Successfully logged closing to historico_caixas");
@@ -3840,10 +3855,10 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId: strin
 
     const payload = {
       status: "fechado",
-      valor_fechamento_esperado: closingData.valorFechamentoEsperado || 0,
-      valor_fechamento_real: closingData.valorFechamentoReal || 0,
-      data_fechamento: closingData.dataFechamento || nowISO,
-      observacoes: closingData.observacoes || "",
+      valor_fechamento_esperado: safeClosingData.valorFechamentoEsperado || 0,
+      valor_fechamento_real: safeClosingData.valorFechamentoReal || 0,
+      data_fechamento: safeClosingData.dataFechamento || nowISO,
+      observacoes: safeClosingData.observacoes || "",
       updated_at: nowISO
     };
 
