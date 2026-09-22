@@ -265,40 +265,41 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
     setIsFormOpen(true);
   };
 
-  const handleSaveBill = (e: React.FormEvent) => {
+    const handleSaveBill = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    if (!formName.trim()) {
-      showLocalToast("O nome do gasto é obrigatório ⚠️", "error");
+    if (!formName.trim() || !formValue.trim()) {
+      showLocalToast("Por favor, preencha todos os campos do formulário.", "error");
       return;
     }
 
-    const cleanValStr = formValue.replace(/[^\d.,]/g, "").replace(",", ".");
+    const cleanValStr = formValue.replace("R$", "").replace(/\./g, "").replace(",", ".").trim();
     const numericVal = parseFloat(cleanValStr);
+
     if (isNaN(numericVal) || numericVal <= 0) {
-      showLocalToast("Por favor, digite um valor maior que zero ⚠️", "error");
+      showLocalToast("Por favor, insira um valor válido maior que zero.", "error");
       return;
     }
 
-    if (editingBillId) {
-      // Edit local state first
-      setBills((prev) => 
-        prev.map((b) => 
-          b.id === editingBillId 
-            ? { 
-                ...b, 
-                name: formName.trim(), 
-                value: numericVal, 
-                category: formCategory, 
-                dueDate: formDueDate, 
-                observation: formObservation.trim() 
-              } 
-            : b
-        )
-      );
+    try {
+      if (editingBillId) {
+        // Edit existing bill
+        setBills((prev) =>
+          prev.map((b) =>
+            b.id === editingBillId
+              ? {
+                  ...b,
+                  name: formName.trim(),
+                  value: numericVal,
+                  category: formCategory,
+                  dueDate: formDueDate,
+                  observation: formObservation.trim(),
+                }
+              : b
+          )
+        );
 
-      // Save to Supabase
-         if (companyOwnerId) {
+        // Save to Supabase
+        if (companyOwnerId) {
           dbSaveMonthlyBill(
             editingBillId,
             formName.trim(),
@@ -308,9 +309,13 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
             formObservation.trim(),
             companyOwnerId
           );
+          notifyRealtimeSync(companyOwnerId, "gastos_mensais_updated", { billId: editingBillId });
         }
+
+        showLocalToast("Gasto mensal atualizado com sucesso! 📝", "success");
+        setIsFormOpen(false);
       } else {
-        // Add
+        // Add new bill
         const cleanId = "bill-" + Date.now();
         const newBill: MonthlyBill = {
           id: cleanId,
@@ -318,9 +323,9 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
           value: numericVal,
           category: formCategory,
           dueDate: formDueDate,
-          observation: formObservation.trim()
+          observation: formObservation.trim(),
         };
-        
+
         setBills((prev) => [newBill, ...prev]);
 
         // Save to Supabase
@@ -334,25 +339,26 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
             formObservation.trim(),
             companyOwnerId
           );
+          notifyRealtimeSync(companyOwnerId, "gastos_mensais_updated", { billId: cleanId });
         }
-      }
 
-        notifyRealtimeSync(companyOwnerId, "gastos_mensais_updated", { billId: cleanId });
-      }
+        showLocalToast("Gasto cadastrado! O formulário está pronto para o próximo cadastro. 🔥", "success");
 
-      showLocalToast("Gasto cadastrado! O formulário está pronto para o próximo cadastro. 💰", "success");
-      
-      // Keep modal open, clean fields for quick next registration
-      setFormName("");
-      setFormValue("");
-      setFormObservation("");
-      
-      // Auto-focus the Name Input field
-      setTimeout(() => {
-        nameInputRef.current?.focus();
-      }, 50);
+        // Keep modal open, clean fields for quick next registration
+        setFormName("");
+        setFormValue("");
+        setFormObservation("");
+
+        // Auto-focus the Name input field
+        setTimeout(() => {
+          nameInputRef.current?.focus();
+        }, 50);
+      }
+    } catch (error) {
+      console.error(error);
     }
   };
+
 
   const handleDeleteBill = (bill: MonthlyBill) => {
     setBillToDelete(bill);
