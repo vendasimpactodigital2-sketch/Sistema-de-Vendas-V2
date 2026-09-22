@@ -48,7 +48,7 @@ export function UsersManager({ currentUser, onUpdateCurrentUser, onNavigateToAte
   const [userToDelete, setUserToDelete] = useState<User | null>(null);
 
   // Load all users on component load
-  const loadUsersList = async () => {
+ const loadUsersList = async () => {
     setLoading(true);
     setError(null);
 
@@ -75,8 +75,8 @@ export function UsersManager({ currentUser, onUpdateCurrentUser, onNavigateToAte
     }
 
     let localUsers: User[] = [];
-
-    let localUsers: User[] = [];
+    
+    // Fallback load local
 
     // Fallback load local
     try {
