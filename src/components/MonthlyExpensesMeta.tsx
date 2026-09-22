@@ -298,6 +298,7 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
       );
 
       // Save to Supabase
+         if (companyOwnerId) {
           dbSaveMonthlyBill(
             editingBillId,
             formName.trim(),
@@ -307,37 +308,35 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
             formObservation.trim(),
             companyOwnerId
           );
+        }
+      } else {
+        // Add
+        const cleanId = "bill-" + Date.now();
+        const newBill: MonthlyBill = {
+          id: cleanId,
+          name: formName.trim(),
+          value: numericVal,
+          category: formCategory,
+          dueDate: formDueDate,
+          observation: formObservation.trim()
+        };
+        
+        setBills((prev) => [newBill, ...prev]);
 
-
-        notifyRealtimeSync(companyOwnerId, "gastos_mensais_updated", { billId: editingBillId });
+        // Save to Supabase
+        if (companyOwnerId) {
+          dbSaveMonthlyBill(
+            cleanId,
+            formName.trim(),
+            numericVal,
+            formCategory,
+            formDueDate,
+            formObservation.trim(),
+            companyOwnerId
+          );
+        }
       }
 
-      showLocalToast("Gasto mensal atualizado com sucesso! 📝", "success");
-      setIsFormOpen(false);
-    } else {
-      // Add
-      const cleanId = "bill-" + Date.now();
-      const newBill: MonthlyBill = {
-        id: cleanId,
-        name: formName.trim(),
-        value: numericVal,
-        category: formCategory,
-        dueDate: formDueDate,
-        observation: formObservation.trim()
-      };
-      setBills((prev) => [newBill, ...prev]);
-
-      // Save to Supabase
-      if (companyOwnerId) {
-        dbSaveMonthlyBill(
-          cleanId,
-          formName.trim(),
-          numericVal,
-          formCategory,
-          formDueDate,
-          formObservation.trim(),
-          companyOwnerId
-        );
         notifyRealtimeSync(companyOwnerId, "gastos_mensais_updated", { billId: cleanId });
       }
 
