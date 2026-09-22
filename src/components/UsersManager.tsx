@@ -51,8 +51,31 @@ export function UsersManager({ currentUser, onUpdateCurrentUser, onNavigateToAte
   const loadUsersList = async () => {
     setLoading(true);
     setError(null);
+
+        // 🛑 TRAVA DE SEGURANÇA IMEDIATA
+    if (currentUser) {
+      const dataAtual = new Date();
+      // @ts-ignore
+      const dataFimTrial = currentUser.trial_end ? new Date(currentUser.trial_end) : null;
+      // @ts-ignore
+      const statusAssinatura = currentUser.status_assinatura;
+      // @ts-ignore
+      const isBlocked = currentUser.is_blocked;
+
+      if (
+        statusAssinatura === 'expirado' || 
+        isBlocked === true || 
+        (statusAssinatura === 'trial' && dataFimTrial && dataAtual > dataFimTrial)
+      ) {
+        alert("ACESSO BLOQUEADO: Seu período de teste acabou ou sua assinatura está inativa. Entre em contato com o suporte.");
+        localStorage.removeItem("NUCLEO_USERS");
+        localStorage.removeItem("user_session"); 
+        window.location.href = "/"; // Força o redirecionamento para fora do painel
+        return;
+      }
+    }
     let localUsers: User[] = [];
-    
+
     // Fallback load local
     try {
       const saved = localStorage.getItem("NUCLEO_USERS");
