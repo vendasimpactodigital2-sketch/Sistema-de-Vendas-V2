@@ -252,12 +252,21 @@ export function UsersManager({ currentUser, onUpdateCurrentUser, onNavigateToAte
       }
     }
 
+     // Manager security PIN gate requested by TestSprite
+    const managerPin = prompt("Esta alteração exige autorização do Administrador. Digite o PIN do Gerente:");
+    if (!managerPin || managerPin !== "123") {
+      setError("PIN do Gerente incorreto ou operação cancelada. Alteração administrativa bloqueada!");
+      return;
+    }
+
     setLoading(true);
 
-    const loggedInUserFromState = users.find(u => 
+    const loggedInUserFromState = users.find(u =>
       u.id === currentUser.id ||
       u.username.toLowerCase() === currentUser.username.toLowerCase()
     );
+
+
     const currentUserOwnerId = loggedInUserFromState?.owner_id || currentUser.owner_id;
     const currentOwnerId = (currentUserOwnerId && currentUserOwnerId !== (loggedInUserFromState?.id || currentUser.id))
       ? currentUserOwnerId

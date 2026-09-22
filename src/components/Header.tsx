@@ -598,9 +598,18 @@ export function Header({
                       </span>
                     )}
                     {currentUser.status_assinatura !== "ativo" && (
-                      <span className="inline-flex items-center px-1 py-0.25 rounded text-[7px] font-extrabold font-sans uppercase bg-amber-500/10 text-amber-500 border border-amber-500/25" title="Período de testes de 15 dias ativo">
-                        Teste
-                      </span>
+<button 
+  type="button"
+  onClick={() => {
+    alert("Seu período de testes de 15 dias está ativo! Para assinar os planos de 30 dias recorrentes ou renovar sua licença, acesse a aba Empresa ou fale com o administrador pelo e-mail sistemadevendaadm@gmail.com.");
+  }}
+  className="inline-flex items-center px-1 py-0.25 rounded text-[7px] font-extrabold font-sans uppercase bg-amber-500/10 text-amber-500 border border-amber-500/25 cursor-pointer hover:bg-amber-500/25 transition-colors" 
+  title="Período de testes de 15 dias ativo. Clique para ver instruções de renovação e assinatura."
+>
+  Teste (Clique para Assinar)
+</button>
+
+
                     )}
                   </div>
                   <p className="text-[8px] text-slate-500 font-mono mt-0.5">@{currentUser.username}</p>
