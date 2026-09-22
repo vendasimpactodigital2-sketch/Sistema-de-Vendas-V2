@@ -52,15 +52,14 @@ export function UsersManager({ currentUser, onUpdateCurrentUser, onNavigateToAte
     setLoading(true);
     setError(null);
 
-        // 🛑 TRAVA DE SEGURANÇA IMEDIATA
     if (currentUser) {
       const dataAtual = new Date();
-      // @ts-ignore
-      const dataFimTrial = currentUser.trial_end ? new Date(currentUser.trial_end) : null;
       // @ts-ignore
       const statusAssinatura = currentUser.status_assinatura;
       // @ts-ignore
       const isBlocked = currentUser.is_blocked;
+      // @ts-ignore
+      const dataFimTrial = currentUser.trial_end ? new Date(currentUser.trial_end) : null;
 
       if (
         statusAssinatura === 'expirado' || 
@@ -68,12 +67,15 @@ export function UsersManager({ currentUser, onUpdateCurrentUser, onNavigateToAte
         (statusAssinatura === 'trial' && dataFimTrial && dataAtual > dataFimTrial)
       ) {
         alert("ACESSO BLOQUEADO: Seu período de teste acabou ou sua assinatura está inativa. Entre em contato com o suporte.");
+        localStorage.removeItem("user_session");
         localStorage.removeItem("NUCLEO_USERS");
-        localStorage.removeItem("user_session"); 
-        window.location.href = "/"; // Força o redirecionamento para fora do painel
+        window.location.href = "/";
         return;
       }
     }
+
+    let localUsers: User[] = [];
+
     let localUsers: User[] = [];
 
     // Fallback load local
