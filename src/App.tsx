@@ -3599,9 +3599,17 @@ export default function App() {
     }
   }, [isGoalReached]);
 
-  const handleCardClick = (cardType: "faturamento" | "entradas" | "pendentes" | "custos" | "lucro") => {
-    if (cardType === "faturamento") {
-      setSalesStatusFilter("all");
+  const handleCardClick = (cardType: "faturamento" | "entradas" | "pendentes" | "custos" | "lucro" | "entregas") => {
+  if (cardType === "entregas") {
+    setSalesStatusFilter("pending");
+    const element = document.getElementById("pending-orders-section");
+    if (element) element.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  if (cardType === "faturamento") {
+    setSalesStatusFilter("all");
+
+
       setSalesDateFilter(filterPeriod === "custom" ? "custom" : filterPeriod === "all" ? "all" : "today");
       setTimeout(() => {
         const element = document.getElementById("sales-history-section");
