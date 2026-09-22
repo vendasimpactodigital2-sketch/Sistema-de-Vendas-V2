@@ -298,16 +298,17 @@ export function MonthlyExpensesMeta({ todayNetProfit, bills, setBills, daysWorke
       );
 
       // Save to Supabase
-      if (companyOwnerId) {
-        dbSaveMonthlyBill(
-          editingBillId,
-          formName.trim(),
-          numericVal,
-          formCategory,
-          formDueDate,
-          formObservation.trim(),
-          companyOwnerId
-        );
+          dbSaveMonthlyBill(
+            editingBillId,
+            formName.trim(),
+            numericVal,
+            formCategory,
+            formDueDate,
+            formObservation.trim(),
+            companyOwnerId
+          );
+
+
         notifyRealtimeSync(companyOwnerId, "gastos_mensais_updated", { billId: editingBillId });
       }
 
