@@ -63,7 +63,7 @@ export function CashRegisterModal({
   ) && !adminUnlocked;
   // Opening states
   const [openCashInput, setOpenCashInput] = useState<string>("100.00");
-  const [operatorInput, setOperatorInput] = useState<string>(activeOperatorName || "");
+  const [operatorInput, setOperatorInput] = useState<string>(activeOperatorName && activeOperatorName !== "Operador" ? activeOperatorName : (currentUser?.email || "grafica.designer16@gmail.com"));
 
   // Closing states
   const [observedCashInput, setObservedCashInput] = useState<string>("");
