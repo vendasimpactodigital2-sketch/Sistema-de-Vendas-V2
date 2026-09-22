@@ -1368,6 +1368,9 @@ export default function App() {
     clientName: string;
     totalValue: number;
     paymentMethod: string;
+    useMotoboy?: boolean;
+    motoboyCost?: number;
+    deliveryAddress?: string;
   } | null>(null);
 
   useEffect(() => {
@@ -4871,10 +4874,13 @@ export default function App() {
       }
       return [attributedSale, ...prev];
     });
-    // Auto-reset filters so new sales are immediately visible in Vendas do dia
-    setSalesStatusFilter("all");
-    setSalesDateFilter("today");
-    setFilterPeriod("today");
+    // Auto-reset filters ONLY for brand new sales so they appear in Vendas do dia
+    // For existing sales, preserve user's current view and filters!
+    if (!exists) {
+      setSalesStatusFilter("all");
+      setSalesDateFilter("today");
+      setFilterPeriod("today");
+    }
     setActiveEditingSale(null);
 
     if (currentUser && isSupabaseConfigured()) {

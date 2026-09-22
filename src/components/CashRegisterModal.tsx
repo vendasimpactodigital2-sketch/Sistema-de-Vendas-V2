@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { X, Wallet, ShieldAlert, CheckCircle, Info, Calculator, FileText, ArrowRightLeft, Landmark, Users, Printer, Check } from "lucide-react";
+import { X, Wallet, ShieldAlert, CheckCircle, Info, Calculator, FileText, ArrowRightLeft, Landmark, Users, Printer, Check, Loader2 } from "lucide-react";
 import { CashRegisterState, Sale, CashRegisterSession, Expense, getSaleOperationCost, getSaleOrderDate } from "../types";
 
 interface CashRegisterModalProps {
@@ -9,8 +9,8 @@ interface CashRegisterModalProps {
   sales: Sale[];
   expenses: Expense[];
   activeOperatorName: string;
-  onOpenRegister: (valorAbertura: number, operador: string) => void;
-  onCloseRegister: (valorFechamentoReal: number, observacoes: string) => void;
+  onOpenRegister: (valorAbertura: number, operador: string) => void | Promise<void>;
+  onCloseRegister: (valorFechamentoReal: number, observacoes: string) => void | Promise<void>;
   currentUser?: any;
   adminUnlocked?: boolean;
   isCashRegisterOpen?: boolean;
@@ -69,6 +69,7 @@ export function CashRegisterModal({
   const [observedCashInput, setObservedCashInput] = useState<string>("");
   const [notesInput, setNotesInput] = useState<string>("");
   const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [closedSessionSummary, setClosedSessionSummary] = useState<{
     operador: string;
     dataAbertura: string;
@@ -87,6 +88,7 @@ export function CashRegisterModal({
   React.useEffect(() => {
     if (!isOpen) {
       setClosedSessionSummary(null);
+      setIsSubmitting(false);
     }
   }, [isOpen]);
 
@@ -429,8 +431,10 @@ export function CashRegisterModal({
     onOpenRegister(val, op);
   };
 
-  const handleCloseSubmit = (e: React.FormEvent) => {
+  const handleCloseSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     const observed = Math.max(0, Number(observedCashInput) || 0);
     const summaryData = {
       operador: activeSession?.operador || operatorInput || activeOperatorName || "Operador",
@@ -446,11 +450,19 @@ export function CashRegisterModal({
       difference: observed - sessionStats.expectedInDrawer,
       observacoes: notesInput
     };
-    setClosedSessionSummary(summaryData);
-    onCloseRegister(observed, notesInput);
-    // Reset inputs
-    setObservedCashInput("");
-    setNotesInput("");
+
+    setIsSubmitting(true);
+    try {
+      await onCloseRegister(observed, notesInput);
+      setClosedSessionSummary(summaryData);
+      // Reset inputs
+      setObservedCashInput("");
+      setNotesInput("");
+    } catch (err) {
+      console.error("Erro ao fechar caixa:", err);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handlePrintSessionReport = () => {
@@ -777,10 +789,12 @@ export function CashRegisterModal({
           </div>
           <button
             onClick={() => {
+              if (isSubmitting) return;
               setClosedSessionSummary(null);
               onClose();
             }}
-            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-all cursor-pointer"
+            disabled={isSubmitting}
+            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <X className="h-4 w-4" />
           </button>
@@ -1164,9 +1178,10 @@ export function CashRegisterModal({
                       type="number"
                       step="0.01"
                       required
+                      disabled={isSubmitting}
                       value={observedCashInput}
                       onChange={(e) => setObservedCashInput(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-850 rounded-lg py-1.5 pl-7 pr-2.5 text-xs text-white font-mono font-bold focus:outline-none focus:border-brand-cyan transition-all"
+                      className="w-full bg-slate-950 border border-slate-850 rounded-lg py-1.5 pl-7 pr-2.5 text-xs text-white font-mono font-bold focus:outline-none focus:border-brand-cyan transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                       placeholder="Dinheiro do dia + Fundo de troco"
                     />
                   </div>
@@ -1207,10 +1222,11 @@ export function CashRegisterModal({
                   </label>
                   <textarea
                     rows={1}
+                    disabled={isSubmitting}
                     value={notesInput}
                     onChange={(e) => setNotesInput(e.target.value)}
                     placeholder="Se houver diferenças na contagem, justifique aqui..."
-                    className="w-full bg-slate-950 border border-slate-850 rounded-lg py-1 px-2 text-xs text-white focus:outline-none focus:border-brand-cyan transition-all resize-none font-mono"
+                    className="w-full bg-slate-950 border border-slate-850 rounded-lg py-1 px-2 text-xs text-white focus:outline-none focus:border-brand-cyan transition-all resize-none font-mono disabled:opacity-50 disabled:cursor-not-allowed"
                   />
                 </div>
               </div>
@@ -1222,15 +1238,25 @@ export function CashRegisterModal({
               <button
                 type="button"
                 onClick={onClose}
-                className="flex-1 py-1.5 px-3 bg-slate-950 hover:bg-slate-855 border border-slate-855 text-slate-400 hover:text-white rounded-lg cursor-pointer text-xs font-bold transition-all uppercase tracking-wider"
+                disabled={isSubmitting}
+                className="flex-1 py-1.5 px-3 bg-slate-950 hover:bg-slate-855 border border-slate-855 text-slate-400 hover:text-white rounded-lg cursor-pointer text-xs font-bold transition-all uppercase tracking-wider disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Voltar
               </button>
               <button
                 type="submit"
-                className="flex-1 py-1.5 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded-lg cursor-pointer text-xs font-black uppercase text-center tracking-wider transition-all"
+                id="btn-close-register"
+                disabled={isSubmitting}
+                className="flex-1 py-1.5 px-3 bg-rose-600 hover:bg-rose-500 disabled:bg-rose-900/60 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg cursor-pointer text-xs font-black uppercase text-center tracking-wider transition-all flex items-center justify-center gap-1.5"
               >
-                Fechar Caixa 🔒
+                {isSubmitting ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>Fechando Caixa...</span>
+                  </>
+                ) : (
+                  "Fechar Caixa 🔒"
+                )}
               </button>
             </div>
           </form>

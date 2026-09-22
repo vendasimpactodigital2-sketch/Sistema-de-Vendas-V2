@@ -1043,23 +1043,27 @@ export async function dbGetSales(userId: string): Promise<Sale[] | null> {
       let deliveredRole: "atendente" | "administrador" | undefined = undefined;
       let auditLog: any[] = [];
 
+      let deliveryAddress = "";
+      let metaObj: any = null;
+
       if (realPhone.includes("::")) {
         const parts = realPhone.split("::");
         realPhone = parts[0];
         try {
-          const meta = JSON.parse(parts[1]);
-          orderDate = meta.orderDate || "";
-          deliveryDate = meta.deliveryDate || "";
-          deliveryReason = meta.deliveryReason || "";
-          payments = meta.payments || [];
-          materialEntregue = !!meta.materialEntregue;
-          sellerId = meta.sellerId || "";
-          sellerName = meta.sellerName || "";
-          sellerRole = meta.sellerRole || undefined;
-          deliveredBy = meta.deliveredBy || "";
-          deliveredAt = meta.deliveredAt || "";
-          deliveredRole = meta.deliveredRole || undefined;
-          auditLog = meta.auditLog || [];
+          metaObj = JSON.parse(parts[1]);
+          orderDate = metaObj.orderDate || "";
+          deliveryDate = metaObj.deliveryDate || "";
+          deliveryReason = metaObj.deliveryReason || "";
+          deliveryAddress = metaObj.deliveryAddress || "";
+          payments = metaObj.payments || [];
+          materialEntregue = !!metaObj.materialEntregue;
+          sellerId = metaObj.sellerId || "";
+          sellerName = metaObj.sellerName || "";
+          sellerRole = metaObj.sellerRole || undefined;
+          deliveredBy = metaObj.deliveredBy || "";
+          deliveredAt = metaObj.deliveredAt || "";
+          deliveredRole = metaObj.deliveredRole || undefined;
+          auditLog = metaObj.auditLog || [];
         } catch (e) {}
       }
       return {
@@ -1067,8 +1071,9 @@ export async function dbGetSales(userId: string): Promise<Sale[] | null> {
         clientName: d.client_name,
         clientPhone: realPhone,
         items: d.items || [],
-        useMotoboy: d.use_motoboy,
-        motoboyCost: Number(d.motoboy_cost),
+        useMotoboy: d.use_motoboy !== undefined ? d.use_motoboy : (metaObj?.useMotoboy || false),
+        motoboyCost: Number(d.motoboy_cost !== undefined ? d.motoboy_cost : (metaObj?.motoboyCost || 0)),
+        deliveryAddress: deliveryAddress || d.delivery_address || undefined,
         discount: Number(d.discount),
         downPayment: Number(d.down_payment),
         operationCost: Number(d.operation_cost),
@@ -1129,6 +1134,9 @@ export async function dbSaveSale(userId: string, sale: Sale): Promise<boolean> {
     orderDate: sale.orderDate, 
     deliveryDate: sale.deliveryDate,
     deliveryReason: sale.deliveryReason || "",
+    deliveryAddress: sale.deliveryAddress || "",
+    motoboyCost: Number(sale.motoboyCost) || 0,
+    useMotoboy: !!sale.useMotoboy,
     payments: sale.payments || [],
     materialEntregue: !!sale.materialEntregue,
     sellerId: sale.sellerId || "",

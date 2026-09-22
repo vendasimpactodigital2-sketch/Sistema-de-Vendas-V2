@@ -41,6 +41,22 @@ export function StandbyScreen({
 }: StandbyScreenProps) {
   const [time, setTime] = useState(new Date());
   const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
+  const [isExiting, setIsExiting] = useState(false);
+
+  const handleExitStandby = (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    if (isExiting) return;
+    setIsExiting(true);
+    onStartNewSale();
+
+    // Cooldown prevents multiple rapid clicks from spamming requests
+    setTimeout(() => {
+      setIsExiting(false);
+    }, 600);
+  };
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -83,7 +99,7 @@ export function StandbyScreen({
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         if (isCashRegisterOpen) {
-          onStartNewSale();
+          handleExitStandby();
         } else if (onOpenCashRegister) {
           onOpenCashRegister();
         }
@@ -91,7 +107,7 @@ export function StandbyScreen({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onStartNewSale, isCashRegisterOpen, onOpenCashRegister]);
+  }, [handleExitStandby, isCashRegisterOpen, onOpenCashRegister]);
 
   const hours = time.toLocaleTimeString("pt-BR", { hour: "2-digit", hour12: false });
   const minutes = time.toLocaleTimeString("pt-BR", { minute: "2-digit" });
@@ -137,7 +153,7 @@ export function StandbyScreen({
         {/* Operator Badge, Fullscreen & Logout */}
         <div className="flex items-center gap-2">
           {currentUser && (
-            <div className="flex items-center gap-2 px-2.5 py-1 bg-slate-900 border border-slate-850 rounded-lg">
+            <div className="pointer-events-none select-none flex items-center gap-2 px-2.5 py-1 bg-slate-900 border border-slate-850 rounded-lg">
               <div className="p-1 bg-brand-cyan/15 rounded-md text-brand-cyan">
                 <UserCheck className="h-3 w-3" />
               </div>
@@ -152,7 +168,11 @@ export function StandbyScreen({
 
           <button
             type="button"
-            onClick={toggleFullscreen}
+            id="standby-fullscreen-button"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleFullscreen();
+            }}
             className={`p-2 rounded-lg transition-all cursor-pointer border shadow-sm ${
               isFullscreen
                 ? "bg-brand-cyan/20 text-brand-cyan border-brand-cyan/40"
@@ -169,7 +189,12 @@ export function StandbyScreen({
 
           {onLogout && (
             <button
-              onClick={onLogout}
+              type="button"
+              id="standby-logout-button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onLogout();
+              }}
               className="p-2 bg-slate-900 hover:bg-red-500/20 text-slate-400 hover:text-red-400 border border-slate-800 hover:border-red-500/30 rounded-lg transition-all cursor-pointer"
               title="Sair da Conta"
             >
@@ -279,8 +304,12 @@ export function StandbyScreen({
         >
           <button
             type="button"
-            onClick={onStartNewSale}
-            className="group relative w-full overflow-hidden rounded-xl p-[2px] focus:outline-none focus:ring-2 focus:ring-brand-cyan/50 cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98]"
+            id="exit-standby-button"
+            data-testid="exit-standby-button"
+            disabled={isExiting}
+            onClick={handleExitStandby}
+            aria-label="Sair do Standby e Iniciar Venda"
+            className="exit-standby-button group relative w-full overflow-hidden rounded-xl p-[2px] focus:outline-none focus:ring-2 focus:ring-brand-cyan/50 cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-75 disabled:cursor-wait"
           >
             {/* Animated Gradient Border Ring */}
             <span className="absolute inset-0 bg-gradient-to-r from-brand-cyan via-emerald-400 to-brand-magenta animate-spin duration-[3000ms] rounded-xl" />

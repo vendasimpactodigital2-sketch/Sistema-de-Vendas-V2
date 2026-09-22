@@ -19,6 +19,7 @@ export function PendingSalesModal({ isOpen, onClose, sales, onSaveSale, company,
   const [paymentAmounts, setPaymentAmounts] = useState<Record<string, string>>({});
   const [updateDates, setUpdateDates] = useState<Record<string, boolean>>({});
   const [paymentMethods, setPaymentMethods] = useState<Record<string, 'dinheiro' | 'cartão' | 'pix'>>({});
+  const [pendingSettlementFilter, setPendingSettlementFilter] = useState<"all" | "balance_due" | "delivery">("all");
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [editingPayment, setEditingPayment] = useState<{ saleId: string; paymentId: string; amount: string; method: 'dinheiro' | 'cartão' | 'pix' } | null>(null);
 
@@ -125,6 +126,12 @@ export function PendingSalesModal({ isOpen, onClose, sales, onSaveSale, company,
   // Filter sales that are pending payment clearance ("dar baixa") or material pickup
   const pendingSales = sales.filter((sale) => {
     const isPending = isPendingRetiradaOrBaixa(sale);
+
+    if (pendingSettlementFilter === "balance_due") {
+      if ((sale.balanceDue || 0) <= 0.001) return false;
+    } else if (pendingSettlementFilter === "delivery") {
+      if (!sale.useMotoboy && !sale.deliveryAddress && Boolean(sale.materialEntregue)) return false;
+    }
 
     const clientName = (sale.clientName || "").toLowerCase();
     const clientPhone = (sale.clientPhone || "").replace(/\D/g, "");
@@ -965,6 +972,52 @@ export function PendingSalesModal({ isOpen, onClose, sales, onSaveSale, company,
             </div>
             <Coins className="h-4 w-4 text-yellow-500" />
           </div>
+        </div>
+
+        {/* Settlement Status Filter Tabs */}
+        <div className="px-3 py-2 bg-slate-950/60 border-b border-slate-800/60 flex items-center gap-2 overflow-x-auto">
+          <span className="text-[10px] uppercase font-bold text-slate-500 shrink-0">Filtrar por:</span>
+          <button
+            type="button"
+            id="pending-filter-all"
+            data-testid="pending-filter-all"
+            onClick={() => setPendingSettlementFilter("all")}
+            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+              pendingSettlementFilter === "all"
+                ? "bg-brand-cyan/20 text-brand-cyan border border-brand-cyan/40 font-extrabold"
+                : "bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800"
+            }`}
+          >
+            Todos
+          </button>
+          <button
+            type="button"
+            id="pending-filter-balance-due"
+            data-testid="pending-filter-balance-due"
+            onClick={() => setPendingSettlementFilter("balance_due")}
+            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+              pendingSettlementFilter === "balance_due"
+                ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 font-extrabold"
+                : "bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800"
+            }`}
+          >
+            <span>💰</span>
+            <span>Saldo a Receber</span>
+          </button>
+          <button
+            type="button"
+            id="pending-filter-delivery"
+            data-testid="pending-filter-delivery"
+            onClick={() => setPendingSettlementFilter("delivery")}
+            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+              pendingSettlementFilter === "delivery"
+                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-extrabold"
+                : "bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800"
+            }`}
+          >
+            <span>🛵</span>
+            <span>Entrega</span>
+          </button>
         </div>
 
         {/* Scrollable list content block */}

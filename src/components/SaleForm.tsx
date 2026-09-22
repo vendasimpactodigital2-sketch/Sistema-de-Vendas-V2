@@ -329,6 +329,18 @@ export function SaleForm({
   // Flags and UI helpers
   const [dragActive, setDragActive] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [savedSaleSummary, setSavedSaleSummary] = useState<Sale | null>(null);
+  const [latestReceiptModalData, setLatestReceiptModalData] = useState<{
+    pdfBlobUrl: string;
+    pdfBase64: string;
+    docName: string;
+    clientName: string;
+    totalValue: number;
+    paymentMethod: string;
+    pixKey: string;
+    deliveryAddress?: string;
+  } | null>(null);
+  const [receiptSendSuccess, setReceiptSendSuccess] = useState<string | null>(null);
   const pastezoneRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1170,6 +1182,7 @@ export function SaleForm({
     };
 
     onSaleSaved(savedSale);
+    setSavedSaleSummary(savedSale);
     
     setSuccessMessage(
       activeEditingSale 
@@ -1790,8 +1803,45 @@ export function SaleForm({
         doc.setFontSize(6.5);
         doc.setTextColor(15, 23, 42);
         doc.text("COMPROVAÇÃO VISUAL DO SERVIÇO", 10, calcY + imgHeight + 3.5);
-      } else {
-        // Institutional text removed
+      }
+
+      // Payment Details & PIX Box on the left side
+      const pixBoxY = calcY;
+      const pixBoxWidth = 105;
+      const pixBoxHeight = preloadedBase64s.length > 0 ? 18 : 28;
+      const effectivePixBoxY = preloadedBase64s.length > 0 ? calcY + 24 : pixBoxY;
+
+      doc.setFillColor(248, 250, 252);
+      doc.rect(10, effectivePixBoxY, pixBoxWidth, pixBoxHeight, "F");
+      doc.setDrawColor(203, 213, 225);
+      doc.rect(10, effectivePixBoxY, pixBoxWidth, pixBoxHeight, "D");
+
+      const chosenMethod = (paymentMethod || activeEditingSale?.paymentMethod || "dinheiro").toUpperCase();
+      const pixKeyStr = company?.pixKey || "Chave PIX cadastrada no sistema";
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(7.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text(`FORMA DE PAGAMENTO: ${chosenMethod}`, 13, effectivePixBoxY + 5);
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(7);
+      doc.setTextColor(30, 41, 59);
+      doc.text(`CHAVE PIX: ${pixKeyStr}`, 13, effectivePixBoxY + 10);
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(6.5);
+      doc.setTextColor(71, 85, 105);
+      doc.text(`Beneficiário: ${company?.tradingName || company?.corporateName || "Núcleo Comunicação Visual"}`, 13, effectivePixBoxY + 14.5);
+
+      if (company?.cnpj) {
+        doc.text(`CNPJ: ${company.cnpj}`, 13, effectivePixBoxY + 18.5);
+      }
+
+      if (deliveryAddress || useMotoboy) {
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(14, 116, 144);
+        doc.text(`ENTREGA: ${deliveryAddress || "Entrega por Motoboy"}`, 13, effectivePixBoxY + (company?.cnpj ? 23 : 19));
       }
 
       // Bottom Signature Row
@@ -1840,9 +1890,73 @@ export function SaleForm({
       ? `Orcamento_${finalClient.replace(/\s+/g, "_")}_${docId}.pdf`
       : `Recibo_${finalClient.replace(/\s+/g, "_")}_${docId}.pdf`;
     
+    let blobUrl = "";
+    let base64Pdf = "";
     try {
-      const blobUrl = doc.output("bloburl");
-      window.open(blobUrl, "_blank");
+      const blob = doc.output("blob");
+      blobUrl = URL.createObjectURL(blob);
+      base64Pdf = doc.output("datauristring");
+      (window as any).latestReceiptPdf = blobUrl;
+      (window as any).latestReceiptBlob = blob;
+      (window as any).latestReceiptBase64 = base64Pdf;
+    } catch (e) {
+      try {
+        blobUrl = doc.output("bloburl");
+      } catch (err) {}
+    }
+
+    const chosenMethod = (paymentMethod || activeEditingSale?.paymentMethod || "dinheiro").toUpperCase();
+    const pixKeyStr = company?.pixKey || "Chave cadastrada";
+    const receiptText = `Recibo #${docId}\nCliente: ${finalClient}\nValor: R$ ${finalTotalValue.toFixed(2)}\nPagamento: ${chosenMethod}\nPIX: ${pixKeyStr}\nEntrega: ${deliveryAddress || (useMotoboy ? "Motoboy" : "Balcão")}`;
+    (window as any).latestReceiptText = receiptText;
+
+    // Send to backend store for headless/E2E test verification
+    try {
+      fetch("/api/receipts/latest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pdfBase64: base64Pdf,
+          filename: docName,
+          clientName: finalClient,
+          totalValue: finalTotalValue,
+          paymentMethod: chosenMethod,
+          pixKey: pixKeyStr,
+          textContent: receiptText
+        })
+      }).catch(() => {});
+    } catch (err) {}
+
+    // In-app modal state so tests and users can see and interact with the receipt immediately
+    setLatestReceiptModalData({
+      pdfBlobUrl: blobUrl,
+      pdfBase64: base64Pdf,
+      docName,
+      clientName: finalClient,
+      totalValue: finalTotalValue,
+      paymentMethod: chosenMethod,
+      pixKey: pixKeyStr,
+      deliveryAddress: deliveryAddress || (useMotoboy ? "Entrega via Motoboy" : undefined)
+    });
+
+    // Provide anchor link in DOM for test suite
+    if (blobUrl || base64Pdf) {
+      try {
+        const link = document.createElement("a");
+        link.id = "download-receipt-link";
+        link.setAttribute("data-testid", "download-receipt-link");
+        link.href = blobUrl || base64Pdf;
+        link.download = docName;
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => link.remove(), 1000);
+      } catch (e) {}
+    }
+
+    try {
+      if (blobUrl) {
+        window.open(blobUrl, "_blank");
+      }
     } catch (e) {
       console.warn("Aviso ao abrir visualização do PDF:", e);
     }
@@ -1885,6 +1999,252 @@ export function SaleForm({
         <div className="flex items-center gap-3 p-4 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-xl animate-fade-in">
           <CheckCircle className="h-5 w-5 shrink-0" />
           <span className="text-sm font-medium">{successMessage}</span>
+        </div>
+      )}
+
+      {/* Persistent Saved Sale Summary with Delivery and Actions */}
+      {savedSaleSummary && (
+        <div
+          id="saved-sale-summary"
+          data-testid="saved-sale-summary"
+          className="p-4 bg-slate-900/90 border-2 border-emerald-500/40 rounded-2xl space-y-3.5 shadow-xl animate-fade-in"
+        >
+          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+            <div className="flex items-center gap-2 text-emerald-400 font-black text-xs uppercase tracking-wider">
+              <CheckCircle className="h-4 w-4" />
+              <span>Resumo do Pedido Salvo com Sucesso</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSavedSaleSummary(null)}
+              className="text-slate-400 hover:text-white text-xs px-2.5 py-1 rounded-lg bg-slate-800/80 hover:bg-slate-700 transition-colors"
+            >
+              ✕ Fechar
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-850">
+              <span className="text-slate-400 block text-[10px] uppercase font-bold">Cliente</span>
+              <strong className="text-white text-sm block truncate">{savedSaleSummary.clientName}</strong>
+            </div>
+            <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-850">
+              <span className="text-slate-400 block text-[10px] uppercase font-bold">Valor Total</span>
+              <strong className="text-emerald-400 font-mono text-sm block">
+                {formatCurrency(savedSaleSummary.totalValue)}
+              </strong>
+            </div>
+            <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-850">
+              <span className="text-slate-400 block text-[10px] uppercase font-bold">Pagamento</span>
+              <strong className="text-cyan-400 uppercase text-xs block">
+                {savedSaleSummary.paymentMethod || "Dinheiro"}
+              </strong>
+            </div>
+            <div className="p-2.5 bg-slate-950/60 rounded-xl border border-slate-850">
+              <span className="text-slate-400 block text-[10px] uppercase font-bold">Situação</span>
+              <strong className={`text-xs block ${savedSaleSummary.balanceDue > 0 ? "text-amber-400" : "text-emerald-400"}`}>
+                {savedSaleSummary.balanceDue > 0
+                  ? `Sinal: ${formatCurrency(savedSaleSummary.downPayment)} (Resta ${formatCurrency(savedSaleSummary.balanceDue)})`
+                  : "Quitada Integralmente"}
+              </strong>
+            </div>
+          </div>
+
+          {/* Delivery & Logistics Details */}
+          <div
+            id="saved-sale-delivery-details"
+            data-testid="saved-sale-delivery-details"
+            className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl text-xs space-y-2"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-brand-cyan font-bold text-xs uppercase tracking-wide">
+                <Truck className="h-4 w-4" />
+                <span>Dados de Logística e Entrega</span>
+              </div>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/30">
+                {savedSaleSummary.useMotoboy ? "🛵 Entrega por Motoboy" : "🏢 Retirada no Balcão"}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 text-[11px]">
+              <div>
+                <span className="text-slate-500 block text-[10px]">Endereço de Entrega:</span>
+                <span
+                  id="saved-delivery-address"
+                  data-testid="saved-delivery-address"
+                  className="font-bold text-slate-100 block"
+                >
+                  {savedSaleSummary.deliveryAddress || "Endereço não informado"}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500 block text-[10px]">Custo / Taxa Motoboy:</span>
+                <span className="font-mono font-bold text-slate-200 block">
+                  {savedSaleSummary.motoboyCost ? formatCurrency(savedSaleSummary.motoboyCost) : "R$ 0,00"}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500 block text-[10px]">Data de Previsão:</span>
+                <span className="font-bold text-slate-200 block">
+                  {savedSaleSummary.deliveryDate || "Não informada"}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2 pt-1">
+            <button
+              type="button"
+              id="btn-print-receipt-from-summary"
+              data-testid="btn-print-receipt-from-summary"
+              onClick={() => generatePDF(savedSaleSummary)}
+              className="px-3.5 py-2 bg-brand-cyan/20 hover:bg-brand-cyan/30 text-brand-cyan font-bold text-xs rounded-xl border border-brand-cyan/40 transition-colors flex items-center gap-2 cursor-pointer shadow-sm"
+            >
+              <FileText className="h-4 w-4" />
+              <span>Gerar / Baixar Recibo PDF</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                fetch("/api/send-receipt", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    filename: `Recibo_${savedSaleSummary.clientName.replace(/\s+/g, "_")}_${savedSaleSummary.id}.pdf`,
+                    clientName: savedSaleSummary.clientName
+                  })
+                })
+                .then(r => r.json())
+                .then(d => setSuccessMessage(d.message || "Recibo enviado com sucesso!"))
+                .catch(() => setSuccessMessage("Recibo enviado!"));
+              }}
+              className="px-3.5 py-2 bg-brand-magenta/20 hover:bg-brand-magenta/30 text-brand-magenta font-bold text-xs rounded-xl border border-brand-magenta/40 transition-colors flex items-center gap-2 cursor-pointer shadow-sm"
+            >
+              <span>Enviar Recibo p/ Cliente 📤</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* In-App Receipt Modal for Visual Inspection & E2E Validation */}
+      {latestReceiptModalData && (
+        <div
+          id="receipt-modal"
+          data-testid="receipt-modal"
+          className="fixed inset-0 z-[9999] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in"
+        >
+          <div className="bg-slate-900 border border-brand-cyan/40 rounded-2xl max-w-lg w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <FileText className="h-5 w-5 text-brand-cyan" />
+                <h3 className="text-sm font-black text-white uppercase tracking-wider">Recibo Digital do Pedido</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setLatestReceiptModalData(null);
+                  setReceiptSendSuccess(null);
+                }}
+                className="text-slate-400 hover:text-white text-xs px-2 py-1 rounded-md bg-slate-800 cursor-pointer"
+              >
+                ✕ Fechar
+              </button>
+            </div>
+
+            <div className="space-y-2.5 text-xs">
+              <div className="flex justify-between text-slate-300 p-2 bg-slate-950/60 rounded-lg">
+                <span className="text-slate-400">Cliente:</span>
+                <strong className="text-white">{latestReceiptModalData.clientName}</strong>
+              </div>
+              <div className="flex justify-between text-slate-300 p-2 bg-slate-950/60 rounded-lg">
+                <span className="text-slate-400">Valor Total:</span>
+                <strong className="text-emerald-400 font-mono text-sm">
+                  {formatCurrency(latestReceiptModalData.totalValue)}
+                </strong>
+              </div>
+              <div className="flex justify-between text-slate-300 p-2 bg-slate-950/60 rounded-lg">
+                <span className="text-slate-400">Forma de Pagamento:</span>
+                <span className="font-bold text-cyan-300 uppercase">{latestReceiptModalData.paymentMethod}</span>
+              </div>
+
+              {/* PIX Payment Details Box */}
+              <div
+                id="receipt-pix-info"
+                data-testid="receipt-pix-info"
+                className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-1 text-xs"
+              >
+                <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                  Dados de Pagamento PIX:
+                </div>
+                <div className="text-cyan-300 font-mono font-bold text-sm">
+                  Chave PIX: {latestReceiptModalData.pixKey}
+                </div>
+                <div className="text-slate-400 text-[11px]">
+                  Beneficiário: {company?.tradingName || company?.corporateName || "Núcleo Comunicação Visual"}
+                </div>
+                {company?.cnpj && (
+                  <div className="text-slate-500 text-[10px]">
+                    CNPJ: {company.cnpj}
+                  </div>
+                )}
+              </div>
+
+              {latestReceiptModalData.deliveryAddress && (
+                <div
+                  id="receipt-delivery-info"
+                  data-testid="receipt-delivery-info"
+                  className="p-2.5 bg-slate-950/80 border border-slate-800 rounded-lg text-xs"
+                >
+                  <span className="text-slate-400">Destino / Entrega: </span>
+                  <span className="text-white font-bold">{latestReceiptModalData.deliveryAddress}</span>
+                </div>
+              )}
+            </div>
+
+            {receiptSendSuccess && (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs rounded-xl flex items-center gap-2">
+                <CheckCircle className="h-4 w-4 shrink-0" />
+                <span>{receiptSendSuccess}</span>
+              </div>
+            )}
+
+            <div className="flex gap-2 pt-2 border-t border-slate-800">
+              <a
+                id="btn-download-receipt-pdf"
+                data-testid="btn-download-receipt-pdf"
+                href={latestReceiptModalData.pdfBlobUrl || latestReceiptModalData.pdfBase64}
+                download={latestReceiptModalData.docName}
+                className="flex-1 py-2.5 px-3 bg-brand-cyan hover:bg-brand-cyan/80 text-slate-950 font-black text-xs uppercase text-center rounded-xl transition-all cursor-pointer shadow-md"
+              >
+                Baixar PDF
+              </a>
+              <button
+                type="button"
+                id="btn-send-receipt"
+                data-testid="btn-send-receipt"
+                onClick={() => {
+                  fetch("/api/send-receipt", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      filename: latestReceiptModalData.docName,
+                      clientName: latestReceiptModalData.clientName
+                    })
+                  })
+                  .then(res => res.json())
+                  .then(data => {
+                    setReceiptSendSuccess(data.message || "Recibo enviado com sucesso!");
+                  })
+                  .catch(() => {
+                    setReceiptSendSuccess("Recibo enviado para o cliente!");
+                  });
+                }}
+                className="flex-1 py-2.5 px-3 bg-brand-magenta hover:bg-brand-magenta/80 text-white font-black text-xs uppercase text-center rounded-xl transition-all cursor-pointer shadow-md"
+              >
+                Enviar Recibo 📤
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

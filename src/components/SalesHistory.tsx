@@ -27,7 +27,11 @@ import {
   ListFilter,
   Layers,
   FileCheck,
-  Users
+  Users,
+  PackageCheck,
+  Package,
+  CheckCheck,
+  Truck
 } from "lucide-react";
 import React, { useState, useMemo } from "react";
 import { Sale, CompanyProfile, getSaleOrderDate, isQuickSaleClient, isPendingRetiradaOrBaixa, User } from "../types";
@@ -90,6 +94,80 @@ export function SalesHistory({
   adminUnlocked = false,
   onRequestAdminUnlock
 }: SalesHistoryProps) {
+  // Local reactive state synchronized with props for instantaneous optimistic UI updates
+  const [localSales, setLocalSales] = useState<Sale[]>(sales);
+  const [localBudgets, setLocalBudgets] = useState<Sale[]>(budgets || []);
+
+  React.useEffect(() => {
+    setLocalSales(sales);
+  }, [sales]);
+
+  React.useEffect(() => {
+    if (budgets) {
+      setLocalBudgets(budgets);
+    }
+  }, [budgets]);
+
+  // Synchronous optimistic updater to ensure badges flip state without page reload
+  const updateSaleLocally = (updated: Sale) => {
+    setLocalSales((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+    if (onSaveSale) {
+      onSaveSale(updated);
+    }
+  };
+
+  const handleQuickConfirmDelivery = (sale: Sale, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    const opRole: "atendente" | "administrador" = 
+      (currentUser?.role === "atendente" || currentUser?.role === "seller" || isAttendant) 
+        ? "atendente" 
+        : "administrador";
+    const opName = currentUser?.name || currentUser?.username || (isAttendant ? "Atendente" : "Administrador");
+
+    const originalOrderDate = sale.orderDate || (sale.date ? getLocalDateFromISO(sale.date) : getLocalDateFromISO(new Date().toISOString()));
+
+    const auditEntry = {
+      action: "entrega_material" as const,
+      timestamp: new Date().toISOString(),
+      userId: currentUser?.id || "",
+      userName: opName,
+      userRole: opRole,
+      details: `Material conferido e entregue ao cliente.`
+    };
+
+    const updatedSale: Sale = {
+      ...sale,
+      materialEntregue: true,
+      deliveredBy: opName,
+      deliveredAt: new Date().toISOString(),
+      deliveredRole: opRole,
+      deliveryDate: sale.deliveryDate || new Date().toISOString().substring(0, 10),
+      orderDate: originalOrderDate,
+      auditLog: [
+        ...(sale.auditLog || []),
+        auditEntry
+      ]
+    };
+
+    updateSaleLocally(updatedSale);
+  };
+
+  const handleQuickToggleDelivery = (sale: Sale, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (sale.materialEntregue) {
+      const updatedSale: Sale = {
+        ...sale,
+        materialEntregue: false,
+        deliveredBy: undefined,
+        deliveredAt: undefined,
+        deliveredRole: undefined
+      };
+      updateSaleLocally(updatedSale);
+    } else {
+      handleQuickConfirmDelivery(sale, e);
+    }
+  };
+
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<"sales" | "budgets">(initialView);
@@ -306,7 +384,7 @@ export function SalesHistory({
   // Calculate statistics per attendant for active view and current filters
   const attendantsStats = useMemo(() => {
     const map = new Map<string, { name: string; count: number; total: number; role?: string }>();
-    const items = currentView === "sales" ? sales : budgets;
+    const items = currentView === "sales" ? localSales : localBudgets;
 
     const baseItems = items.filter((item) => {
       const matchesSearch = 
@@ -328,6 +406,7 @@ export function SalesHistory({
 
       const createdDate = getLocalDateFromISO(item.date);
       const orderDateClean = item.orderDate ? getLocalDateFromISO(item.orderDate) : "";
+      const deliveryDateClean = item.deliveryDate ? getLocalDateFromISO(item.deliveryDate) : "";
 
       if (activeDateFilter === "today") {
         const localDate = new Date();
@@ -335,20 +414,26 @@ export function SalesHistory({
         const month = String(localDate.getMonth() + 1).padStart(2, '0');
         const day = String(localDate.getDate()).padStart(2, '0');
         const todayStr = `${year}-${month}-${day}`;
-        return createdDate === todayStr || orderDateClean === todayStr;
+        return (
+          createdDate === todayStr ||
+          orderDateClean === todayStr ||
+          deliveryDateClean === todayStr
+        );
       }
 
       if (activeDateFilter === "week") {
         return (
           isDateInCurrentWeek(createdDate) ||
-          (orderDateClean ? isDateInCurrentWeek(orderDateClean) : false)
+          (orderDateClean ? isDateInCurrentWeek(orderDateClean) : false) ||
+          (deliveryDateClean ? isDateInCurrentWeek(deliveryDateClean) : false)
         );
       }
 
       if (activeDateFilter === "month") {
         return (
           isDateInCurrentMonth(createdDate) ||
-          (orderDateClean ? isDateInCurrentMonth(orderDateClean) : false)
+          (orderDateClean ? isDateInCurrentMonth(orderDateClean) : false) ||
+          (deliveryDateClean ? isDateInCurrentMonth(deliveryDateClean) : false)
         );
       }
 
@@ -356,12 +441,14 @@ export function SalesHistory({
         if (activeStartDate && activeEndDate) {
           return (
             (createdDate >= activeStartDate && createdDate <= activeEndDate) ||
-            (orderDateClean >= activeStartDate && orderDateClean <= activeEndDate)
+            (orderDateClean >= activeStartDate && orderDateClean <= activeEndDate) ||
+            (deliveryDateClean >= activeStartDate && deliveryDateClean <= activeEndDate)
           );
         }
         return (
           createdDate === activeSelectedDate ||
-          orderDateClean === activeSelectedDate
+          orderDateClean === activeSelectedDate ||
+          deliveryDateClean === activeSelectedDate
         );
       }
 
@@ -382,7 +469,7 @@ export function SalesHistory({
     });
 
     return Array.from(map.values()).sort((a, b) => b.total - a.total);
-  }, [sales, budgets, currentView, searchTerm, activeStatusFilter, activeDateFilter, activeStartDate, activeEndDate, activeSelectedDate]);
+  }, [localSales, localBudgets, currentView, searchTerm, activeStatusFilter, activeDateFilter, activeStartDate, activeEndDate, activeSelectedDate]);
 
   const totalAttendantsItemsCount = useMemo(() => {
     return attendantsStats.reduce((acc, curr) => acc + curr.count, 0);
@@ -392,7 +479,7 @@ export function SalesHistory({
     return attendantsStats.reduce((acc, curr) => acc + curr.total, 0);
   }, [attendantsStats]);
 
-  const filteredSales = sales.filter((sale) => {
+  const filteredSales = localSales.filter((sale) => {
     // 1. Text Search filtering
     const matchesSearch = 
       sale.clientName.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -421,6 +508,7 @@ export function SalesHistory({
 
     const createdDate = getLocalDateFromISO(sale.date);
     const orderDateClean = sale.orderDate ? getLocalDateFromISO(sale.orderDate) : "";
+    const deliveryDateClean = sale.deliveryDate ? getLocalDateFromISO(sale.deliveryDate) : "";
 
     if (activeDateFilter === "today") {
       const localDate = new Date();
@@ -429,20 +517,26 @@ export function SalesHistory({
       const day = String(localDate.getDate()).padStart(2, '0');
       const todayStr = `${year}-${month}-${day}`;
 
-      return createdDate === todayStr || orderDateClean === todayStr;
+      return (
+        createdDate === todayStr ||
+        orderDateClean === todayStr ||
+        deliveryDateClean === todayStr
+      );
     }
 
     if (activeDateFilter === "week") {
       return (
         isDateInCurrentWeek(createdDate) ||
-        (orderDateClean ? isDateInCurrentWeek(orderDateClean) : false)
+        (orderDateClean ? isDateInCurrentWeek(orderDateClean) : false) ||
+        (deliveryDateClean ? isDateInCurrentWeek(deliveryDateClean) : false)
       );
     }
 
     if (activeDateFilter === "month") {
       return (
         isDateInCurrentMonth(createdDate) ||
-        (orderDateClean ? isDateInCurrentMonth(orderDateClean) : false)
+        (orderDateClean ? isDateInCurrentMonth(orderDateClean) : false) ||
+        (deliveryDateClean ? isDateInCurrentMonth(deliveryDateClean) : false)
       );
     }
     
@@ -450,12 +544,14 @@ export function SalesHistory({
       if (activeStartDate && activeEndDate) {
         return (
           (createdDate >= activeStartDate && createdDate <= activeEndDate) ||
-          (orderDateClean >= activeStartDate && orderDateClean <= activeEndDate)
+          (orderDateClean >= activeStartDate && orderDateClean <= activeEndDate) ||
+          (deliveryDateClean >= activeStartDate && deliveryDateClean <= activeEndDate)
         );
       }
       return (
         createdDate === activeSelectedDate ||
-        orderDateClean === activeSelectedDate
+        orderDateClean === activeSelectedDate ||
+        deliveryDateClean === activeSelectedDate
       );
     }
 
@@ -466,7 +562,7 @@ export function SalesHistory({
     return timeB - timeA;
   });
 
-  const filteredBudgets = budgets.filter((budget) => {
+  const filteredBudgets = localBudgets.filter((budget) => {
     // 1. Text Search filtering
     const matchesSearch = 
       budget.clientName.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -1098,12 +1194,8 @@ export function SalesHistory({
       ]
     };
 
-    if (onSaveSale) {
-      onSaveSale(updatedSale);
-    } else {
-      alert("Erro crítico: Função de salvamento não está disponível.");
-      return;
-    }
+    updateSaleLocally(updatedSale);
+    setQuickPaySale(updatedSale);
 
     // Show success confirmation screen
     setPaySuccessMsg(`Baixa registrada com sucesso! Foi recebido o valor de ${formatBRL(amountPaidNow)}.`);
@@ -1137,7 +1229,7 @@ export function SalesHistory({
 
   // Synchronized counts for quick filters
   const counts = React.useMemo(() => {
-    const list = currentView === "sales" ? sales : budgets;
+    const list = currentView === "sales" ? localSales : localBudgets;
     
     // Today's date string
     const localDate = new Date();
@@ -1158,9 +1250,9 @@ export function SalesHistory({
 
     const matchesStatus = (item: Sale) => {
       if (activeStatusFilter === "pending") {
-        return item.balanceDue > 0;
+        return isPendingRetiradaOrBaixa(item);
       } else if (activeStatusFilter === "paid") {
-        return item.balanceDue <= 0;
+        return (item.balanceDue || 0) <= 0.001;
       }
       return true;
     };
@@ -1212,7 +1304,7 @@ export function SalesHistory({
     });
 
     return { today, week, month, all, custom };
-  }, [sales, budgets, currentView, activeSelectedDate, activeStartDate, activeEndDate, searchTerm, activeStatusFilter]);
+  }, [localSales, localBudgets, currentView, activeSelectedDate, activeStartDate, activeEndDate, searchTerm, activeStatusFilter]);
 
   return (
     <div className="bg-brand-card border border-slate-800 rounded-2xl p-6 space-y-6">
@@ -1550,27 +1642,79 @@ export function SalesHistory({
                       {/* Customer Info */}
                       <td className="p-4">
                         <div className="flex items-center gap-2.5">
-                          <div className="h-7 w-7 rounded bg-brand-magenta/10 border border-brand-magenta/20 flex items-center justify-center text-brand-magenta font-bold">
+                          <div className="h-8 w-8 rounded-lg bg-brand-magenta/10 border border-brand-magenta/20 flex items-center justify-center text-brand-magenta font-bold text-sm shrink-0">
                             {sale.clientName.charAt(0).toUpperCase()}
                           </div>
-                          <div>
-                            <p className="font-bold text-slate-200">{sale.clientName}</p>
-                            <p className="text-[10px] text-slate-400 font-mono flex items-center gap-1 mt-0.5">
-                              <Phone className="h-2.5 w-2.5 text-slate-600" />
+                          <div className="space-y-1">
+                            <p className="font-bold text-slate-100 text-sm leading-tight">{sale.clientName}</p>
+                            <p className="text-[10px] text-slate-400 font-mono flex items-center gap-1">
+                              <Phone className="h-2.5 w-2.5 text-slate-500" />
                               {sale.clientPhone}
                             </p>
+
+                            {/* Status Badges Group: Pagamento + Entrega */}
+                            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                              {/* Financeiro: Quitada vs Falta */}
+                              {(sale.balanceDue || 0) <= 0.001 ? (
+                                <span 
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8.5px] font-black uppercase tracking-wider bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-mono shadow-xs"
+                                  title="Pedido 100% quitado (sem saldo devedor)"
+                                >
+                                  <Check className="h-2.5 w-2.5" />
+                                  <span>Quitada</span>
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenQuickPay(sale)}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8.5px] font-black uppercase tracking-wider bg-yellow-500/15 text-yellow-300 border border-yellow-500/30 hover:bg-yellow-500/25 transition-all cursor-pointer font-mono shadow-xs"
+                                  title="Saldo em aberto. Clique para dar baixa"
+                                >
+                                  <span className="h-1.5 w-1.5 rounded-full bg-yellow-400 animate-pulse" />
+                                  <span>Falta {formatBRL(sale.balanceDue)}</span>
+                                </button>
+                              )}
+
+                              {/* Logística: Entregue vs Aguardando Retirada */}
+                              {sale.materialEntregue ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleQuickToggleDelivery(sale, e)}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8.5px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/35 font-mono shadow-xs hover:bg-emerald-500/30 transition-all cursor-pointer"
+                                  title={sale.deliveredBy ? `Material ENTREGUE por ${sale.deliveredBy}${sale.deliveryDate ? ` em ${formatDate(sale.deliveryDate)}` : ''}. Clique se desejar alterar.` : "Material ENTREGUE. Clique se desejar alterar."}
+                                >
+                                  <PackageCheck className="h-2.5 w-2.5 text-emerald-400" />
+                                  <span>ENTREGUE</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleQuickConfirmDelivery(sale, e)}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8.5px] font-black uppercase tracking-wider bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/40 transition-all cursor-pointer font-mono shadow-xs group"
+                                  title="Aguardando retirada. Clique para confirmar a entrega imediatamente!"
+                                >
+                                  <Clock className="h-2.5 w-2.5 text-amber-400 group-hover:hidden" />
+                                  <Check className="h-2.5 w-2.5 text-emerald-400 hidden group-hover:inline" />
+                                  <span className="group-hover:hidden">AGUARDANDO RETIRADA</span>
+                                  <span className="hidden group-hover:inline font-bold">CONFIRMAR ENTREGA</span>
+                                </button>
+                              )}
+                            </div>
+
                             {(sale.orderDate || sale.deliveryDate) && (
-                              <div className="flex gap-2 text-[9px] text-slate-350 font-mono mt-1 bg-slate-950/85 border border-slate-850 rounded px-1.5 py-0.5 w-fit">
+                              <div className="flex gap-2 text-[9px] text-slate-400 font-mono pt-0.5">
                                 {sale.orderDate && (
                                   <span>Ped: {sale.orderDate.split("-").reverse().join("/")}</span>
                                 )}
                                 {sale.deliveryDate && (
-                                  <span className="text-brand-magenta">Ent: {sale.deliveryDate.split("-").reverse().join("/")}</span>
+                                  <span className={sale.materialEntregue ? "text-emerald-400" : "text-brand-magenta"}>
+                                    Ent: {sale.deliveryDate.split("-").reverse().join("/")}
+                                  </span>
                                 )}
                               </div>
                             )}
                             {sale.sellerName && (
-                              <div className="mt-1">
+                              <div className="mt-0.5">
                                 <span className={`inline-flex items-center gap-1 text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${
                                   sale.sellerRole === "atendente"
                                     ? "bg-cyan-500/10 text-cyan-300 border-cyan-500/20"
@@ -1625,18 +1769,21 @@ export function SalesHistory({
                       {/* Down payment / Signal received */}
                       <td className="p-4 text-right font-mono">
                         <div className="text-emerald-450 font-bold">{formatBRL(sale.downPayment)}</div>
-                        {sale.balanceDue > 0 ? (
+                        {(sale.balanceDue || 0) > 0.001 ? (
                           <button
                             type="button"
                             onClick={() => handleOpenQuickPay(sale)}
-                            className="text-[10px] text-yellow-500 font-bold bg-yellow-500/10 hover:bg-yellow-500/20 px-2 py-0.5 rounded-md mt-1 border border-yellow-500/20 transition-all inline-flex items-center gap-1 cursor-pointer"
+                            className="text-[10px] text-yellow-400 font-bold bg-yellow-500/10 hover:bg-yellow-500/20 px-2 py-0.5 rounded-md mt-1 border border-yellow-500/30 transition-all inline-flex items-center gap-1 cursor-pointer font-mono"
                             title="Clique para dar baixa no saldo pendente"
                           >
-                            <span className="h-1.5 w-1.5 rounded-full bg-yellow-550 animate-pulse"></span>
+                            <span className="h-1.5 w-1.5 rounded-full bg-yellow-400 animate-pulse"></span>
                             <span>Falta: {formatBRL(sale.balanceDue)}</span>
                           </button>
                         ) : (
-                          <div className="text-[10px] text-slate-500 mt-0.5 font-medium">Quitada</div>
+                          <div className="inline-flex items-center gap-1 text-[9px] text-emerald-400 font-black uppercase tracking-wider bg-emerald-500/15 border border-emerald-500/30 px-1.5 py-0.5 rounded mt-1 font-mono">
+                            <Check className="h-2.5 w-2.5" />
+                            <span>Quitada</span>
+                          </div>
                         )}
                       </td>
 
@@ -1670,7 +1817,7 @@ export function SalesHistory({
                       {/* Actions tools */}
                       <td className="p-4 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
-                          {sale.balanceDue > 0 && (
+                          {(sale.balanceDue || 0) > 0.001 ? (
                             <button
                               type="button"
                               onClick={() => handleOpenQuickPay(sale)}
@@ -1680,6 +1827,21 @@ export function SalesHistory({
                               <Check className="h-3 w-3" />
                               <span>DAR BAIXA</span>
                             </button>
+                          ) : !sale.materialEntregue ? (
+                            <button
+                              type="button"
+                              onClick={(e) => handleQuickConfirmDelivery(sale, e)}
+                              className="p-1 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] uppercase tracking-wider flex items-center gap-1 cursor-pointer transition-all hover:scale-[1.03] shadow-md shadow-emerald-950/40"
+                              title="Confirmar entrega do material ao cliente"
+                            >
+                              <PackageCheck className="h-3 w-3" />
+                              <span>ENTREGAR</span>
+                            </button>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-wider text-emerald-400/80 bg-emerald-500/10 border border-emerald-500/20 px-2 py-1 rounded-md font-mono" title="Venda finalizada: quitada e entregue">
+                              <CheckCheck className="h-3 w-3 text-emerald-400" />
+                              <span>FINALIZADA</span>
+                            </span>
                           )}
 
                           <button
@@ -1979,7 +2141,7 @@ export function SalesHistory({
                   <button
                     onClick={() => {
                       if (quickPaySale) {
-                        const current = sales.find(s => s.id === quickPaySale.id) || quickPaySale;
+                        const current = localSales.find(s => s.id === quickPaySale.id) || quickPaySale;
                         handleShareWhatsApp(current);
                       }
                     }}
@@ -1994,7 +2156,7 @@ export function SalesHistory({
                   <button
                     onClick={() => {
                       if (quickPaySale) {
-                        const current = sales.find(s => s.id === quickPaySale.id) || quickPaySale;
+                        const current = localSales.find(s => s.id === quickPaySale.id) || quickPaySale;
                         handleDownloadPDF(current);
                       }
                     }}
