@@ -37,6 +37,10 @@ import { ProductSaleItem, Sale, CompanyProfile, CostItem, CatalogProduct, User, 
 import { jsPDF } from "jspdf";
 import { dbUploadImages, parseClientImages, isSupabaseConfigured, getSupabase, dbGetQuickSales, dbSaveQuickSale, dbDeleteQuickSale } from "../supabase";
 
+const formatCurrency = (val: number) => {
+  return `R$ ${val.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`;
+};
+
 interface ImageItem {
   id: string;
   url: string; // Public URL or Local BLOB URL
@@ -1499,10 +1503,8 @@ export function SaleForm({
       minute: "2-digit"
     });
 
-    // Helper functions for formatting
-    const formatCurrency = (val: number) => {
-      return `R$ ${val.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    };
+    
+
 
     const docId = activeEditingSale?.id 
       ? activeEditingSale.id 
