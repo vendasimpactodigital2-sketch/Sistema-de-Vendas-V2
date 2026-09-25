@@ -439,26 +439,6 @@ export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
                     )}
                     <span>{loading ? "Carregando..." : "Acessar o Sistema"}</span>
                   </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const defaultUser: User = {
-                        id: "demo-admin",
-                        username: "admin",
-                        name: "Administrador",
-                        email: "vendas.impactodigital2@gmail.com",
-                        password: "123",
-                        role: "admin",
-                        status_assinatura: "ativo",
-                        status: "ativo"
-                      };
-                      onLoginSuccess(defaultUser);
-                    }}
-                    className="w-full py-2.5 px-4 rounded-xl font-medium text-brand-cyan hover:text-white bg-brand-cyan/10 hover:bg-brand-cyan/20 border border-brand-cyan/30 transition-all cursor-pointer text-xs flex items-center justify-center gap-2 mt-2"
-                  >
-                    ⚡ Entrar com 1 Clique (Terminal Sincronizado)
-                  </button>
                 </form>
 
                 <div className="pt-4 border-t border-slate-850 text-center">
