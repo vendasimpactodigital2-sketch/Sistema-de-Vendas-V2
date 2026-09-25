@@ -22,6 +22,7 @@ const ClientesManager = React.lazy(() => import("./components/ClientesManager").
 const MonthlyExpensesMeta = React.lazy(() => import("./components/MonthlyExpensesMeta").then(m => ({ default: m.MonthlyExpensesMeta })));
 const SupportPanel = React.lazy(() => import("./components/SupportPanel").then(m => ({ default: m.SupportPanel })));
 const AttendantsManager = React.lazy(() => import("./components/AttendantsManager").then(m => ({ default: m.AttendantsManager })));
+const AdminPanel = React.lazy(() => import("./components/AdminPanel").then(m => ({ default: m.AdminPanel })));
 
 const LazyLoader = () => (
   <div className="flex flex-col items-center justify-center min-h-[400px] w-full p-8 rounded-2xl bg-slate-900/40 border border-slate-850/60 animate-fade-in">
@@ -38,7 +39,7 @@ import { Sale, CompanyProfile, Expense, User, CatalogProduct, getSaleOrderDate, 
 import { getLocalDeletionAuditRecords, saveLocalDeletionAuditRecord, clearLocalDeletionAuditRecords, fetchDeletionAuditFromSupabase } from "./utils/deletionAudit";
 import { AuthScreen } from "./components/AuthScreen";
 import { AdminMensalistas } from "./components/AdminMensalistas";
-import { Sparkles, DollarSign, Building2, ShieldAlert, TrendingDown, RefreshCw, X, Trophy, CheckCircle, Info, AlertTriangle, Trash2, Bell, Volume2, VolumeX, Package, MapPin, Calendar, Clock, Check, Gift, Fingerprint, Eye, EyeOff, Phone, Wallet, Search, UserCheck, Sunset, BellRing, Moon, Rocket } from "lucide-react";
+import { Sparkles, DollarSign, Building2, ShieldAlert, ShieldCheck, TrendingDown, RefreshCw, X, Trophy, CheckCircle, Info, AlertTriangle, Trash2, Bell, Volume2, VolumeX, Package, MapPin, Calendar, Clock, Check, Gift, Fingerprint, Eye, EyeOff, Phone, Wallet, Search, UserCheck, Sunset, BellRing, Moon, Rocket } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { WeeklyGoalModal } from "./components/WeeklyGoalModal";
 import { TrialCountdown } from "./components/TrialCountdown";
@@ -208,17 +209,38 @@ export default function App() {
   const isSubscriptionLocked = useMemo(() => {
     if (!currentUser) return false;
     
-    // Rigorously enforce lock if subscription status is 'bloqueado', 'vencido', or 'expired' (case-insensitive, trimmed)
-    const status = (currentUser.status_assinatura || (currentUser as any).status || "").toString().trim().toLowerCase();
-    
-    // Se o status for ativo, o acesso NUNCA deve ser bloqueado
-    if (status === "ativo" || status === "active") {
+    // Master admin is NEVER blocked
+    const isMasterAdmin = currentUser.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+    if (isMasterAdmin) {
       return false;
     }
 
-    const isPedro = currentUser.email?.toLowerCase().trim() === "pedro@gmail.com";
-    if (status === "bloqueado" || status === "vencido" || status === "expired" || isPedro) {
+    // Rigorously enforce lock if subscription status is 'bloqueado', 'blocked', 'vencido', or 'expired' (case-insensitive, trimmed)
+    const status = (currentUser.status_assinatura || (currentUser as any).status || "").toString().trim().toLowerCase();
+    
+    // Se o status for ativo e plano for lifetime, o acesso NUNCA deve ser bloqueado
+    if (status === "blocked" || status === "bloqueado" || status === "vencido" || status === "expired") {
       return true;
+    }
+
+    const plan = ((currentUser as any).plano || (currentUser as any).plan || "").toString().trim().toLowerCase();
+    if (plan === "lifetime") {
+      return false; // Usuário com plano vitalício não expira
+    }
+
+    // Se o usuário comum estiver com 'trial_end' vencido (e plano != 'lifetime')
+    const trialEnd = (currentUser as any).trial_end || (currentUser as any).data_expiracao;
+    if (trialEnd) {
+      try {
+        const endDate = new Date(trialEnd);
+        if (!isNaN(endDate.getTime())) {
+          if (endDate.getTime() < Date.now()) {
+            return true;
+          }
+        }
+      } catch (e) {
+        console.error("Error calculating trial_end:", e);
+      }
     }
     
     // 1. Check if the user is an administrator
@@ -236,7 +258,7 @@ export default function App() {
     }
 
     // 2. Otherwise they are common users (clients of the print shop)
-    if (status === "ativo") return false;
+    if (status === "ativo" || status === "active") return false;
     
     const createdAtStr = currentUser.created_at;
     if (!createdAtStr) return false;
@@ -412,7 +434,7 @@ export default function App() {
   }, [currentUser]);
 
 
-  const [activeTab, setActiveTab] = useState<"sale" | "dashboard" | "company" | "gastos" | "usuarios" | "relatorios" | "produtos" | "gastosMeta" | "clientes" | "suporte" | "atendentes">("sale");
+  const [activeTab, setActiveTab] = useState<"sale" | "dashboard" | "company" | "gastos" | "usuarios" | "relatorios" | "produtos" | "gastosMeta" | "clientes" | "suporte" | "atendentes" | "adminMaster">("sale");
 
   // Deletion Audit Records state
   const [deletionAuditRecords, setDeletionAuditRecords] = useState<DeletionAuditRecord[]>([]);
@@ -604,19 +626,33 @@ export default function App() {
           }
         } catch (e) {}
 
-        // 2. Fallback secundário
-        if (!dbStatus) {
-          try {
-            const { data: profileData } = await client
-              .from('profiles')
-              .select('status, status_assinatura')
-              .eq('id', currentUser.id)
-              .maybeSingle();
-            if (profileData) {
-              dbStatus = (profileData.status || profileData.status_assinatura || "").toString().trim();
+        // 2. Fallback secundário e sincronização de perfis (tabela 'profiles')
+        try {
+          const { data: profileData } = await client
+            .from('profiles')
+            .select('*')
+            .or(`id.eq.${currentUser.id}${currentUser.email ? `,email.eq.${currentUser.email}` : ''}`)
+            .maybeSingle();
+          if (profileData) {
+            const pStatus = (profileData.status || profileData.status_assinatura || "").toString().trim();
+            const pPlan = (profileData.plano || profileData.plan || "").toString().trim();
+            const pTrialEnd = profileData.trial_end || profileData.data_expiracao || null;
+            if (!dbStatus && pStatus) {
+              dbStatus = pStatus;
             }
-          } catch (e) {}
-        }
+            if (pPlan || pTrialEnd) {
+              setCurrentUser(prev => {
+                if (!prev) return null;
+                return {
+                  ...prev,
+                  plano: pPlan || (prev as any).plano,
+                  plan: pPlan || (prev as any).plan,
+                  trial_end: pTrialEnd !== undefined ? pTrialEnd : (prev as any).trial_end
+                };
+              });
+            }
+          }
+        } catch (e) {}
 
         if (dbStatus) {
           const dbStatusUpper = dbStatus.toUpperCase();
@@ -718,6 +754,58 @@ export default function App() {
       client.removeChannel(channel);
     };
   }, [currentUser?.id]);
+
+  // Supabase Realtime: Escuta eventos de alteração DIRETAMENTE na tabela 'profiles' para sincronização instantânea
+  useEffect(() => {
+    if (!currentUser || !isSupabaseConfigured()) return;
+    const client = getSupabase();
+    if (!client) return;
+
+    const channel = client
+      .channel(`app-profiles-status-sync-${currentUser.id || "current"}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "profiles"
+        },
+        (payload: any) => {
+          const p = payload.new;
+          if (!p) return;
+          const isMe =
+            (currentUser.id && String(p.id) === String(currentUser.id)) ||
+            (currentUser.email && p.email && String(p.email).toLowerCase().trim() === String(currentUser.email).toLowerCase().trim());
+          if (!isMe) return;
+
+          console.log("[Supabase Realtime App] Alteração detectada diretamente na tabela 'profiles':", p);
+          const newStatus = (p.status || p.status_assinatura || "").toString().trim();
+          const newPlan = (p.plano || p.plan || "").toString().trim();
+          const newTrialEnd = p.trial_end || p.data_expiracao || null;
+
+          setCurrentUser(prev => {
+            if (!prev) return null;
+            const updated = {
+              ...prev,
+              status: newStatus || prev.status,
+              status_assinatura: newStatus || prev.status_assinatura,
+              plano: newPlan || (prev as any).plano,
+              plan: newPlan || (prev as any).plan,
+              trial_end: newTrialEnd !== undefined ? newTrialEnd : (prev as any).trial_end
+            };
+            try {
+              localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(updated));
+            } catch (e) {}
+            return updated;
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      client.removeChannel(channel);
+    };
+  }, [currentUser?.id, currentUser?.email]);
 
   // Compile all orders for AI context beautifully and compactly
   const allOrdersForAi = React.useMemo(() => {
@@ -5308,7 +5396,11 @@ export default function App() {
     }
   };
 
-  const handleSwitchTab = (tab: "sale" | "dashboard" | "company" | "gastos" | "usuarios" | "relatorios" | "produtos" | "gastosMeta" | "clientes") => {
+  const handleSwitchTab = (tab: "sale" | "dashboard" | "company" | "gastos" | "usuarios" | "relatorios" | "produtos" | "gastosMeta" | "clientes" | "suporte" | "atendentes" | "adminMaster") => {
+    if (tab === "adminMaster") {
+      setActiveTab("adminMaster");
+      return;
+    }
     if (!isRegisterOpenForToday) {
       setShowCashRegisterModal(true);
       return;
@@ -5458,10 +5550,32 @@ export default function App() {
     window.location.replace("/");
   };
 
-  // EXPLICIT FRONTEND SUBSCRIPTION WALL: If status is 'vencido', 'bloqueado' or 'expired', or email is 'pedro@gmail.com', force immediate return of the lock screen!
+  // EXPLICIT FRONTEND SUBSCRIPTION WALL:
+  // Se o usuário comum estiver com status 'blocked' ou com 'trial_end' vencido (e plano != 'lifetime'), impeça o acesso mostrando a tela de renovação.
   const directStatusStr = (currentUser?.status_assinatura || (currentUser as any)?.status || "").toString().trim().toLowerCase();
-  const isPedroUser = currentUser?.email?.toLowerCase().trim() === "pedro@gmail.com";
-  const isLocked = directStatusStr !== "ativo" && directStatusStr !== "active" && (directStatusStr === "vencido" || directStatusStr === "bloqueado" || directStatusStr === "expired" || isPedroUser || isSubscriptionLocked);
+  const isMasterUser = currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+  const userPlan = ((currentUser as any)?.plano || (currentUser as any)?.plan || "").toString().trim().toLowerCase();
+  const isLifetimePlan = userPlan === "lifetime";
+
+  let isDirectTrialExpired = false;
+  const directTrialEnd = (currentUser as any)?.trial_end || (currentUser as any)?.data_expiracao;
+  if (directTrialEnd && !isLifetimePlan) {
+    try {
+      const dEnd = new Date(directTrialEnd);
+      if (!isNaN(dEnd.getTime()) && dEnd.getTime() < Date.now()) {
+        isDirectTrialExpired = true;
+      }
+    } catch (e) {}
+  }
+
+  const isLocked = !isMasterUser && (
+    directStatusStr === "blocked" ||
+    directStatusStr === "bloqueado" ||
+    directStatusStr === "vencido" ||
+    directStatusStr === "expired" ||
+    (!isLifetimePlan && isDirectTrialExpired) ||
+    isSubscriptionLocked
+  );
   
   const handleUpdateCurrentUser = (updatedUser: User) => {
     setCurrentUser(updatedUser);
@@ -5680,10 +5794,48 @@ export default function App() {
         </div>
       )}
       
+      {/* Master Admin Top Navigation Bar: Exibido APENAS para vendas.impactodigital2@gmail.com */}
+      {currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com" && (
+        <div className="bg-gradient-to-r from-amber-950 via-slate-900 to-amber-950 border-b border-amber-500/40 px-3 sm:px-6 py-2 flex items-center justify-between text-xs text-amber-200 shadow-md">
+          <div className="flex items-center gap-2">
+            <span className="flex h-2.5 w-2.5 relative">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500" />
+            </span>
+            <span className="font-extrabold tracking-wide uppercase text-[11px] text-amber-300">
+              Painel Master Autorizado (vendas.impactodigital2@gmail.com)
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveTab("adminMaster")}
+              className={`px-3 py-1 rounded-lg text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 shadow-sm ${
+                activeTab === "adminMaster"
+                  ? "bg-amber-400 text-slate-950 border border-amber-300 shadow-amber-400/20"
+                  : "bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40"
+              }`}
+            >
+              <ShieldCheck className="h-3.5 w-3.5" />
+              <span>Aba Painel Master</span>
+            </button>
+            {activeTab === "adminMaster" && (
+              <button
+                type="button"
+                onClick={() => setActiveTab("sale")}
+                className="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer"
+              >
+                Voltar às Vendas
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 1. Global Navigation header toolbar */}
       <Header 
-        activeTab={activeTab} 
-        setActiveTab={handleSwitchTab} 
+        activeTab={activeTab as any} 
+        setActiveTab={handleSwitchTab as any} 
         companyName={company.tradingName} 
         companyLogo={company.logo}
         currentUser={currentUser}
@@ -5730,6 +5882,11 @@ export default function App() {
             <RefreshCw className="h-8 w-8 animate-spin text-cyan-500 stroke-[1.5]" />
             <p className="text-xs font-mono uppercase tracking-widest text-slate-455">Sincronizando painel operacional...</p>
           </div>
+        ) : activeTab === "adminMaster" && currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com" ? (
+          /* PAINEL MASTER DISPONÍVEL DIRETAMENTE AO MASTER ADMIN */
+          <React.Suspense fallback={<LazyLoader />}>
+            <AdminPanel />
+          </React.Suspense>
         ) : !isRegisterOpenForToday ? (
           /* HARD BLOCK SCREEN WHEN CASH REGISTER IS CLOSED */
           <ClosedRegisterGate
@@ -5744,7 +5901,12 @@ export default function App() {
           {/* Left Block: Active Screen Badge & Action Controls Inline */}
           <div className="flex flex-wrap items-center gap-2.5">
             <div className="flex items-center gap-2 px-2.5 py-1 bg-slate-950 rounded-lg border border-slate-850 shrink-0">
-              {activeTab === "company" ? (
+              {activeTab === "adminMaster" ? (
+                <>
+                  <ShieldCheck className="h-3.5 w-3.5 text-amber-400" />
+                  <span className="text-[11px] font-black text-amber-200 uppercase tracking-wider">Painel Master Admin</span>
+                </>
+              ) : activeTab === "company" ? (
                 <>
                   <Building2 className="h-3.5 w-3.5 text-brand-magenta" />
                   <span className="text-[11px] font-black text-rose-100 uppercase tracking-wider">Empresa</span>
@@ -5791,6 +5953,22 @@ export default function App() {
 
             {/* Direct Inline Action Control Buttons */}
             <div className="flex items-center gap-1.5">
+              {currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com" && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab(activeTab === "adminMaster" ? "sale" : "adminMaster")}
+                  className={`px-3 py-1 font-extrabold text-xs rounded-lg shadow-md border cursor-pointer transition-all active:scale-95 flex items-center gap-1.5 shrink-0 ${
+                    activeTab === "adminMaster"
+                      ? "bg-amber-400 text-slate-950 border-amber-300 font-black shadow-amber-400/30"
+                      : "bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-500 hover:to-amber-600 text-white border-amber-500/40"
+                  }`}
+                  title="Painel Master: Gestão de Assinaturas e Usuários em Tempo Real (profiles)"
+                >
+                  <ShieldCheck className="h-3.5 w-3.5 text-amber-200" />
+                  <span>{activeTab === "adminMaster" ? "Voltar ao PDV" : "👑 Painel Master"}</span>
+                </button>
+              )}
+
               {currentUser?.email?.toLowerCase().trim() === "sistemadevendaadm@gmail.com" && (
                 <button
                   id="btn-admin-aplicar-nova-estrutura"
@@ -6072,6 +6250,11 @@ export default function App() {
                     onClearDeletions={handleClearDeletionRecords}
                     company={company}
                   />
+                </React.Suspense>
+              ) : activeTab === "adminMaster" && currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com" ? (
+                /* Master Admin Profiles Management */
+                <React.Suspense fallback={<LazyLoader />}>
+                  <AdminPanel />
                 </React.Suspense>
               ) : activeTab === "suporte" ? (
                 /* Secure multi-tenant Support Voice Feedback recording center */
