@@ -79,6 +79,7 @@ import {
   dbPublishSystemStructure,
   dbGetSystemConfig
 } from "./supabase";
+import { subscribeRealtime, broadcastRealtime, realtimeManager } from "./realtime";
 
 export function parseBrazilianValue(val: string): number {
   let cleaned = val.trim();
@@ -1197,6 +1198,149 @@ export default function App() {
     };
   }, [currentUser?.id, currentUser?.owner_id]);
 
+  // Realtime channel for caixa_status table (instant status sync across all links)
+  useEffect(() => {
+    const supabase = getSupabase();
+    if (!supabase) return;
+    const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+    const companyOwnerId = currentUser?.owner_id || currentUser?.id || UNIFIED_EMPRESA_ID;
+
+    // 1. Initial query from caixa_status
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from("caixa_status")
+          .select("status, updated_at")
+          .eq("user_id", companyOwnerId)
+          .maybeSingle();
+
+        if (data?.status) {
+          const st = String(data.status).toUpperCase();
+          if (st === "ABERTO") {
+            setIsGlobalRegisterOpen(true);
+            setIsStandbyActive(false);
+            setShowCashRegisterModal(false);
+          } else if (st === "FECHADO") {
+            setIsGlobalRegisterOpen(false);
+            setCashRegister((prev) => ({ ...prev, currentSession: null }));
+          }
+        }
+      } catch (e) {}
+    })();
+
+    // 2. Realtime listener for caixa_status changes
+    const channel = supabase
+      .channel(`rt_caixa_status_app_${companyOwnerId}_${Date.now()}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "caixa_status",
+          filter: `user_id=eq.${companyOwnerId}`,
+        },
+        (payload: any) => {
+          const newStatus = payload.new?.status;
+          if (newStatus) {
+            const st = String(newStatus).toUpperCase();
+            if (st === "ABERTO") {
+              setIsGlobalRegisterOpen(true);
+              setIsStandbyActive(false);
+              setShowCashRegisterModal(false);
+            } else if (st === "FECHADO") {
+              setIsGlobalRegisterOpen(false);
+              setCashRegister((prev) => ({ ...prev, currentSession: null }));
+            }
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "caixa_status",
+        },
+        (payload: any) => {
+          const newRec = payload.new;
+          if (newRec && (newRec.user_id === companyOwnerId || !newRec.user_id) && newRec.status) {
+            const st = String(newRec.status).toUpperCase();
+            if (st === "ABERTO") {
+              setIsGlobalRegisterOpen(true);
+              setIsStandbyActive(false);
+              setShowCashRegisterModal(false);
+            } else if (st === "FECHADO") {
+              setIsGlobalRegisterOpen(false);
+              setCashRegister((prev) => ({ ...prev, currentSession: null }));
+            }
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel).catch(() => {});
+    };
+  }, [currentUser?.id, currentUser?.owner_id]);
+
+  // Realtime channel for empresa_config table (instant logo and name sync across all links)
+  useEffect(() => {
+    const supabase = getSupabase();
+    if (!supabase) return;
+    const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+    const companyOwnerId = currentUser?.owner_id || currentUser?.id || UNIFIED_EMPRESA_ID;
+
+    // 1. Initial query from empresa_config
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from("empresa_config")
+          .select("*")
+          .eq("user_id", companyOwnerId)
+          .maybeSingle();
+
+        if (data) {
+          const name = data.nome || data.trading_name;
+          const logo = data.logo;
+          setCompany((prev) => ({
+            ...prev,
+            ...(name ? { tradingName: name } : {}),
+            ...(logo !== undefined ? { logo } : {}),
+          }));
+        }
+      } catch (e) {}
+    })();
+
+    // 2. Realtime listener for empresa_config
+    const channel = supabase
+      .channel(`rt_empresa_config_app_${companyOwnerId}_${Date.now()}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "empresa_config",
+          filter: `user_id=eq.${companyOwnerId}`,
+        },
+        (payload: any) => {
+          if (payload.new) {
+            const name = payload.new.nome || payload.new.trading_name;
+            const logo = payload.new.logo;
+            setCompany((prev) => ({
+              ...prev,
+              ...(name ? { tradingName: name } : {}),
+              ...(logo !== undefined ? { logo } : {}),
+            }));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel).catch(() => {});
+    };
+  }, [currentUser?.id, currentUser?.owner_id]);
+
   const checkingRegisterRef = useRef<Promise<boolean> | null>(null);
 
   const checkGlobalRegisterStatus = async (userIdToUse?: string): Promise<boolean> => {
@@ -1208,6 +1352,34 @@ export default function App() {
     const checkPromise = (async () => {
       const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
       const companyOwnerId = currentUser?.owner_id || currentUser?.id || userIdToUse || UNIFIED_EMPRESA_ID;
+
+      // 0. Direct check on caixa_status table in Supabase
+      const supabase = getSupabase();
+      if (supabase) {
+        try {
+          const { data: statusRow } = await supabase
+            .from("caixa_status")
+            .select("status, updated_at")
+            .eq("user_id", companyOwnerId)
+            .maybeSingle();
+
+          if (statusRow?.status) {
+            const st = String(statusRow.status).toUpperCase();
+            if (st === "ABERTO") {
+              setIsGlobalRegisterOpen(true);
+              setIsStandbyActive(false);
+              setShowCashRegisterModal(false);
+              return true;
+            } else if (st === "FECHADO") {
+              setIsGlobalRegisterOpen(false);
+              setCashRegister((prev) => ({ ...prev, currentSession: null }));
+              return false;
+            }
+          }
+        } catch (e) {
+          console.warn("Aviso ao checar caixa_status:", e);
+        }
+      }
 
       try {
         const remoteState = await dbGetCashRegister(companyOwnerId);
@@ -2212,27 +2384,38 @@ export default function App() {
           const finalBudgets = remoteSales.filter((s: any) => s.isBudget);
 
           setSales((prevLocalSales) => {
-            const remoteMap = new Map<string, Sale>();
-            finalSales.forEach((s: Sale) => remoteMap.set(s.id, s));
-            const localPending = prevLocalSales.filter((s) => !remoteMap.has(s.id));
-            const merged = [...localPending, ...finalSales];
-            const isSame = prevLocalSales.length === merged.length && prevLocalSales.every((s, i) => s.id === merged[i]?.id && s.totalValue === merged[i]?.totalValue && s.balanceDue === merged[i]?.balanceDue && s.date === merged[i]?.date);
+            const isSame =
+              prevLocalSales.length === finalSales.length &&
+              prevLocalSales.every(
+                (s, i) =>
+                  s.id === finalSales[i]?.id &&
+                  s.totalValue === finalSales[i]?.totalValue &&
+                  s.balanceDue === finalSales[i]?.balanceDue &&
+                  s.date === finalSales[i]?.date &&
+                  s.materialEntregue === finalSales[i]?.materialEntregue &&
+                  s.clientName === finalSales[i]?.clientName &&
+                  s.motoboyCost === finalSales[i]?.motoboyCost &&
+                  s.deliveryAddress === finalSales[i]?.deliveryAddress
+              );
             if (isSame) return prevLocalSales;
-            localStorage.setItem("NUCLEO_SALES", JSON.stringify(merged));
-            salesRef.current = merged;
-            return merged;
+            localStorage.setItem("NUCLEO_SALES", JSON.stringify(finalSales));
+            salesRef.current = finalSales;
+            return finalSales;
           });
 
           setBudgets((prevLocalBudgets) => {
-            const remoteMap = new Map<string, Sale>();
-            finalBudgets.forEach((b: Sale) => remoteMap.set(b.id, b));
-            const localPending = prevLocalBudgets.filter((b) => !remoteMap.has(b.id));
-            const merged = [...localPending, ...finalBudgets];
-            const isSame = prevLocalBudgets.length === merged.length && prevLocalBudgets.every((b, i) => b.id === merged[i]?.id && b.totalValue === merged[i]?.totalValue);
+            const isSame =
+              prevLocalBudgets.length === finalBudgets.length &&
+              prevLocalBudgets.every(
+                (b, i) =>
+                  b.id === finalBudgets[i]?.id &&
+                  b.totalValue === finalBudgets[i]?.totalValue &&
+                  b.clientName === finalBudgets[i]?.clientName
+              );
             if (isSame) return prevLocalBudgets;
-            localStorage.setItem("NUCLEO_BUDGETS", JSON.stringify(merged));
-            budgetsRef.current = merged;
-            return merged;
+            localStorage.setItem("NUCLEO_BUDGETS", JSON.stringify(finalBudgets));
+            budgetsRef.current = finalBudgets;
+            return finalBudgets;
           });
         }
       } catch (err) {
@@ -2837,144 +3020,155 @@ export default function App() {
     window.addEventListener("cash_register_remote_sync" as any, handleCashRegisterSync);
     window.addEventListener("sales_remote_sync" as any, handleSalesSync);
 
-    // 3. Continuous Server-Sent Events (SSE) stream for instant real-time synchronization (<100ms) across machines
-    let eventSource: EventSource | null = null;
-    let reconnectTimeout: any = null;
+    // 3. Real-Time Engine (WebSocket + SSE) for instant synchronization across all open links and terminals
+    realtimeManager.setCompanyId(companyOwnerId);
 
-    const connectSSE = () => {
+    const handleRealtimeDispatch = (evType: string, data: any = {}) => {
       try {
-        const url = `/api/realtime/stream?companyId=${encodeURIComponent(companyOwnerId)}`;
-        eventSource = new EventSource(url);
-
-        eventSource.onmessage = (event) => {
-          try {
-            if (!event.data || event.data.startsWith(":")) return;
-            const parsed = JSON.parse(event.data);
-            if (parsed.type === "connected") return;
-
-            const evType = parsed.event || parsed.type;
-            const data = parsed.data || {};
-
-            if (evType === "cash_register_updated" || evType === "cash_register_broadcast") {
-              const currentIsOpen = !!cashRegisterRef.current?.currentSession && isCashSessionActiveOrOpen(cashRegisterRef.current.currentSession);
-              if (data.state) {
-                const remoteState = data.state;
-                const isOpen = !!remoteState.currentSession && isCashSessionActiveOrOpen(remoteState.currentSession);
-                setCashRegister(remoteState);
-                cashRegisterRef.current = remoteState;
-                setIsGlobalRegisterOpen(isOpen);
-                if (isOpen) {
-                  setIsStandbyActive(false);
-                  setShowCashRegisterModal(false);
-                  if (!currentIsOpen) {
-                    addToast("🔓 Caixa aberto! Sistema liberado para todos os computadores em tempo real.", "success");
-                  }
-                } else {
-                  if (currentIsOpen) {
-                    addToast("🔒 Caixa encerrado em outro terminal.", "info");
-                  }
-                }
-                try {
-                  localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remoteState));
-                } catch (e) {}
-              } else if (data.session) {
-                const s = data.session;
-                setIsGlobalRegisterOpen(true);
-                setIsStandbyActive(false);
-                setShowCashRegisterModal(false);
-                if (!currentIsOpen) {
-                  addToast(`🔓 Caixa aberto por ${s.operador || "Operador"}! Sincronizado em tempo real.`, "success");
-                }
-                setCashRegister((prev) => {
-                  const updated: CashRegisterState = {
-                    currentSession: {
-                      id: s.id || `session_${Date.now()}`,
-                      status: "aberto",
-                      valorAbertura: Number(s.valorAbertura) || 0,
-                      dataAbertura: s.dataAbertura || new Date().toISOString(),
-                      operador: s.operador || "Operador"
-                    },
-                    history: prev?.history || []
-                  };
-                  cashRegisterRef.current = updated;
-                  try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
-                  return updated;
-                });
-              } else if (data.closed) {
-                setIsGlobalRegisterOpen(false);
-                if (currentIsOpen) {
-                  addToast("🔒 Caixa encerrado em outro terminal.", "info");
-                }
-                setCashRegister((prev) => {
-                  const updated = { ...prev, currentSession: null };
-                  cashRegisterRef.current = updated;
-                  try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
-                  return updated;
-                });
-              } else {
-                checkGlobalRegisterStatus(companyOwnerId);
+        if (evType === "cash_register_updated" || evType === "cash_register_broadcast") {
+          const currentIsOpen = !!cashRegisterRef.current?.currentSession && isCashSessionActiveOrOpen(cashRegisterRef.current.currentSession);
+          if (data.state) {
+            const remoteState = data.state;
+            const isOpen = !!remoteState.currentSession && isCashSessionActiveOrOpen(remoteState.currentSession);
+            setCashRegister(remoteState);
+            cashRegisterRef.current = remoteState;
+            setIsGlobalRegisterOpen(isOpen);
+            if (isOpen) {
+              setIsStandbyActive(false);
+              setShowCashRegisterModal(false);
+              if (!currentIsOpen) {
+                addToast("🔓 Caixa aberto! Sistema liberado para todos os computadores em tempo real.", "success");
               }
-              window.dispatchEvent(new CustomEvent("cash_register_remote_sync", { detail: data }));
-            } else if (evType === "sales_updated" || evType === "sales_broadcast") {
-              fetchSales();
-              window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: data }));
-              // Keep product stock updated in real time across all logged-in machines
-              if (companyOwnerId && isSupabaseConfigured()) {
-                dbGetCatalogProducts(companyOwnerId).then((prods) => {
-                  if (prods && prods.length > 0) {
-                    setCatalogProducts(prods);
-                    try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(prods)); } catch (e) {}
-                  }
-                }).catch(() => {});
+            } else {
+              if (currentIsOpen) {
+                addToast("🔒 Caixa encerrado em outro terminal.", "info");
               }
-            } else if (evType === "expenses_updated" || evType === "expenses_broadcast") {
-              fetchExpenses();
-              window.dispatchEvent(new CustomEvent("expenses_remote_sync", { detail: data }));
-            } else if (evType === "products_updated" || evType === "products_broadcast") {
-              window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: data }));
-              if (companyOwnerId && isSupabaseConfigured()) {
-                dbGetCatalogProducts(companyOwnerId).then((prods) => {
-                  if (prods && prods.length > 0) {
-                    setCatalogProducts(prods);
-                    try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(prods)); } catch (e) {}
-                  }
-                }).catch(() => {});
-              }
-            } else if (evType === "clients_updated" || evType === "clients_broadcast") {
-              window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: data }));
-            } else if (evType === "cloud_backups_updated" || evType === "backup_sync" || evType === "backup_restored") {
-              window.dispatchEvent(new CustomEvent("cloud_backups_updated", { detail: data }));
-              window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: data }));
-              const backupTitle = data?.backup?.titulo || data?.title || "Cópia de Segurança";
-              addToast(`💾 Novo Backup realizado: "${backupTitle}"! Sincronizado para todos os computadores.`, "info");
-              fetchSales();
-              fetchExpenses();
-              checkGlobalRegisterStatus(companyOwnerId);
             }
-          } catch (err) {}
-        };
-
-        eventSource.onerror = () => {
-          if (eventSource) {
-            eventSource.close();
-            eventSource = null;
+            try {
+              localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remoteState));
+            } catch (e) {}
+          } else if (data.session) {
+            const s = data.session;
+            setIsGlobalRegisterOpen(true);
+            setIsStandbyActive(false);
+            setShowCashRegisterModal(false);
+            if (!currentIsOpen) {
+              addToast(`🔓 Caixa aberto por ${s.operador || "Operador"}! Sincronizado em tempo real.`, "success");
+            }
+            setCashRegister((prev) => {
+              const updated: CashRegisterState = {
+                currentSession: {
+                  id: s.id || `session_${Date.now()}`,
+                  status: "aberto",
+                  valorAbertura: Number(s.valorAbertura) || 0,
+                  dataAbertura: s.dataAbertura || new Date().toISOString(),
+                  operador: s.operador || "Operador"
+                },
+                history: prev?.history || []
+              };
+              cashRegisterRef.current = updated;
+              try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
+              return updated;
+            });
+          } else if (data.closed) {
+            setIsGlobalRegisterOpen(false);
+            if (currentIsOpen) {
+              addToast("🔒 Caixa encerrado em outro terminal.", "info");
+            }
+            setCashRegister((prev) => {
+              const updated = { ...prev, currentSession: null };
+              cashRegisterRef.current = updated;
+              try { localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated)); } catch (e) {}
+              return updated;
+            });
+          } else {
+            checkGlobalRegisterStatus(companyOwnerId);
           }
-          reconnectTimeout = setTimeout(connectSSE, 3000);
-        };
-      } catch (e) {}
+          window.dispatchEvent(new CustomEvent("cash_register_remote_sync", { detail: data }));
+        } else if (evType === "sales_updated" || evType === "sales_broadcast") {
+          if (data.deletedId) {
+            setSales((prev) => prev.filter((s) => s.id !== data.deletedId));
+            setBudgets((prev) => prev.filter((b) => b.id !== data.deletedId));
+          } else if (data.sale) {
+            const s = data.sale;
+            if (s.isBudget) {
+              setBudgets((prev) => [s, ...prev.filter((b) => b.id !== s.id)]);
+            } else {
+              setSales((prev) => [s, ...prev.filter((item) => item.id !== s.id)]);
+            }
+          }
+          fetchSales(true);
+          window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: data }));
+          if (companyOwnerId && isSupabaseConfigured()) {
+            dbGetCatalogProducts(companyOwnerId).then((prods) => {
+              if (prods && prods.length > 0) {
+                setCatalogProducts(prods);
+                try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(prods)); } catch (e) {}
+              }
+            }).catch(() => {});
+          }
+        } else if (evType === "expenses_updated" || evType === "expenses_broadcast") {
+          if (data.deletedId) {
+            setExpenses((prev) => prev.filter((ex) => ex.id !== data.deletedId));
+          } else if (data.expense) {
+            setExpenses((prev) => [data.expense, ...prev.filter((ex) => ex.id !== data.expense.id)]);
+          }
+          fetchExpenses(true);
+          window.dispatchEvent(new CustomEvent("expenses_remote_sync", { detail: data }));
+        } else if (evType === "products_updated" || evType === "products_broadcast") {
+          if (data.deletedId) {
+            setCatalogProducts((prev) => prev.filter((p) => p.id !== data.deletedId));
+          } else if (data.product) {
+            setCatalogProducts((prev) => [data.product, ...prev.filter((p) => p.id !== data.product.id)]);
+          } else if (data.productId && data.newStock !== undefined) {
+            setCatalogProducts((prev) =>
+              prev.map((p) => (p.id === data.productId ? { ...p, currentStock: data.newStock } : p))
+            );
+          }
+          window.dispatchEvent(new CustomEvent("products_remote_sync", { detail: data }));
+          if (companyOwnerId && isSupabaseConfigured()) {
+            dbGetCatalogProducts(companyOwnerId).then((prods) => {
+              if (prods && prods.length > 0) {
+                setCatalogProducts(prods);
+                try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(prods)); } catch (e) {}
+              }
+            }).catch(() => {});
+          }
+        } else if (evType === "clients_updated" || evType === "clients_broadcast") {
+          window.dispatchEvent(new CustomEvent("clients_remote_sync", { detail: data }));
+        } else if (evType === "gastos_mensais_updated" || evType === "bills_updated") {
+          window.dispatchEvent(new CustomEvent("bills_remote_sync", { detail: data }));
+          window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: data }));
+        } else if (evType === "quick_sales_updated") {
+          window.dispatchEvent(new CustomEvent("quick_sales_remote_sync", { detail: data }));
+        } else if (evType === "company_profile_updated") {
+          if (data.profile) {
+            setCompany(data.profile);
+            try { localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(data.profile)); } catch (e) {}
+          }
+        } else if (evType === "goals_updated") {
+          if (data.customWeekdayGoals) {
+            setCustomWeekdayGoals(data.customWeekdayGoals);
+            try { localStorage.setItem("NUCLEO_WEEKDAY_GOALS", JSON.stringify(data.customWeekdayGoals)); } catch (e) {}
+          }
+        } else if (evType === "cloud_backups_updated" || evType === "backup_sync" || evType === "backup_restored") {
+          window.dispatchEvent(new CustomEvent("cloud_backups_updated", { detail: data }));
+          window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: data }));
+          const backupTitle = data?.backup?.titulo || data?.title || "Cópia de Segurança";
+          addToast(`💾 Novo Backup: "${backupTitle}"! Sincronizado para todos os terminais.`, "info");
+          fetchSales(true);
+          fetchExpenses(true);
+          checkGlobalRegisterStatus(companyOwnerId);
+        }
+      } catch (err) {}
     };
 
-    connectSSE();
+    const unsubscribeRealtime = subscribeRealtime(handleRealtimeDispatch);
 
     return () => {
       window.removeEventListener("cash_register_remote_sync" as any, handleCashRegisterSync);
       window.removeEventListener("sales_remote_sync" as any, handleSalesSync);
-      if (eventSource) {
-        eventSource.close();
-      }
-      if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
-      }
+      unsubscribeRealtime();
     };
   }, [currentUser, fetchSales, fetchExpenses]);
 
@@ -4400,11 +4594,20 @@ export default function App() {
     // Play welcome beep
     playLoginBeep();
 
-    // Sync with Supabase sessoes_caixa
+    // Sync with Supabase caixa_status and sessoes_caixa
     const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
     const companyId = currentUser?.owner_id || currentUser?.id || UNIFIED_EMPRESA_ID;
     const supabaseClient = getSupabase();
     if (supabaseClient) {
+      try {
+        await supabaseClient.from("caixa_status").upsert({
+          user_id: companyId,
+          status: "ABERTO",
+          updated_at: new Date().toISOString()
+        });
+      } catch (err) {
+        console.warn("Aviso ao atualizar caixa_status ABERTO:", err);
+      }
       try {
         await supabaseClient.from("sessoes_caixa").upsert({
           id: sessionUUID,
@@ -4631,6 +4834,15 @@ export default function App() {
 
     const supabaseClient = getSupabase();
     if (supabaseClient) {
+      try {
+        await supabaseClient.from("caixa_status").upsert({
+          user_id: companyId,
+          status: "FECHADO",
+          updated_at: new Date().toISOString()
+        });
+      } catch (err) {
+        console.warn("Aviso ao atualizar caixa_status FECHADO:", err);
+      }
       try {
         await supabaseClient
           .from("sessoes_caixa")
@@ -4897,6 +5109,9 @@ export default function App() {
         .catch((err) => console.error("Error syncing sale to Supabase:", err));
     }
 
+    const companyOwnerId = currentUser?.owner_id || currentUser?.id || "global";
+    broadcastRealtime("sales_updated", { sale: attributedSale }, companyOwnerId);
+
     setHighPriorityNotification({
       id: attributedSale.id,
       title: exists ? "Venda Atualizada!" : "Nova Venda Registrada!",
@@ -4941,6 +5156,9 @@ export default function App() {
       dbSaveSale(companyOwnerId, attributedBudget)
         .catch((err) => console.error("Error syncing budget to Supabase:", err));
     }
+    const companyOwnerId = currentUser?.owner_id || currentUser?.id || "global";
+    broadcastRealtime("sales_updated", { sale: attributedBudget }, companyOwnerId);
+
     playAlertSound("success");
     addToast(exists ? "Orçamento atualizado com sucesso! 📝" : "Novo orçamento registrado! 📋", "success");
   };
@@ -4984,6 +5202,8 @@ export default function App() {
       if (activeEditingSale?.id === id) {
         setActiveEditingSale(null);
       }
+      const ownerId = currentUser?.owner_id || currentUser?.id || "global";
+      broadcastRealtime("sales_updated", { deletedId: id }, ownerId);
       if (isSupabaseConfigured()) {
         dbDeleteSale(id)
           .catch((err) => console.error("Error deleting budget from Supabase:", err));
@@ -5065,6 +5285,8 @@ export default function App() {
       if (activeEditingSale?.id === id) {
         setActiveEditingSale(null);
       }
+      const ownerId = currentUser?.owner_id || currentUser?.id || "global";
+      broadcastRealtime("sales_updated", { deletedId: id }, ownerId);
       if (isSupabaseConfigured()) {
         dbDeleteSale(id)
           .catch((err) => console.error("Error deleting sale from Supabase:", err));
@@ -5668,6 +5890,24 @@ export default function App() {
                         if (currentUser) {
                           const companyOwnerId = currentUser.owner_id || currentUser.id;
                           companyLoadedForUserId.current = currentUser.id;
+                          const supabase = getSupabase();
+                          if (supabase) {
+                            (async () => {
+                              try {
+                                await supabase
+                                  .from("empresa_config")
+                                  .upsert({
+                                    user_id: companyOwnerId,
+                                    nome: updatedCompany.tradingName,
+                                    trading_name: updatedCompany.tradingName,
+                                    logo: updatedCompany.logo,
+                                    updated_at: new Date().toISOString()
+                                  });
+                              } catch (err) {
+                                console.warn("Erro ao salvar empresa_config:", err);
+                              }
+                            })();
+                          }
                           if (isSupabaseConfigured()) {
                             dbSaveCompanyProfile(companyOwnerId, updatedCompany)
                               .then((success) => {

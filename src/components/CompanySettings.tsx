@@ -933,6 +933,7 @@ export function CompanySettings({
       let expenses: any[] = [];
       let gastos_mensais: any[] = [];
       let clientes: any[] = [];
+      let vendas_rapidas_itens: any[] = [];
       let company_profile: any = null;
       let goals: any = null;
       let cash_register_state: any = null;
@@ -952,6 +953,8 @@ export function CompanySettings({
                          Array.isArray(source.fixed_expenses) ? source.fixed_expenses : [];
         clientes = Array.isArray(source.clientes) ? source.clientes : 
                    Array.isArray(source.clients) ? source.clients : [];
+        vendas_rapidas_itens = Array.isArray(source.vendas_rapidas_itens) ? source.vendas_rapidas_itens :
+                               Array.isArray(source.quick_sales) ? source.quick_sales : [];
         company_profile = source.company_profile || source.empresa || null;
         goals = source.goals || source.metas || null;
         cash_register_state = source.cash_register_state || source.cashRegister || null;
@@ -975,6 +978,9 @@ export function CompanySettings({
           if (clientes.length === 0 && dumpCandidate["NUCLEO_CLIENTS"]) {
             clientes = typeof dumpCandidate["NUCLEO_CLIENTS"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_CLIENTS"]) : dumpCandidate["NUCLEO_CLIENTS"];
           }
+          if (vendas_rapidas_itens.length === 0 && dumpCandidate["NUCLEO_QUICK_SALES"]) {
+            vendas_rapidas_itens = typeof dumpCandidate["NUCLEO_QUICK_SALES"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_QUICK_SALES"]) : dumpCandidate["NUCLEO_QUICK_SALES"];
+          }
           if (!company_profile && dumpCandidate["NUCLEO_COMPANY_PROFILE"]) {
             company_profile = typeof dumpCandidate["NUCLEO_COMPANY_PROFILE"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_COMPANY_PROFILE"]) : dumpCandidate["NUCLEO_COMPANY_PROFILE"];
           }
@@ -995,6 +1001,7 @@ export function CompanySettings({
       if (produtos.length > 0) localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(produtos));
       if (gastos_mensais.length > 0) localStorage.setItem("NUCLEO_RECURRING_EXPENSES", JSON.stringify(gastos_mensais));
       if (clientes.length > 0) localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(clientes));
+      if (vendas_rapidas_itens.length > 0) localStorage.setItem("NUCLEO_QUICK_SALES", JSON.stringify(vendas_rapidas_itens));
       if (company_profile) localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(company_profile));
       if (goals) localStorage.setItem("NUCLEO_GOALS", JSON.stringify(goals));
       if (cash_register_state) localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(cash_register_state));
@@ -1011,6 +1018,7 @@ export function CompanySettings({
             expenses,
             gastos_mensais,
             clientes,
+            vendas_rapidas_itens,
             company_profile,
             goals,
             cash_register_state,
@@ -1024,6 +1032,7 @@ export function CompanySettings({
               `• Produtos: ${res.counts.produtos}\n` +
               `• Despesas: ${res.counts.expenses}\n` +
               `• Clientes: ${res.counts.clientes}\n` +
+              `• Vendas Rápidas: ${res.counts.vendas_rapidas_itens || vendas_rapidas_itens.length}\n` +
               `• Faturas fixas: ${res.counts.gastos_mensais}`
             );
           } else {
@@ -1168,6 +1177,26 @@ export function CompanySettings({
           
           // Sync with state reference of parents ONLY if a real profile exists
           onSaveCompany(remoteProfile);
+        }
+
+        // Direct fetch from empresa_config table for logo and name
+        const supabase = getSupabase();
+        if (supabase) {
+          const ownerId = currentUser.owner_id || currentUser.id;
+          const { data: configData } = await supabase
+            .from("empresa_config")
+            .select("*")
+            .eq("user_id", ownerId)
+            .maybeSingle();
+
+          if (configData) {
+            if (configData.nome || configData.trading_name) {
+              setTradingName(configData.nome || configData.trading_name);
+            }
+            if (configData.logo !== undefined) {
+              setLogo(configData.logo);
+            }
+          }
         } else {
           // If the profile does not exist in the database yet, guarantee that the fields are 100% empty and clean
           setTradingName("");
@@ -1201,6 +1230,41 @@ export function CompanySettings({
     
     fetchProfileForUser();
   }, [currentUser?.id]);
+
+  // Realtime channel for empresa_config so name/logo changes sync across windows immediately
+  useEffect(() => {
+    if (!currentUser) return;
+    const supabase = getSupabase();
+    if (!supabase) return;
+    const ownerId = currentUser.owner_id || currentUser.id;
+
+    const channel = supabase
+      .channel(`rt_empresa_config_settings_${ownerId}_${Date.now()}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "empresa_config",
+          filter: `user_id=eq.${ownerId}`,
+        },
+        (payload: any) => {
+          if (payload.new) {
+            if (payload.new.nome || payload.new.trading_name) {
+              setTradingName(payload.new.nome || payload.new.trading_name);
+            }
+            if (payload.new.logo !== undefined) {
+              setLogo(payload.new.logo);
+            }
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel).catch(() => {});
+    };
+  }, [currentUser]);
 
   // Sync state ONLY when user session or tenant ID changes to prevent overwriting user input as they type
   useEffect(() => {
@@ -1471,6 +1535,28 @@ export function CompanySettings({
     };
 
     onSaveCompany(updated);
+
+    // Direct upsert to empresa_config table for logo and name
+    const supabase = getSupabase();
+    if (supabase && currentUser) {
+      const ownerId = currentUser.owner_id || currentUser.id;
+      (async () => {
+        try {
+          await supabase
+            .from("empresa_config")
+            .upsert({
+              user_id: ownerId,
+              nome: tradingName.trim(),
+              trading_name: tradingName.trim(),
+              logo: logo,
+              updated_at: new Date().toISOString()
+            });
+        } catch (err) {
+          console.warn("Erro ao salvar empresa_config:", err);
+        }
+      })();
+    }
+
     setStatusMessage("Configurações da empresa salvas com sucesso!");
     
     if (autoBackupDownloadEnabled) {

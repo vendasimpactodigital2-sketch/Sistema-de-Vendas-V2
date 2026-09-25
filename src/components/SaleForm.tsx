@@ -228,33 +228,78 @@ export function SaleForm({
   const [sessionClientId] = useState(() => Math.random().toString(36).substring(2, 9));
   const channelRef = useRef<any>(null);
 
+  // Direct select from vendas_rapidas_itens table
+  const fetchQuickSalesFromDb = async () => {
+    if (!currentUser || !currentUser.id) return;
+    const ownerId = currentUser.owner_id || currentUser.id;
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from("vendas_rapidas_itens")
+          .select("*")
+          .eq("user_id", ownerId)
+          .order("created_at", { ascending: true });
+
+        if (!error && data && data.length > 0) {
+          const formatted = data.map((item: any) => ({
+            id: item.id,
+            description: item.description || item.descricao || item.nome || "",
+            price: Number(item.price ?? item.preco ?? 0),
+            cost: Number(item.cost ?? item.custo ?? 0),
+            gradient: item.gradient || item.cor || "from-purple-600 via-fuchsia-600 to-pink-500",
+          }));
+          setQuickSales(formatted);
+          return;
+        }
+      } catch (err) {
+        console.warn("Direct select vendas_rapidas_itens:", err);
+      }
+    }
+    const dbSales = await dbGetQuickSales(ownerId);
+    if (dbSales && dbSales.length > 0) {
+      setQuickSales(dbSales);
+    }
+  };
+
   useEffect(() => {
-    // Se o usuário não estiver autenticado, encerra imediatamente
-    if (!currentUser || !currentUser.id || !isSupabaseConfigured()) return;
+    if (!currentUser || !currentUser.id) return;
     const supabase = getSupabase();
     if (!supabase) return;
 
     const scopeId = currentUser.owner_id || currentUser.id;
-    const channelName = `quick_sales_config:${scopeId}`;
 
-    const channel = supabase.channel(channelName, {
-      config: {
-        broadcast: { self: false }
-      }
-    });
+    // 1. Initial direct fetch from vendas_rapidas_itens
+    fetchQuickSalesFromDb();
 
-    channel
-      .on("broadcast", { event: "quick_sales_config_update" }, async (response: any) => {
-        const payload = response.payload;
-        if (payload && payload.senderId !== sessionClientId) {
-          if (isSupabaseConfigured() && currentUser) {
-            const ownerId = currentUser.owner_id || currentUser.id;
-            const dbSales = await dbGetQuickSales(ownerId);
-            if (dbSales && dbSales.length > 0) {
-              setQuickSales(dbSales);
-            }
-          }
+    // 2. Active Realtime listener (postgres_changes) on table vendas_rapidas_itens
+    const channel = supabase
+      .channel(`realtime_vendas_rapidas_${scopeId}_${Date.now()}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "vendas_rapidas_itens",
+          filter: `user_id=eq.${scopeId}`,
+        },
+        () => {
+          fetchQuickSalesFromDb();
         }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "vendas_rapidas_itens",
+        },
+        () => {
+          fetchQuickSalesFromDb();
+        }
+      )
+      .on("broadcast", { event: "quick_sales_config_update" }, () => {
+        fetchQuickSalesFromDb();
       })
       .subscribe();
 
@@ -263,7 +308,7 @@ export function SaleForm({
     return () => {
       supabase.removeChannel(channel).catch(() => {});
     };
-  }, [currentUser, sessionClientId]);
+  }, [currentUser]);
 
   // Automatically sum up individual product costs into the total operation cost of the sale
   useEffect(() => {
@@ -374,36 +419,7 @@ export function SaleForm({
   const [editingQSId, setEditingQSId] = useState<string | null>(null);
 
   useEffect(() => {
-    const loadQuickSales = async () => {
-      if (!isSupabaseConfigured() || !currentUser) return;
-      const ownerId = currentUser.owner_id || currentUser.id;
-      try {
-        const dbSales = await dbGetQuickSales(ownerId);
-        if (dbSales !== null) {
-          if (dbSales.length > 0) {
-            setQuickSales(dbSales);
-          } else {
-            // If the DB is empty (first-time use), seed the DB with initial/default items!
-            const defaultItems = [
-              { id: "q1", description: "Impressão Colorida A4", price: 2.50, cost: 0.50, gradient: "from-purple-600 via-fuchsia-600 to-pink-500" },
-              { id: "q2", description: "Plastificação de Documento", price: 5.00, cost: 1.20, gradient: "from-cyan-500 to-blue-600" },
-              { id: "q3", description: "Cópia / Xerox Preto", price: 0.50, cost: 0.10, gradient: "from-slate-700 to-slate-900" },
-              { id: "q4", description: "Adesivo Personalizado", price: 1.50, cost: 0.35, gradient: "from-pink-500 to-rose-500" },
-              { id: "q5", description: "Encadernação Completa", price: 12.00, cost: 3.50, gradient: "from-emerald-500 to-teal-600" },
-              { id: "q6", description: "Formatação de PC / Notbook", price: 80.05, cost: 0.00, gradient: "from-blue-600 to-indigo-700" }
-            ];
-            
-            if (!isPricingLocked) {
-              await Promise.all(defaultItems.map(item => dbSaveQuickSale(ownerId, item)));
-            }
-            setQuickSales(defaultItems);
-          }
-        }
-      } catch (err) {
-        console.error("Error loading/seeding quick sales", err);
-      }
-    };
-    loadQuickSales();
+    fetchQuickSalesFromDb();
   }, [currentUser]);
 
   const handleAddQuickSaleToForm = (name: string, price: number, qty: number, cost: number = 0) => {
@@ -497,6 +513,26 @@ export function SaleForm({
       
       if (isSupabaseConfigured() && currentUser) {
         const ownerId = currentUser.owner_id || currentUser.id;
+        const supabase = getSupabase();
+        if (supabase) {
+          try {
+            await supabase.from("vendas_rapidas_itens").upsert({
+              id: updatedItem.id,
+              user_id: ownerId,
+              description: updatedItem.description,
+              descricao: updatedItem.description,
+              price: updatedItem.price,
+              preco: updatedItem.price,
+              cost: updatedItem.cost || 0,
+              custo: updatedItem.cost || 0,
+              gradient: updatedItem.gradient,
+              cor: updatedItem.gradient,
+              created_at: new Date().toISOString()
+            });
+          } catch (e) {
+            console.warn("Direct upsert vendas_rapidas_itens error:", e);
+          }
+        }
         await dbSaveQuickSale(ownerId, updatedItem);
         if (channelRef.current) {
           channelRef.current.send({
@@ -526,6 +562,26 @@ export function SaleForm({
       
       if (isSupabaseConfigured() && currentUser) {
         const ownerId = currentUser.owner_id || currentUser.id;
+        const supabase = getSupabase();
+        if (supabase) {
+          try {
+            await supabase.from("vendas_rapidas_itens").upsert({
+              id: newQS.id,
+              user_id: ownerId,
+              description: newQS.description,
+              descricao: newQS.description,
+              price: newQS.price,
+              preco: newQS.price,
+              cost: newQS.cost || 0,
+              custo: newQS.cost || 0,
+              gradient: newQS.gradient,
+              cor: newQS.gradient,
+              created_at: new Date().toISOString()
+            });
+          } catch (e) {
+            console.warn("Direct insert vendas_rapidas_itens error:", e);
+          }
+        }
         await dbSaveQuickSale(ownerId, newQS);
         if (channelRef.current) {
           channelRef.current.send({
@@ -557,6 +613,18 @@ export function SaleForm({
       
       if (isSupabaseConfigured() && currentUser) {
         const ownerId = currentUser.owner_id || currentUser.id;
+        const supabase = getSupabase();
+        if (supabase) {
+          try {
+            await supabase
+              .from("vendas_rapidas_itens")
+              .delete()
+              .eq("id", id)
+              .eq("user_id", ownerId);
+          } catch (e) {
+            console.warn("Direct delete vendas_rapidas_itens error:", e);
+          }
+        }
         await dbDeleteQuickSale(ownerId, id);
         if (channelRef.current) {
           channelRef.current.send({
@@ -1834,16 +1902,16 @@ export function SaleForm({
       doc.setFont("helvetica", "normal");
       doc.setFontSize(6.5);
       doc.setTextColor(71, 85, 105);
-      doc.text(`Beneficiário: ${company?.tradingName || company?.corporateName || "Núcleo Comunicação Visual"}`, 13, effectivePixBoxY + 14.5);
+      doc.text(`Beneficiário: ${company?.tradingName || "Núcleo Comunicação Visual"}`, 13, effectivePixBoxY + 14.5);
 
-      if (company?.cnpj) {
-        doc.text(`CNPJ: ${company.cnpj}`, 13, effectivePixBoxY + 18.5);
+      if (company?.cnpjCpf) {
+        doc.text(`CNPJ/CPF: ${company.cnpjCpf}`, 13, effectivePixBoxY + 18.5);
       }
 
       if (deliveryAddress || useMotoboy) {
         doc.setFont("helvetica", "bold");
         doc.setTextColor(14, 116, 144);
-        doc.text(`ENTREGA: ${deliveryAddress || "Entrega por Motoboy"}`, 13, effectivePixBoxY + (company?.cnpj ? 23 : 19));
+        doc.text(`ENTREGA: ${deliveryAddress || "Entrega por Motoboy"}`, 13, effectivePixBoxY + (company?.cnpjCpf ? 23 : 19));
       }
 
       // Bottom Signature Row
@@ -1903,7 +1971,7 @@ export function SaleForm({
       (window as any).latestReceiptBase64 = base64Pdf;
     } catch (e) {
       try {
-        blobUrl = doc.output("bloburl");
+        blobUrl = String(doc.output("bloburl"));
       } catch (err) {}
     }
 
@@ -2099,7 +2167,7 @@ export function SaleForm({
               type="button"
               id="btn-print-receipt-from-summary"
               data-testid="btn-print-receipt-from-summary"
-              onClick={() => generatePDF(savedSaleSummary)}
+              onClick={() => generatePDF(false)}
               className="px-3.5 py-2 bg-brand-cyan/20 hover:bg-brand-cyan/30 text-brand-cyan font-bold text-xs rounded-xl border border-brand-cyan/40 transition-colors flex items-center gap-2 cursor-pointer shadow-sm"
             >
               <FileText className="h-4 w-4" />
@@ -2182,11 +2250,11 @@ export function SaleForm({
                   Chave PIX: {latestReceiptModalData.pixKey}
                 </div>
                 <div className="text-slate-400 text-[11px]">
-                  Beneficiário: {company?.tradingName || company?.corporateName || "Núcleo Comunicação Visual"}
+                  Beneficiário: {company?.tradingName || "Núcleo Comunicação Visual"}
                 </div>
-                {company?.cnpj && (
+                {company?.cnpjCpf && (
                   <div className="text-slate-500 text-[10px]">
-                    CNPJ: {company.cnpj}
+                    CNPJ/CPF: {company.cnpjCpf}
                   </div>
                 )}
               </div>

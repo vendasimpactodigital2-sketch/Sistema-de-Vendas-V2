@@ -1,7 +1,9 @@
 import { EventEmitter } from "events";
+import http from "http";
 import express from "express";
 import path from "path";
 import fs from "fs";
+import { WebSocketServer, WebSocket } from "ws";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
@@ -13,13 +15,31 @@ dotenv.config();
 
 // Global Realtime SSE Sync Emitter for multi-device instant sync
 const syncEmitter = new EventEmitter();
-syncEmitter.setMaxListeners(200);
+syncEmitter.setMaxListeners(500);
+
+let activeWss: WebSocketServer | null = null;
 
 function broadcastSyncEvent(companyId: string, event: string, data?: any) {
+  const payload = { companyId: companyId || "global", event, data, timestamp: Date.now() };
   try {
-    syncEmitter.emit("sync", { companyId, event, data, timestamp: Date.now() });
+    syncEmitter.emit("sync", payload);
+    if (companyId && companyId !== "global") {
+      syncEmitter.emit("sync", { ...payload, companyId: "global" });
+    }
   } catch (e) {
     console.warn("broadcastSyncEvent warning:", e);
+  }
+
+  // Instant broadcast to all open WebSocket connections across all terminals/links
+  if (activeWss && activeWss.clients) {
+    const raw = JSON.stringify(payload);
+    activeWss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(raw);
+        } catch (e) {}
+      }
+    });
   }
 }
 
@@ -1567,6 +1587,24 @@ ${JSON.stringify(sales, null, 2)}
         return res.json({ success: true, data: [] });
       }
 
+      // 0. Primary: Fetch from vendas_rapidas_itens table
+      const { data: vrData, error: vrError } = await supabase
+        .from("vendas_rapidas_itens")
+        .select("*")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: true });
+
+      if (!vrError && vrData && vrData.length > 0) {
+        const formatted = vrData.map((item: any) => ({
+          id: item.id,
+          description: item.description || item.descricao || item.nome || "",
+          price: Number(item.price ?? item.preco ?? 0),
+          cost: Number(item.cost ?? item.custo ?? 0),
+          gradient: item.gradient || item.cor || "from-purple-600 via-fuchsia-600 to-pink-500",
+        }));
+        return res.json({ success: true, data: formatted });
+      }
+
       // 1. Fetch from quick_sales table
       const { data, error } = await supabase
         .from("quick_sales")
@@ -1624,10 +1662,20 @@ ${JSON.stringify(sales, null, 2)}
         id: it.id,
         user_id: userId,
         description: it.description,
+        descricao: it.description,
         price: Number(it.price) || 0,
+        preco: Number(it.price) || 0,
         cost: Number(it.cost) || 0,
-        gradient: it.gradient || "from-purple-600 via-fuchsia-600 to-pink-500"
+        custo: Number(it.cost) || 0,
+        gradient: it.gradient || "from-purple-600 via-fuchsia-600 to-pink-500",
+        cor: it.gradient || "from-purple-600 via-fuchsia-600 to-pink-500",
+        created_at: new Date().toISOString()
       }));
+
+      // Upsert to vendas_rapidas_itens
+      try {
+        await supabase.from("vendas_rapidas_itens").upsert(rows);
+      } catch (e) {}
 
       const { error } = await supabase.from("quick_sales").upsert(rows);
       if (error) {
@@ -1643,6 +1691,9 @@ ${JSON.stringify(sales, null, 2)}
           });
         } catch {}
       }
+
+      broadcastSyncEvent(userId, "quick_sales_updated", { items: itemsToUpsert });
+      broadcastSyncEvent("global", "quick_sales_updated", { items: itemsToUpsert });
 
       return res.json({ success: true });
     } catch (err: any) {
@@ -1664,11 +1715,22 @@ ${JSON.stringify(sales, null, 2)}
         return res.json({ success: true });
       }
 
+      try {
+        await supabase
+          .from("vendas_rapidas_itens")
+          .delete()
+          .eq("id", id)
+          .eq("user_id", userId);
+      } catch (e) {}
+
       await supabase
         .from("quick_sales")
         .delete()
         .eq("id", id)
         .eq("user_id", userId);
+
+      broadcastSyncEvent(userId, "quick_sales_updated", { deletedId: id });
+      broadcastSyncEvent("global", "quick_sales_updated", { deletedId: id });
 
       return res.json({ success: true });
     } catch (err: any) {
@@ -1765,18 +1827,10 @@ ${JSON.stringify(sales, null, 2)}
     res.write(`data: ${JSON.stringify({ type: "connected", companyId })}\n\n`);
 
     const listener = (eventData: any) => {
-      if (
-        !eventData.companyId ||
-        eventData.companyId === "global" ||
-        !companyId ||
-        companyId === "global" ||
-        eventData.companyId === companyId
-      ) {
-        try {
-          res.write(`data: ${JSON.stringify(eventData)}\n\n`);
-        } catch (e) {
-          // Socket write error handled on close
-        }
+      try {
+        res.write(`data: ${JSON.stringify(eventData)}\n\n`);
+      } catch (e) {
+        // Socket write error handled on close
       }
     };
 
@@ -1786,7 +1840,7 @@ ${JSON.stringify(sales, null, 2)}
       try {
         res.write(": ping\n\n");
       } catch (e) {}
-    }, 20000);
+    }, 15000);
 
     req.on("close", () => {
       clearInterval(pingInterval);
@@ -3933,10 +3987,37 @@ async function startServer() {
     });
   }
 
-  // Não inicia listener HTTP se estiver rodando em ambiente Serverless da Vercel
+  // Inicia listener HTTP e WebSocket Server para sincronização em tempo real instantânea
   if (!process.env.VERCEL) {
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Server running on http://0.0.0.0:${PORT}`);
+    const server = http.createServer(app);
+
+    const wss = new WebSocketServer({ server, path: "/ws/realtime" });
+    activeWss = wss;
+
+    wss.on("connection", (ws: WebSocket, req) => {
+      try {
+        ws.send(JSON.stringify({ type: "connected", timestamp: Date.now() }));
+      } catch (e) {}
+
+      ws.on("message", (msg) => {
+        try {
+          const parsed = JSON.parse(msg.toString());
+          if (parsed.type === "ping") {
+            ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
+            return;
+          }
+          const event = parsed.event || parsed.type || "sync";
+          const data = parsed.data || {};
+          const companyId = parsed.companyId || "global";
+          broadcastSyncEvent(companyId, event, data);
+        } catch (err) {}
+      });
+
+      ws.on("error", () => {});
+    });
+
+    server.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://0.0.0.0:${PORT} with WebSocket on /ws/realtime`);
     });
   }
 }

@@ -1,5 +1,6 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { User, CompanyProfile, Sale, Expense, CashRegisterState, CashRegisterSession, SupportFeedback, SupportConfig, CatalogProduct } from "./types";
+import { broadcastRealtime } from "./realtime";
 
 // Prioritize VITE_ prefix (standard for Vite) as well as NEXT_PUBLIC_ (common in Vercel migrations)
 // and window.__ENV__ or process.env if injected by build systems.
@@ -954,11 +955,121 @@ export async function dbSaveCompanyProfile(userId: string, profile: CompanyProfi
         }
       }
     }
+    notifyRealtimeSync(userId, "company_profile_updated", { profile });
+    notifyRealtimeSync("global", "company_profile_updated", { profile });
     return true;
   } catch (err) {
     console.error("Supabase upsert company exception:", err);
     return false;
   }
+}
+
+// ==========================================
+// EMPRESA_CONFIG (TABELA DEDICADA DA EMPRESA)
+// ==========================================
+
+export interface DbEmpresaConfig {
+  nome: string;
+  logo: string | null;
+}
+
+export async function dbGetEmpresaConfig(userId: string): Promise<DbEmpresaConfig | null> {
+  const supabase = getSupabase();
+  if (!supabase) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from("empresa_config")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!error && data) {
+      return {
+        nome: data.nome || data.trading_name || "",
+        logo: data.logo || null
+      };
+    }
+  } catch (err) {
+    console.warn("Aviso ao buscar empresa_config:", err);
+  }
+  return null;
+}
+
+export async function dbSaveEmpresaConfig(userId: string, config: { nome: string; logo: string | null }): Promise<boolean> {
+  const supabase = getSupabase();
+  if (!supabase) return false;
+
+  try {
+    const payload = {
+      user_id: userId,
+      nome: config.nome,
+      trading_name: config.nome,
+      logo: config.logo,
+      updated_at: new Date().toISOString()
+    };
+    const { error } = await supabase.from("empresa_config").upsert(payload);
+    if (error) {
+      console.warn("Aviso ao salvar empresa_config:", error.message);
+      return false;
+    }
+    notifyRealtimeSync(userId, "empresa_config_updated", config);
+    notifyRealtimeSync("global", "empresa_config_updated", config);
+    return true;
+  } catch (err) {
+    console.warn("Exceção ao salvar empresa_config:", err);
+    return false;
+  }
+}
+
+// ==========================================
+// CAIXA_STATUS (TABELA DE STATUS ABERTO / FECHADO)
+// ==========================================
+
+export async function dbUpsertCaixaStatus(userId: string, status: "ABERTO" | "FECHADO"): Promise<boolean> {
+  const supabase = getSupabase();
+  if (!supabase) return false;
+
+  const cleanStatus = status.toUpperCase() as "ABERTO" | "FECHADO";
+
+  try {
+    const { error } = await supabase.from("caixa_status").upsert({
+      user_id: userId,
+      status: cleanStatus,
+      updated_at: new Date().toISOString()
+    });
+    if (error) {
+      console.warn("Aviso ao atualizar caixa_status:", error.message);
+      return false;
+    }
+    notifyRealtimeSync(userId, "caixa_status_updated", { status: cleanStatus });
+    notifyRealtimeSync("global", "caixa_status_updated", { status: cleanStatus });
+    return true;
+  } catch (err) {
+    console.warn("Exceção ao atualizar caixa_status:", err);
+    return false;
+  }
+}
+
+export async function dbGetCaixaStatus(userId: string): Promise<"ABERTO" | "FECHADO" | null> {
+  const supabase = getSupabase();
+  if (!supabase) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from("caixa_status")
+      .select("status")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!error && data && data.status) {
+      const st = String(data.status).toUpperCase();
+      return st === "ABERTO" ? "ABERTO" : "FECHADO";
+    }
+  } catch (err) {
+    console.warn("Aviso ao buscar caixa_status:", err);
+  }
+  return null;
 }
 
 // ==========================================
@@ -1325,7 +1436,11 @@ export async function dbSaveExpense(userId: string, expense: Expense): Promise<b
     });
     if (res.ok) {
       const json = await res.json();
-      if (json.success) return true;
+      if (json.success) {
+        notifyRealtimeSync(userId, "expenses_updated", { expense: { ...expense, id: cleanId } });
+        notifyRealtimeSync("global", "expenses_updated", { expense: { ...expense, id: cleanId } });
+        return true;
+      }
     }
   } catch (apiErr) {
     console.warn("Direct /api/expenses POST error, falling back to direct client:", apiErr);
@@ -1351,6 +1466,8 @@ export async function dbSaveExpense(userId: string, expense: Expense): Promise<b
       console.error("Error saving expense to Supabase:", error);
       return false;
     }
+    notifyRealtimeSync(userId, "expenses_updated", { expense: { ...expense, id: cleanId } });
+    notifyRealtimeSync("global", "expenses_updated", { expense: { ...expense, id: cleanId } });
     return true;
   } catch (err) {
     console.error("Supabase upsert expense exception:", err);
@@ -1366,7 +1483,10 @@ export async function dbDeleteExpense(expenseId: string): Promise<boolean> {
     });
     if (res.ok) {
       const json = await res.json();
-      if (json.success) return true;
+      if (json.success) {
+        notifyRealtimeSync("global", "expenses_updated", { deletedId: expenseId });
+        return true;
+      }
     }
   } catch (apiErr) {
     console.warn("Direct /api/expenses DELETE error, falling back to direct client:", apiErr);
@@ -1386,6 +1506,7 @@ export async function dbDeleteExpense(expenseId: string): Promise<boolean> {
       console.error("Error deleting expense:", error);
       return false;
     }
+    notifyRealtimeSync("global", "expenses_updated", { deletedId: expenseId });
     return true;
   } catch (err) {
     console.error("Supabase delete expense exception:", err);
@@ -1701,16 +1822,10 @@ export async function notifyRealtimeSync(
   const safeCompanyId = companyId || "global";
   const payload = { companyId: safeCompanyId, event, data, timestamp: Date.now() };
 
-  // 1. Post to Server-Sent Events (SSE) stream endpoint to notify all connected terminals
+  // 1. Instant WebSocket + SSE broadcast engine
   try {
-    fetch("/api/realtime/notify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    }).catch((e) => console.warn("[Realtime Notify] SSE fetch warning:", e));
-  } catch (e) {
-    // ignore
-  }
+    broadcastRealtime(event, data, safeCompanyId);
+  } catch (e) {}
 
   // 2. Broadcast via Supabase Realtime channel if available
   try {
@@ -1750,6 +1865,7 @@ export async function dbExportAllData(ownerId: string): Promise<{
   produtos: any[];
   gastos_mensais: any[];
   clientes: any[];
+  vendas_rapidas_itens: any[];
   cash_register: any | null;
   sessoes_caixa: any[];
   localStorageDump: Record<string, string>;
@@ -1782,7 +1898,8 @@ export async function dbExportAllData(ownerId: string): Promise<{
       clientesRemote,
       companyProfileRemote,
       goalsRemote,
-      sessoesCaixaRemote
+      sessoesCaixaRemote,
+      vendasRapidasRemote
     ] = await Promise.all([
       fetchTableSafe("produtos"),
       fetchTableSafe("sales"),
@@ -1791,7 +1908,8 @@ export async function dbExportAllData(ownerId: string): Promise<{
       fetchTableSafe("clientes"),
       fetchTableSafe("company_profile", true),
       fetchTableSafe("goals", true),
-      fetchTableSafe("sessoes_caixa")
+      fetchTableSafe("sessoes_caixa"),
+      fetchTableSafe("vendas_rapidas_itens")
     ]);
 
     // 2. Extract and merge local storage data so offline or un-synced data is NEVER lost
@@ -1801,6 +1919,7 @@ export async function dbExportAllData(ownerId: string): Promise<{
     let localProducts: any[] = [];
     let localBills: any[] = [];
     let localClients: any[] = [];
+    let localQuickSales: any[] = [];
     let localCompany: any = null;
     let localGoals: any = null;
     let localCashRegister: any = null;
@@ -1855,6 +1974,15 @@ export async function dbExportAllData(ownerId: string): Promise<{
       if (localStorageDump["NUCLEO_GOALS"]) {
         localGoals = JSON.parse(localStorageDump["NUCLEO_GOALS"]);
       }
+      if (localStorageDump[`NUCLEO_QUICK_SALES_${ownerId}`]) {
+        try {
+          localQuickSales = JSON.parse(localStorageDump[`NUCLEO_QUICK_SALES_${ownerId}`]);
+        } catch {}
+      } else if (localStorageDump["NUCLEO_QUICK_SALES"]) {
+        try {
+          localQuickSales = JSON.parse(localStorageDump["NUCLEO_QUICK_SALES"]);
+        } catch {}
+      }
     } catch (err) {
       console.warn("[dbExportAllData] Local storage extraction warning:", err);
     }
@@ -1889,6 +2017,7 @@ export async function dbExportAllData(ownerId: string): Promise<{
     const mergedProducts = mergeDeduplicate(produtosRemote || [], localProducts);
     const mergedBills = mergeDeduplicate(gastosMensaisRemote || [], localBills);
     const mergedClients = mergeDeduplicate(clientesRemote || [], localClients);
+    const mergedQuickSales = mergeDeduplicate(vendasRapidasRemote || [], localQuickSales);
     const mergedBudgets = mergeDeduplicate(
       mergedSales.filter((s: any) => s.isBudget || s.is_budget),
       localBudgets
@@ -1909,6 +2038,7 @@ export async function dbExportAllData(ownerId: string): Promise<{
       produtos: mergedProducts,
       gastos_mensais: mergedBills,
       clientes: mergedClients,
+      vendas_rapidas_itens: mergedQuickSales,
       cash_register: localCashRegister,
       sessoes_caixa: sessoesCaixaRemote || [],
       localStorageDump
@@ -1928,6 +2058,7 @@ export async function dbImportAllData(
     expenses?: any[];
     gastos_mensais?: any[];
     clientes?: any[];
+    vendas_rapidas_itens?: any[];
     company_profile?: any;
     goals?: any;
     cash_register?: any;
@@ -1944,6 +2075,7 @@ export async function dbImportAllData(
     expenses: number;
     gastos_mensais: number;
     clientes: number;
+    vendas_rapidas_itens: number;
     company_profile: boolean;
     goals: boolean;
     cash_register: boolean;
@@ -1956,6 +2088,7 @@ export async function dbImportAllData(
     expenses: 0,
     gastos_mensais: 0,
     clientes: 0,
+    vendas_rapidas_itens: 0,
     company_profile: false,
     goals: false,
     cash_register: false
@@ -2452,6 +2585,43 @@ export async function dbImportAllData(
       }
     }
 
+    // 8.1. Restore Vendas Rápidas Itens directly into table vendas_rapidas_itens
+    if (Array.isArray(backupData.vendas_rapidas_itens) && backupData.vendas_rapidas_itens.length > 0) {
+      counts.vendas_rapidas_itens = backupData.vendas_rapidas_itens.length;
+      const quickItemsToSave: any[] = [];
+      for (const it of backupData.vendas_rapidas_itens) {
+        if (!it || !it.id) continue;
+        const quickRow = {
+          id: it.id,
+          user_id: currentOwnerId,
+          description: it.description || it.descricao || it.nome || "",
+          descricao: it.descricao || it.description || it.nome || "",
+          price: Number(it.price ?? it.preco ?? 0),
+          preco: Number(it.preco ?? it.price ?? 0),
+          cost: Number(it.cost ?? it.custo ?? 0),
+          custo: Number(it.custo ?? it.cost ?? 0),
+          gradient: it.gradient || it.cor || "from-purple-600 via-fuchsia-600 to-pink-500",
+          cor: it.gradient || it.cor || "from-purple-600 via-fuchsia-600 to-pink-500",
+          created_at: it.created_at || new Date().toISOString()
+        };
+        quickItemsToSave.push(quickRow);
+      }
+
+      try {
+        localStorage.setItem(`NUCLEO_QUICK_SALES_${currentOwnerId}`, JSON.stringify(quickItemsToSave));
+      } catch {}
+
+      if (supabase && quickItemsToSave.length > 0) {
+        try {
+          for (const itemRow of quickItemsToSave) {
+            await supabase.from("vendas_rapidas_itens").upsert(itemRow);
+          }
+        } catch (e) {
+          console.warn("Aviso ao restaurar vendas_rapidas_itens no Supabase:", e);
+        }
+      }
+    }
+
     // 9. Instant Multi-Terminal Broadcast to all devices via realtime
     notifyRealtimeSync(currentOwnerId, "backup_restored", counts);
     notifyRealtimeSync("global", "backup_restored", counts);
@@ -2463,6 +2633,8 @@ export async function dbImportAllData(
     notifyRealtimeSync("global", "expenses_updated", counts);
     notifyRealtimeSync(currentOwnerId, "clients_updated", counts);
     notifyRealtimeSync("global", "clients_updated", counts);
+    notifyRealtimeSync(currentOwnerId, "quick_sales_updated", counts);
+    notifyRealtimeSync("global", "quick_sales_updated", counts);
 
     return {
       success: true,
@@ -2491,7 +2663,34 @@ export async function dbGetQuickSales(userId: string): Promise<DbQuickSale[] | n
   const supabase = getSupabase();
   if (!supabase && !isSupabaseConfigured()) return null;
 
-  // 1. Try fetching via server API (which uses service_role and bypasses client RLS)
+  // 1. Primary: Direct query on vendas_rapidas_itens table as requested
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("vendas_rapidas_itens")
+        .select("*")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: true });
+
+      if (!error && data && data.length > 0) {
+        const formatted: DbQuickSale[] = data.map((item: any) => ({
+          id: item.id,
+          description: item.description || item.descricao || item.nome || "",
+          price: Number(item.price ?? item.preco ?? 0),
+          cost: Number(item.cost ?? item.custo ?? 0),
+          gradient: item.gradient || item.cor || "from-purple-600 via-fuchsia-600 to-pink-500",
+        }));
+        try {
+          localStorage.setItem(`NUCLEO_QUICK_SALES_${userId}`, JSON.stringify(formatted));
+        } catch {}
+        return formatted;
+      }
+    } catch (err) {
+      console.warn("Supabase vendas_rapidas_itens query notice:", err);
+    }
+  }
+
+  // 2. Try fetching via server API (which uses service_role and bypasses client RLS)
   try {
     const res = await fetch(`/api/quick-sales?userId=${encodeURIComponent(userId)}`);
     if (res.ok) {
@@ -2507,7 +2706,7 @@ export async function dbGetQuickSales(userId: string): Promise<DbQuickSale[] | n
     // Continue to client direct queries if server API is unavailable
   }
 
-  // 2. Direct query on quick_sales table
+  // 3. Fallback query on legacy quick_sales table
   if (supabase) {
     try {
       const { data, error } = await supabase
@@ -2530,7 +2729,7 @@ export async function dbGetQuickSales(userId: string): Promise<DbQuickSale[] | n
         return formatted;
       }
 
-      // 3. Fallback: check sales table row quick_sales_config
+      // 4. Fallback: check sales table row quick_sales_config
       const { data: salesRow } = await supabase
         .from("sales")
         .select("items")
@@ -2548,7 +2747,7 @@ export async function dbGetQuickSales(userId: string): Promise<DbQuickSale[] | n
     }
   }
 
-  // 4. Local storage fallback
+  // 5. Local storage fallback
   try {
     const saved = localStorage.getItem(`NUCLEO_QUICK_SALES_${userId}`) || localStorage.getItem("NUCLEO_QUICK_SALES");
     if (saved) {
@@ -2577,7 +2776,37 @@ export async function dbSaveQuickSale(userId: string, item: DbQuickSale): Promis
     localStorage.setItem(key, JSON.stringify(list));
   } catch {}
 
-  // 1. Save via server API (uses service_role to avoid client RLS policy restrictions)
+  const supabase = getSupabase();
+
+  // 1. Primary: Direct insert/upsert on vendas_rapidas_itens
+  if (supabase) {
+    try {
+      const payload = {
+        id: item.id,
+        user_id: userId,
+        description: item.description,
+        descricao: item.description,
+        price: item.price,
+        preco: item.price,
+        cost: item.cost || 0,
+        custo: item.cost || 0,
+        gradient: item.gradient || "from-purple-600 via-fuchsia-600 to-pink-500",
+        cor: item.gradient || "from-purple-600 via-fuchsia-600 to-pink-500",
+        created_at: new Date().toISOString()
+      };
+      const { error } = await supabase.from("vendas_rapidas_itens").upsert(payload);
+      if (!error) {
+        notifyRealtimeSync(userId, "quick_sales_updated", { item });
+        notifyRealtimeSync("global", "quick_sales_updated", { item });
+        return true;
+      }
+      console.warn("Aviso ao salvar em vendas_rapidas_itens:", error.message);
+    } catch (err) {
+      console.warn("Exceção ao salvar em vendas_rapidas_itens:", err);
+    }
+  }
+
+  // 2. Save via server API (uses service_role to avoid client RLS policy restrictions)
   try {
     const res = await fetch("/api/quick-sales", {
       method: "POST",
@@ -2592,10 +2821,9 @@ export async function dbSaveQuickSale(userId: string, item: DbQuickSale): Promis
     // Continue to direct Supabase write if server call failed
   }
 
-  const supabase = getSupabase();
   if (!supabase) return true; // Saved locally
 
-  // 2. Fallback to direct client upsert with graceful handling of RLS error 42501
+  // 3. Fallback to direct client upsert on quick_sales
   try {
     const { error } = await supabase
       .from("quick_sales")
@@ -2609,11 +2837,7 @@ export async function dbSaveQuickSale(userId: string, item: DbQuickSale): Promis
       });
 
     if (error) {
-      if (error.code === "42501") {
-        console.warn("Notice: Client RLS restricted direct insert on quick_sales, persisted via local & config backup.");
-      } else {
-        console.warn("Notice upserting quick_sales:", error.message);
-      }
+      console.warn("Notice upserting quick_sales fallback:", error.message);
       // Sync to sales table config row
       try {
         const raw = localStorage.getItem(`NUCLEO_QUICK_SALES_${userId}`);
@@ -2649,7 +2873,26 @@ export async function dbDeleteQuickSale(userId: string, id: string): Promise<boo
     }
   } catch {}
 
-  // 1. Delete via server API
+  const supabase = getSupabase();
+
+  // 1. Primary: Direct delete on vendas_rapidas_itens
+  if (supabase) {
+    try {
+      const { error } = await supabase
+        .from("vendas_rapidas_itens")
+        .delete()
+        .eq("id", id)
+        .eq("user_id", userId);
+      if (!error) {
+        notifyRealtimeSync(userId, "quick_sales_updated", { deletedId: id });
+        notifyRealtimeSync("global", "quick_sales_updated", { deletedId: id });
+      }
+    } catch (e) {
+      console.warn("Aviso ao deletar de vendas_rapidas_itens:", e);
+    }
+  }
+
+  // 2. Delete via server API
   try {
     const res = await fetch(`/api/quick-sales/${encodeURIComponent(id)}?userId=${encodeURIComponent(userId)}`, {
       method: "DELETE"
@@ -2660,10 +2903,9 @@ export async function dbDeleteQuickSale(userId: string, id: string): Promise<boo
     }
   } catch {}
 
-  const supabase = getSupabase();
   if (!supabase) return true;
 
-  // 2. Direct client delete with graceful handling
+  // 3. Fallback direct client delete on quick_sales
   try {
     const { error } = await supabase
       .from("quick_sales")
@@ -2672,7 +2914,7 @@ export async function dbDeleteQuickSale(userId: string, id: string): Promise<boo
       .eq("user_id", userId);
 
     if (error) {
-      console.warn("Notice deleting quick_sales item:", error.message);
+      console.warn("Notice deleting quick_sales item fallback:", error.message);
     }
     return true;
   } catch (err) {

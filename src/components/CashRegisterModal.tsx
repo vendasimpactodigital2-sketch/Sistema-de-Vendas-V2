@@ -1,6 +1,7 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { X, Wallet, ShieldAlert, CheckCircle, Info, Calculator, FileText, ArrowRightLeft, Landmark, Users, Printer, Check, Loader2 } from "lucide-react";
 import { CashRegisterState, Sale, CashRegisterSession, Expense, getSaleOperationCost, getSaleOrderDate } from "../types";
+import { getSupabase } from "../supabase";
 
 interface CashRegisterModalProps {
   isOpen: boolean;
@@ -92,10 +93,81 @@ export function CashRegisterModal({
     }
   }, [isOpen]);
 
+  const [caixaDbStatus, setCaixaDbStatus] = useState<"ABERTO" | "FECHADO" | null>(null);
+
+  // Realtime channel for caixa_status table
+  useEffect(() => {
+    const supabase = getSupabase();
+    if (!supabase) return;
+    const userId = currentUser?.owner_id || currentUser?.id || "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+
+    // 1. Initial query from caixa_status
+    supabase
+      .from("caixa_status")
+      .select("status")
+      .eq("user_id", userId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data && data.status) {
+          const st = String(data.status).toUpperCase() as "ABERTO" | "FECHADO";
+          setCaixaDbStatus(st);
+        }
+      });
+
+    // 2. Realtime listener for changes on caixa_status
+    const channel = supabase
+      .channel(`rt_caixa_status_modal_${userId}_${Date.now()}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "caixa_status",
+          filter: `user_id=eq.${userId}`,
+        },
+        (payload: any) => {
+          if (payload.new && payload.new.status) {
+            setCaixaDbStatus(String(payload.new.status).toUpperCase() as "ABERTO" | "FECHADO");
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "caixa_status",
+        },
+        (payload: any) => {
+          if (payload.new && (payload.new.user_id === userId || !payload.new.user_id) && payload.new.status) {
+            setCaixaDbStatus(String(payload.new.status).toUpperCase() as "ABERTO" | "FECHADO");
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel).catch(() => {});
+    };
+  }, [currentUser]);
+
   // Active session resolution: handles multi-terminal sync so open register NEVER asks to open
   const activeSession: CashRegisterSession | null = useMemo(() => {
+    if (caixaDbStatus === "FECHADO") {
+      return null;
+    }
     if (cashRegister.currentSession && cashRegister.currentSession.status === "aberto") {
       return cashRegister.currentSession;
+    }
+    // If caixa_status is marked ABERTO in Supabase
+    if (caixaDbStatus === "ABERTO" || isCashRegisterOpen) {
+      return {
+        id: "session_active_" + Date.now(),
+        status: "aberto",
+        valorAbertura: 0,
+        dataAbertura: new Date().toISOString(),
+        operador: activeOperatorName || "Operador"
+      };
     }
     // Check localStorage fallback
     try {
@@ -108,19 +180,8 @@ export function CashRegisterModal({
       }
     } catch (e) {}
 
-    // If marked open globally or today, build a valid fallback session so the user is never prompted to re-open
-    if (isCashRegisterOpen) {
-      return {
-        id: "session_active_" + Date.now(),
-        status: "aberto",
-        valorAbertura: 0,
-        dataAbertura: new Date().toISOString(),
-        operador: activeOperatorName || "Operador"
-      };
-    }
-
     return null;
-  }, [cashRegister.currentSession, isCashRegisterOpen, activeOperatorName]);
+  }, [cashRegister.currentSession, isCashRegisterOpen, activeOperatorName, caixaDbStatus]);
 
   const isClosed = !activeSession;
 
@@ -428,6 +489,26 @@ export function CashRegisterModal({
     e.preventDefault();
     const val = Math.max(0, Number(openCashInput) || 0);
     const op = operatorInput.trim() || activeOperatorName || "Operador Principal";
+
+    const userId = currentUser?.owner_id || currentUser?.id || "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+    const supabase = getSupabase();
+    if (supabase) {
+      (async () => {
+        try {
+          await supabase
+            .from("caixa_status")
+            .upsert({
+              user_id: userId,
+              status: "ABERTO",
+              updated_at: new Date().toISOString()
+            });
+        } catch (err) {
+          console.warn("Erro ao atualizar caixa_status:", err);
+        }
+      })();
+    }
+    setCaixaDbStatus("ABERTO");
+
     onOpenRegister(val, op);
   };
 
@@ -453,6 +534,23 @@ export function CashRegisterModal({
 
     setIsSubmitting(true);
     try {
+      const userId = currentUser?.owner_id || currentUser?.id || "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+      const supabase = getSupabase();
+      if (supabase) {
+        try {
+          await supabase
+            .from("caixa_status")
+            .upsert({
+              user_id: userId,
+              status: "FECHADO",
+              updated_at: new Date().toISOString()
+            });
+        } catch (err) {
+          console.warn("Erro ao atualizar caixa_status:", err);
+        }
+      }
+      setCaixaDbStatus("FECHADO");
+
       await onCloseRegister(observed, notesInput);
       setClosedSessionSummary(summaryData);
       // Reset inputs
