@@ -5939,12 +5939,46 @@ export default function App() {
           <React.Suspense fallback={<LazyLoader />}>
             <AdminPanel />
           </React.Suspense>
-        ) : (!isRegisterOpenForToday && !isMasterUser) ? (
-          /* HARD BLOCK SCREEN WHEN CASH REGISTER IS CLOSED (Master Admin has unrestricted access) */
-          <ClosedRegisterGate
-            onOpenRegisterClick={() => setShowCashRegisterModal(true)}
-            operatorName={currentUser?.name || currentUser?.username}
-          />
+        ) : (!isMasterUser && (currentUser?.status === "bloqueado" || currentUser?.status_sistema === "bloqueado" || currentUser?.status_assinatura === "bloqueado")) ? (
+  /* ECRÃ DE BLOQUEIO / PAGAMENTO PARA UTILIZADORES SUSPENSOS OU TRIAL EXPIRADO */
+  <div className="min-h-[85vh] flex items-center justify-center p-4">
+    <div className="max-w-md w-full bg-slate-900/90 border border-rose-500/40 rounded-2xl p-6 text-center shadow-2xl backdrop-blur-md">
+      <div className="w-16 h-16 bg-rose-500/10 text-rose-500 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl font-bold border border-rose-500/20">
+        🔒
+      </div>
+      <h2 className="text-xl font-bold text-white mb-2 uppercase tracking-wide">Acesso Suspenso</h2>
+      <p className="text-slate-300 text-sm mb-6 leading-relaxed">
+        A sua assinatura ou período de testes expirou. Para regularizar o seu acesso e continuar a utilizar o sistema, efetue o pagamento da mensalidade.
+      </p>
+
+      <div className="space-y-3">
+        <a 
+          href="https://wa.me/5511982417583?text=Olá,%20gostaria%20de%20regularizar%20o%20meu%20acesso%20ao%20sistema" 
+          target="_blank" 
+          rel="noreferrer"
+          className="w-full block py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-900/30 text-sm"
+        >
+          Regularizar via PIX / WhatsApp
+        </a>
+
+        <button
+          onClick={() => {
+            localStorage.clear();
+            window.location.reload();
+          }}
+          className="w-full py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-xl transition-all text-xs"
+        >
+          Sair da Conta
+        </button>
+      </div>
+    </div>
+  </div>
+) : (!isRegisterOpenForToday && !isMasterUser) ? (
+  /* HARD BLOCK SCREEN WHEN CASH REGISTER IS CLOSED */
+  <ClosedRegisterGate
+    onOpenRegisterClick={() => setShowCashRegisterModal(true)}
+    operatorName={currentUser?.name || currentUser?.username}
+  />
         ) : (
           /* REGULAR OPERATIONAL VIEWPORTS CONTENT */
           <>
