@@ -3292,8 +3292,33 @@ ${JSON.stringify(sales, null, 2)}
           status: "fechado",
           data_fechamento: closingDate
         })
-        .eq("empresa_id", UNIFIED_EMPRESA_ID)
+        .or(`empresa_id.eq.${canonicalOwnerId},empresa_id.eq.${UNIFIED_EMPRESA_ID}`)
         .eq("status", "aberto");
+
+      // 1.1 Se tiver ID específico da sessão
+      let p1_id: any = Promise.resolve();
+      if (closingData?.id) {
+        p1_id = supabase
+          .from("sessoes_caixa")
+          .update({
+            status: "fechado",
+            data_fechamento: closingDate
+          })
+          .eq("id", closingData.id);
+      }
+
+      // 1.2 Atualizar caixa_status
+      const p1_status = supabase
+        .from("caixa_status")
+        .upsert({
+          user_id: canonicalOwnerId,
+          status: "FECHADO",
+          updated_at: closingDate
+        });
+
+      // 1.3 Fechar fluxo_caixa
+      const p1_fc1 = supabase.from("fluxo_caixa").update({ status: "fechado", updated_at: closingDate }).eq("status", "aberto");
+      const p1_fc2 = supabase.from("fluxo_caixas").update({ status: "fechado", updated_at: closingDate }).eq("status", "aberto");
 
       // 2. Registrar no historico_caixas
       let p2: any = Promise.resolve();
@@ -3307,8 +3332,11 @@ ${JSON.stringify(sales, null, 2)}
             data_fechamento: closingDate,
             total_vendas: Number(closingData.totalVendas || 0),
             total_despesas: Number(closingData.totalDespesas || 0),
-            saldo_final: Number(closingData.valorFechamentoReal || 0),
-            dados_completos_json: closingData
+            saldo_final: Number(closingData.valorFechamentoReal ?? closingData.saldo_final ?? 0),
+            dados_completos_json: {
+              ...closingData,
+              closed_at: closingDate
+            }
           });
       }
 
@@ -3339,7 +3367,7 @@ ${JSON.stringify(sales, null, 2)}
       const p5 = supabase.from("sales").upsert(createPayload("cash_register_state", canonicalOwnerId));
       const p6 = supabase.from("sales").update({ items: closedState as any, date: nowISO }).eq("client_name", "CASH_REGISTER_SYNCED_STATE");
 
-      await Promise.allSettled([p1, p2, p3, p4, p5, p6]);
+      await Promise.allSettled([p1, p1_id, p1_status, p1_fc1, p1_fc2, p2, p3, p4, p5, p6]);
 
       // Broadcast instant cash register closed across all company devices
       broadcastSyncEvent(canonicalOwnerId, "cash_register_updated", { state: closedState, closed: true });
@@ -3454,6 +3482,27 @@ ${JSON.stringify(sales, null, 2)}
               }
             } catch (hErr) {}
 
+            const openDate = (openSess.data_abertura || "").substring(0, 10);
+            const todayDate = new Date().toISOString().substring(0, 10);
+
+            if (openDate < todayDate) {
+              // Sessão de dia anterior deixada aberta: fechar formalmente no banco
+              supabase.from("sessoes_caixa").update({
+                status: "fechado",
+                data_fechamento: new Date(openSess.data_abertura).toISOString()
+              }).eq("id", openSess.id).then(() => {});
+
+              const closedPast = {
+                id: openSess.id,
+                status: "fechado",
+                valorAbertura: Number(openSess.valor_abertura ?? openSess.valor_inicial ?? 0) || 0,
+                dataAbertura: openSess.data_abertura,
+                dataFechamento: new Date(openSess.data_abertura).toISOString(),
+                operador: openSess.operador || "Operador"
+              };
+              return res.json({ success: true, data: { currentSession: null, history: [closedPast, ...histItems] }, date: new Date().toISOString() });
+            }
+
             const reconstructedState = {
               currentSession: {
                 id: openSess.id || openSess.session_id || `session_${Date.now()}`,
@@ -3471,52 +3520,32 @@ ${JSON.stringify(sales, null, 2)}
         console.warn("[/api/cash-register GET] sessoes_caixa check notice:", sessErr);
       }
 
-      // 1. If latest candidate is closed (or null currentSession), respect it!
-      if (latestCandidate) {
-        if (!latestCandidate.state.currentSession || latestCandidate.state.currentSession.status !== "aberto") {
-          return res.json({ success: true, data: latestCandidate.state, date: latestCandidate.date });
-        } else {
-          // Verify if openCandidate is from today (prevent multi-day stale open sessions)
-          const openDate = latestCandidate.state.currentSession.dataAbertura;
-          const isFromPastDay = openDate && (new Date().toISOString().split("T")[0] !== openDate.split("T")[0]);
-          if (!isFromPastDay) {
-            return res.json({ success: true, data: latestCandidate.state, date: latestCandidate.date });
-          }
-        }
-      }
-
-      // 2. Auxiliary table check: fluxo_caixa for today
+      // Se a sessão mais recente está fechada ou não existe sessão aberta para hoje, retornar caixa fechado
+      let safeHist: any[] = [];
       try {
-        const todayStr = new Date().toISOString().split("T")[0];
-        const { data: fcRow } = await supabase
-          .from("fluxo_caixa")
+        const { data: hRows } = await supabase
+          .from("historico_caixas")
           .select("*")
-          .in("user_id", companyUserIds)
-          .eq("data", todayStr)
-          .eq("status", "aberto")
-          .maybeSingle();
-
-        if (fcRow) {
-          const reconstructedState = {
-            currentSession: {
-              id: fcRow.session_id || `session_fc_${todayStr}`,
-              status: "aberto",
-              valorAbertura: Number(fcRow.valor_abertura) || 0,
-              dataAbertura: fcRow.data_abertura || new Date().toISOString(),
-              operador: fcRow.operador || "Operador"
-            },
-            history: (latestCandidate?.state?.history) || []
-          };
-          return res.json({ success: true, data: reconstructedState, date: fcRow.updated_at });
+          .order("data_fechamento", { ascending: false })
+          .limit(50);
+        if (hRows && hRows.length > 0) {
+          safeHist = hRows.map((h: any) => h.dados_completos_json || {
+            id: h.id,
+            status: "fechado",
+            dataFechamento: h.data_fechamento,
+            valorFechamentoReal: Number(h.saldo_final) || 0
+          });
         }
-      } catch (fcErr) {
-        // Continue
-      }
+      } catch (e) {}
 
-      // 3. If no open session anywhere, return the most recent candidate state
-      if (latestCandidate) {
-        return res.json({ success: true, data: latestCandidate.state, date: latestCandidate.date });
-      }
+      return res.json({
+        success: true,
+        data: {
+          currentSession: null,
+          history: safeHist.length > 0 ? safeHist : (latestCandidate?.state?.history || [])
+        },
+        date: new Date().toISOString()
+      });
 
       return res.json({ success: true, data: null });
     } catch (err: any) {

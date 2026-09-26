@@ -3271,6 +3271,24 @@ export async function dbUpdateProductStock(ownerId: string, productId: string, n
   }
 }
 
+export function getLocalDateString(isoOrDate?: string | Date): string {
+  if (!isoOrDate) return "";
+  try {
+    const clean = typeof isoOrDate === "string" ? isoOrDate.replace(/['"]/g, "").trim() : isoOrDate;
+    if (typeof clean === "string" && /^\d{4}-\d{2}-\d{2}$/.test(clean)) {
+      return clean;
+    }
+    const d = typeof clean === "string" ? new Date(clean) : clean;
+    if (isNaN(d.getTime())) return "";
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  } catch {
+    return "";
+  }
+}
+
 export function isCashSessionActiveOrOpen(row: any): boolean {
   if (!row || typeof row !== "object") return false;
 
@@ -3287,7 +3305,10 @@ export function isCashSessionActiveOrOpen(row: any): boolean {
     statusRaw === "finalizada" ||
     statusRaw === "inativo" ||
     statusRaw === "cancelado" ||
-    statusRaw === "cancelada"
+    statusRaw === "cancelada" ||
+    !!row.data_fechamento ||
+    !!row.fechado_em ||
+    !!row.closed_at
   ) {
     return false;
   }
@@ -3302,22 +3323,11 @@ export function isCashSessionActiveOrOpen(row: any): boolean {
     statusRaw === "em_aberto" ||
     statusRaw === "em aberto" ||
     statusRaw === "abertos" ||
-    statusRaw.includes("abert") ||
-    statusRaw.includes("ativ")
+    row.aberto === true ||
+    row.ativo === true ||
+    row.is_open === true
   ) {
     return true;
-  }
-
-  // Explicit boolean indicators
-  if (row.aberto === true || row.ativo === true || row.is_open === true) {
-    return true;
-  }
-
-  // If no closing date is present, and there is an opening date or opening value or id, it is an open session
-  if (!row.data_fechamento && !row.fechado_em && !row.closed_at) {
-    if (row.data_abertura || row.valor_abertura !== undefined || row.id || row.created_at) {
-      return true;
-    }
   }
 
   return false;
@@ -3380,196 +3390,108 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
   if (supabase) {
     try {
       const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+      const companyId = effectiveUserId || UNIFIED_EMPRESA_ID;
+
+      // Fetch history items first from public.historico_caixas
+      let historyItems: CashRegisterSession[] = [];
+      try {
+        const { data: histRows } = await supabase
+          .from("historico_caixas")
+          .select("*")
+          .order("data_fechamento", { ascending: false })
+          .limit(50);
+        if (histRows && histRows.length > 0) {
+          historyItems = histRows.map((h: any) => {
+            if (h.dados_completos_json && typeof h.dados_completos_json === "object") {
+              return {
+                id: h.id || h.dados_completos_json.id,
+                ...h.dados_completos_json
+              };
+            }
+            return {
+              id: h.id,
+              status: "fechado" as const,
+              valorAbertura: 0,
+              dataAbertura: h.data_fechamento,
+              operador: "Operador",
+              dataFechamento: h.data_fechamento,
+              valorFechamentoReal: Number(h.saldo_final) || 0,
+              valorFechamentoEsperado: Number(h.saldo_final) || 0,
+              observacoes: ""
+            };
+          });
+        }
+      } catch (hErr) {}
+
+      // Query active open session from sessoes_caixa for this company
       const { data: openSessions, error: sessErr } = await supabase
         .from("sessoes_caixa")
         .select("*")
         .eq("status", "aberto")
-        .eq("empresa_id", UNIFIED_EMPRESA_ID)
+        .or(`empresa_id.eq.${companyId},empresa_id.eq.${UNIFIED_EMPRESA_ID}`)
         .order("data_abertura", { ascending: false })
-        .limit(10);
+        .limit(5);
 
       if (!sessErr && openSessions && openSessions.length > 0) {
         const sessRow = openSessions.find((s: any) => isCashSessionActiveOrOpen(s));
         if (sessRow) {
-          // Fetch history from public.historico_caixas
-          let historyItems: CashRegisterSession[] = [];
-          try {
-            const { data: histRows } = await supabase
-              .from("historico_caixas")
-              .select("*")
-              .order("data_fechamento", { ascending: false })
-              .limit(50);
-            if (histRows && histRows.length > 0) {
-              historyItems = histRows.map((h: any) => {
-                if (h.dados_completos_json && typeof h.dados_completos_json === "object") {
-                  return {
-                    id: h.id || h.dados_completos_json.id,
-                    ...h.dados_completos_json
-                  };
-                }
-                return {
-                  id: h.id,
-                  status: "fechado",
-                  valorAbertura: 0,
-                  dataAbertura: h.data_fechamento,
-                  operador: "Operador",
-                  dataFechamento: h.data_fechamento,
-                  valorFechamentoReal: Number(h.saldo_final) || 0,
-                  valorFechamentoEsperado: Number(h.saldo_final) || 0,
-                  observacoes: ""
-                };
-              });
-            }
-          } catch (hErr) {}
+          const openDate = getLocalDateString(sessRow.data_abertura);
+          const todayDate = getLocalDateString(new Date());
 
-          const openState: CashRegisterState = {
-            currentSession: {
-              id: sessRow.id || sessRow.session_id || `session_${Date.now()}`,
-              status: "aberto",
-              valorAbertura: Number(sessRow.valor_abertura ?? sessRow.valor_inicial ?? sessRow.fundo_troco) || 0,
-              dataAbertura: sessRow.data_abertura || new Date().toISOString(),
-              operador: sessRow.operador || sessRow.usuario || "Operador"
-            },
-            history: historyItems
-          };
-          return openState;
+          if (openDate && openDate < todayDate) {
+            // Sessão do dia anterior deixada aberta: fechar formalmente no banco e registrar no histórico
+            const pastClosedDate = new Date(sessRow.data_abertura).toISOString();
+            supabase
+              .from("sessoes_caixa")
+              .update({
+                status: "fechado",
+                data_fechamento: pastClosedDate
+              })
+              .eq("id", sessRow.id)
+              .then(() => {}, () => {});
+
+            const closedPast: CashRegisterSession = {
+              id: sessRow.id,
+              status: "fechado",
+              valorAbertura: Number(sessRow.valor_abertura ?? sessRow.valor_inicial ?? 0),
+              dataAbertura: sessRow.data_abertura,
+              dataFechamento: pastClosedDate,
+              operador: sessRow.operador || "Operador",
+              observacoes: "Fechamento automático de sessão expirada do dia anterior"
+            };
+
+            return {
+              currentSession: null,
+              history: [closedPast, ...historyItems.filter(h => h.id !== closedPast.id)]
+            };
+          } else if (openDate === todayDate) {
+            // Sessão de hoje ativa e válida para o dia inteiro
+            const openState: CashRegisterState = {
+              currentSession: {
+                id: sessRow.id || sessRow.session_id || `session_${Date.now()}`,
+                status: "aberto",
+                valorAbertura: Number(sessRow.valor_abertura ?? sessRow.valor_inicial ?? sessRow.fundo_troco) || 0,
+                dataAbertura: sessRow.data_abertura || new Date().toISOString(),
+                operador: sessRow.operador || sessRow.usuario || "Operador"
+              },
+              history: historyItems
+            };
+            return openState;
+          }
         }
       }
+
+      // Se não há sessão aberta na tabela oficial sessoes_caixa, o caixa está fechado
+      return {
+        currentSession: null,
+        history: historyItems
+      };
     } catch (sessEx) {
       console.warn("Notice: sessoes_caixa query in dbGetCashRegister:", sessEx);
     }
   }
 
-  // 2. Fallback: direct Supabase client sales table
-  if (!supabase) return null;
-
-  try {
-    let { data, error } = await supabase
-      .from("sales")
-      .select("items")
-      .eq("id", `cash_register_state_${effectiveUserId}`)
-      .maybeSingle();
-
-    if (!data?.items) {
-      const { data: legacyData, error: legacyErr } = await supabase
-        .from("sales")
-        .select("items")
-        .eq("id", "cash_register_state")
-        .eq("user_id", effectiveUserId)
-        .maybeSingle();
-      if (legacyData?.items) {
-        data = legacyData;
-        error = null;
-      } else if (!error && legacyErr) {
-        error = legacyErr;
-      }
-    }
-
-    // 3. Fallback attempt: if not found with userId, try with current auth UID if different
-    if ((!data || !data.items) && supabase.auth) {
-      try {
-        const { data: authData } = await supabase.auth.getUser();
-        if (authData?.user?.id && authData.user.id !== userId) {
-          const authId = authData.user.id;
-          const { data: authScopedData } = await supabase
-            .from("sales")
-            .select("items")
-            .eq("id", `cash_register_state_${authId}`)
-            .maybeSingle();
-          if (authScopedData?.items) {
-            data = authScopedData;
-            error = null;
-          } else {
-            const { data: authLegacyData } = await supabase
-              .from("sales")
-              .select("items")
-              .eq("id", "cash_register_state")
-              .eq("user_id", authId)
-              .maybeSingle();
-            if (authLegacyData?.items) {
-              data = authLegacyData;
-              error = null;
-            }
-          }
-        }
-      } catch (authErr) {
-        // ignore fallback error
-      }
-    }
-
-    if (error) {
-      console.warn("Notice: could not fetch remote cash register state from Supabase:", error.message || error);
-      return null;
-    }
-
-    // 4. Team-wide active check: If no open session found yet, check if ANY user/attendant in the company has an open session
-    const currentActiveSession = (data?.items as any)?.currentSession;
-    if (!currentActiveSession || currentActiveSession.status !== "aberto") {
-      try {
-        const { data: teamRows } = await supabase
-          .from("sales")
-          .select("items")
-          .eq("client_name", "CASH_REGISTER_SYNCED_STATE")
-          .order("date", { ascending: false })
-          .limit(10);
-
-        if (teamRows && teamRows.length > 0) {
-          const openRow = teamRows.find((r: any) => r.items?.currentSession?.status === "aberto");
-          if (openRow && openRow.items) {
-            data = openRow;
-          }
-        }
-      } catch (teamErr) {
-        // Ignore team check error
-      }
-    }
-
-    // 5. Auxiliary table check: if still no open session, verify if fluxo_caixa has an open session today
-    const activeSessionNow = (data?.items as any)?.currentSession;
-    if (!activeSessionNow || activeSessionNow.status !== "aberto") {
-      const tableNames = ["fluxo_caixa", "fluxo_de_caixa", "fluxo_caixas", "fluxo_de_caixas"];
-      for (const tableName of tableNames) {
-        try {
-          const { data: fluxoRows } = await supabase
-            .from(tableName)
-            .select("*")
-            .eq("status", "aberto")
-            .order("updated_at", { ascending: false })
-            .limit(1);
-
-          if (fluxoRows && fluxoRows.length > 0) {
-            const row = fluxoRows[0];
-            const reconstructedState: CashRegisterState = {
-              currentSession: {
-                id: row.session_id || `session_${row.data || "hoje"}`,
-                status: "aberto",
-                valorAbertura: Number(row.valor_abertura) || 0,
-                dataAbertura: row.data_abertura || row.created_at || new Date().toISOString(),
-                operador: row.operador || "Operador"
-              },
-              history: (data?.items as any)?.history || []
-            };
-            return reconstructedState;
-          }
-        } catch (fluxoErr) {
-          // Continue to next table
-        }
-      }
-    }
-
-    if (!data || !data.items) {
-      return null;
-    }
-
-    let parsed = data.items;
-    if (typeof parsed === "string") {
-      try { parsed = JSON.parse(parsed); } catch (e) {}
-    }
-    return parsed as unknown as CashRegisterState;
-  } catch (err) {
-    console.warn("Notice: get cash register state exception:", err);
-    return null;
-  }
+  return { currentSession: null, history: [] };
 }
 
 export async function dbSaveCashRegister(userId: string, state: CashRegisterState): Promise<boolean> {
@@ -4078,18 +4000,46 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId?: stri
     console.warn("[dbCloseGlobalCashRegister] /api/cash-register/close fallback notice:", apiErr);
   }
 
-  // 1. Primary: update public.sessoes_caixa using empresa_id
+  // 1. Primary: update public.sessoes_caixa using sessionId and empresa_id
   if (supabase) {
+    const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+    const closingDate = safeClosingData.dataFechamento || safeClosingData.closed_at || nowISO;
+
+    // 1.1 If sessionId is available, update that specific session record
+    if (sessionId) {
+      try {
+        await supabase
+          .from("sessoes_caixa")
+          .update({
+            status: "fechado",
+            data_fechamento: closingDate
+          })
+          .eq("id", sessionId);
+      } catch (e) {}
+    }
+
+    // 1.2 Close all open sessions for this company or unified ID
     try {
       await supabase
         .from("sessoes_caixa")
         .update({
           status: "fechado",
-          data_fechamento: safeClosingData.dataFechamento || nowISO
+          data_fechamento: closingDate
         })
-        .eq("empresa_id", "62f892b2-3855-4ae9-8b2d-42d4b6223815")
+        .or(`empresa_id.eq.${effectiveUserId},empresa_id.eq.${UNIFIED_EMPRESA_ID}`)
         .eq("status", "aberto");
       console.log("[dbCloseGlobalCashRegister] Successfully marked sessoes_caixa as fechado");
+    } catch (e) {}
+
+    // 1.3 Update caixa_status table to FECHADO
+    try {
+      await supabase
+        .from("caixa_status")
+        .upsert({
+          user_id: effectiveUserId,
+          status: "FECHADO",
+          updated_at: closingDate
+        });
     } catch (e) {}
 
     // 2. Primary: record in public.historico_caixas
@@ -4099,20 +4049,21 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId?: stri
         .from("historico_caixas")
         .upsert({
           ...(isUUID ? { id: sessionId } : {}),
-          usuario_id: "62f892b2-3855-4ae9-8b2d-42d4b6223815",
-          data_fechamento: safeClosingData.dataFechamento || nowISO,
+          usuario_id: UNIFIED_EMPRESA_ID,
+          data_fechamento: closingDate,
           total_vendas: Number(safeClosingData.totalVendas || 0),
           total_despesas: Number(safeClosingData.totalDespesas || 0),
-          saldo_final: Number(safeClosingData.valorFechamentoReal || 0),
+          saldo_final: Number(safeClosingData.valorFechamentoReal ?? safeClosingData.saldo_final ?? 0),
           dados_completos_json: {
             id: sessionId,
             status: "fechado",
             valorAbertura: safeClosingData.valorAbertura || 0,
             dataAbertura: safeClosingData.dataAbertura || nowISO,
             operador: safeClosingData.operador || "Operador",
-            dataFechamento: safeClosingData.dataFechamento || nowISO,
-            valorFechamentoReal: safeClosingData.valorFechamentoReal || 0,
-            valorFechamentoEsperado: safeClosingData.valorFechamentoEsperado || 0,
+            dataFechamento: closingDate,
+            closed_at: closingDate,
+            valorFechamentoReal: Number(safeClosingData.valorFechamentoReal ?? safeClosingData.saldo_final ?? 0),
+            valorFechamentoEsperado: Number(safeClosingData.valorFechamentoEsperado ?? 0),
             observacoes: safeClosingData.observacoes || ""
           }
         });
@@ -4121,24 +4072,35 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId?: stri
 
     const payload = {
       status: "fechado",
-      valor_fechamento_esperado: safeClosingData.valorFechamentoEsperado || 0,
-      valor_fechamento_real: safeClosingData.valorFechamentoReal || 0,
-      data_fechamento: safeClosingData.dataFechamento || nowISO,
-      observacoes: safeClosingData.observacoes || "",
-      updated_at: nowISO
+      data_fechamento: closingDate,
+      updated_at: closingDate
     };
 
-    const tableNames = ["fluxo_caixa", "fluxo_de_caixa", "fluxo_caixas", "fluxo_de_caixas"];
+    const tableNames = ["fluxo_caixa", "fluxo_caixas"];
     for (const tableName of tableNames) {
       try {
         await supabase
           .from(tableName)
           .update(payload)
-          .or(`user_id.eq.${effectiveUserId},company_id.eq.${effectiveUserId}`)
           .eq("status", "aberto");
       } catch (err) {}
     }
   }
+
+  // Clear localStorage keys
+  try {
+    localStorage.removeItem("NUCLEO_CASH_REGISTER_ACTIVE");
+    localStorage.removeItem("NUCLEO_LAST_CASH_REGISTER_SYNCED_DATE");
+    const saved = localStorage.getItem("NUCLEO_CASH_REGISTER");
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      parsed.currentSession = null;
+      if (safeClosingData) {
+        parsed.history = [safeClosingData, ...(parsed.history || []).filter((h: any) => h.id !== safeClosingData.id)];
+      }
+      localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(parsed));
+    }
+  } catch (e) {}
 
   // 3. Realtime notification broadcast
   notifyRealtimeSync(effectiveUserId, "cash_register_updated", { closed: true, sessionId });
