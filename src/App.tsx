@@ -5799,7 +5799,7 @@ export default function App() {
           <React.Suspense fallback={<LazyLoader />}>
             <AdminPanel />
           </React.Suspense>
-        ) : !isRegisterOpenForToday ? (
+        ) : false && !isRegisterOpenForToday ? (
           /* HARD BLOCK SCREEN WHEN CASH REGISTER IS CLOSED */
           <ClosedRegisterGate
             onOpenRegisterClick={() => setShowCashRegisterModal(true)}
