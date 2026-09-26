@@ -228,16 +228,9 @@ export default function App() {
 
   const isMasterUser = currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com" || currentUser?.role === "master";
 
-  const forceLogoutBlocked = (reason = "Acesso bloqueado pelo administrador") => {
-    localStorage.removeItem("NUCLEO_CURRENT_USER");
-    sessionStorage.clear();
-    setCurrentUser(null);
-    if (isSupabaseConfigured()) {
-      dbSignOut().catch(() => {});
-    }
-    alert(reason);
-    window.location.replace("/");
-  };
+  const forceLogoutBlocked = (_reason = "") => {
+  // Não desloga o usuário para permitir que ele veja a tela de pagamento e regularização
+};
 
   // Subscription & 15-day Trial logic
   const [isSubscribing, setIsSubscribing] = useState(false);
