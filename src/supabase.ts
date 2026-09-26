@@ -321,8 +321,10 @@ export async function dbVerifyUserSession(userId: string): Promise<User | null> 
 
     console.log("[dbVerifyUserSession] SUPABASE FETCH SUCCESSFUL. User:", data.email, "Raw columns:", JSON.stringify(data));
 
-    const isAdmin = !!data.is_admin || data.role === "admin" || data.role === "administrador" || data.cargo === "administrador" || !data.owner_id || data.owner_id === data.id || data.email === "vendas.impactodigital2@gmail.com" || data.email === "sistemavendaadm@gmail.com" || data.email === "sistemadevendaadm@gmail.com";
-    const statusVal = (data.status || data.status_assinatura || "trial").toString().trim();
+    const isMasterEmail = (data.email || "").toString().toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+    const isAdmin = isMasterEmail || !!data.is_admin || data.role === "admin" || data.role === "administrador" || data.cargo === "administrador" || !data.owner_id || data.owner_id === data.id || data.email === "sistemavendaadm@gmail.com" || data.email === "sistemadevendaadm@gmail.com";
+    const statusVal = isMasterEmail ? "ativo" : (data.status || data.status_assinatura || "trial").toString().trim();
+    const statusSistemaVal = isMasterEmail ? "ativo" : (data.status_sistema || data.status || statusVal).toString().trim();
 
     const mappedUser: User = {
       id: data.id,
@@ -330,12 +332,14 @@ export async function dbVerifyUserSession(userId: string): Promise<User | null> 
       username: data.username || data.usuario || "",
       email: data.email || "",
       password: data.password || data.senha || "",
-      owner_id: data.owner_id || null,
+      owner_id: isMasterEmail ? data.id : (data.owner_id || null),
       created_at: data.created_at || null,
-      status_assinatura: statusVal,
-      status: statusVal,
+      status_assinatura: isMasterEmail ? "ativo" : (data.status_assinatura || statusVal),
+      status: isMasterEmail ? "ativo" : statusVal,
+      status_sistema: statusSistemaVal,
       is_admin: isAdmin,
-      role: data.role || data.cargo || data.tipo || ""
+      role: isMasterEmail ? "master" : (data.role || data.cargo || data.tipo || ""),
+      cargo: isMasterEmail ? "master" : (data.cargo || data.role || "")
     };
 
     console.log("[dbVerifyUserSession] Mapped User Object:", JSON.stringify(mappedUser));
@@ -391,8 +395,8 @@ export async function dbLoadSessionUser(): Promise<User | null> {
       let statusAssinatura = "trial";
       let isAdmin = false;
       let userRole = "";
+      let dbUser: any = null;
       try {
-        let dbUser: any = null;
         const { data: exactUser } = await supabase
           .from("users")
           .select("*")
@@ -429,8 +433,9 @@ export async function dbLoadSessionUser(): Promise<User | null> {
           if (dbUser.status_assinatura || dbUser.status) {
             statusAssinatura = (dbUser.status || dbUser.status_assinatura).toString().trim();
           }
-          isAdmin = !!dbUser.is_admin || dbUser.role === "admin" || dbUser.role === "administrador" || dbUser.cargo === "administrador" || !dbUser.owner_id || dbUser.owner_id === dbUser.id || u.email === "vendas.impactodigital2@gmail.com" || u.email === "sistemavendaadm@gmail.com" || u.email === "sistemadevendaadm@gmail.com";
-          userRole = dbUser.role || dbUser.cargo || dbUser.tipo || "";
+          const isMasterEmail = (u.email || "").toString().toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+          isAdmin = isMasterEmail || !!dbUser.is_admin || dbUser.role === "admin" || dbUser.role === "administrador" || dbUser.cargo === "administrador" || !dbUser.owner_id || dbUser.owner_id === dbUser.id || u.email === "sistemavendaadm@gmail.com" || u.email === "sistemadevendaadm@gmail.com";
+          userRole = isMasterEmail ? "master" : (dbUser.role || dbUser.cargo || dbUser.tipo || "");
         } else {
           // Record doesn't exist yet in public.users, create it with u.id to prevent duplication
           try {
@@ -441,6 +446,7 @@ export async function dbLoadSessionUser(): Promise<User | null> {
               email: u.email,
               owner_id: u.id,
               status_assinatura: "trial",
+              status_sistema: "ativo",
               created_at: createdAt || new Date().toISOString()
             });
           } catch (upsertErr) {
@@ -451,17 +457,20 @@ export async function dbLoadSessionUser(): Promise<User | null> {
         console.warn("Could not query existing user record in users table during session load:", err);
       }
 
+      const isMasterEmail = (u.email || "").toString().toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
       const mappedUser: User = {
         id: u.id,
         name,
         username,
         email: u.email,
-        owner_id: realOwnerId,
+        owner_id: isMasterEmail ? u.id : realOwnerId,
         created_at: createdAt,
-        status_assinatura: statusAssinatura,
-        status: statusAssinatura,
-        is_admin: isAdmin,
-        role: userRole
+        status_assinatura: isMasterEmail ? "ativo" : statusAssinatura,
+        status: isMasterEmail ? "ativo" : statusAssinatura,
+        status_sistema: isMasterEmail ? "ativo" : ((dbUser as any)?.status_sistema || statusAssinatura),
+        is_admin: isMasterEmail ? true : isAdmin,
+        role: isMasterEmail ? "master" : userRole,
+        cargo: isMasterEmail ? "master" : (dbUser?.cargo || userRole)
       };
 
       console.log("[dbLoadSessionUser] Mapped User Object with Auth ID:", JSON.stringify(mappedUser));
@@ -528,6 +537,27 @@ export async function dbGetUsers(loggedInUserId?: string): Promise<User[] | null
   if (!supabase) return null;
   
   try {
+    const mapDbUser = (d: any) => {
+      const isMasterEmail = (d.email || "").toString().toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+      const statusVal = isMasterEmail ? "ativo" : (d.status || d.status_assinatura || "trial").toString().trim();
+      return {
+        id: d.id,
+        name: d.name || d.nome || "",
+        username: d.username || d.usuario || "",
+        email: d.email || "",
+        password: d.password || d.senha || "",
+        owner_id: isMasterEmail ? d.id : (d.owner_id || null),
+        role: isMasterEmail ? "master" : (d.role || d.cargo || d.tipo || ""),
+        cargo: isMasterEmail ? "master" : (d.cargo || d.role || ""),
+        created_at: d.created_at || null,
+        data_expiracao: d.data_expiracao || d.trial_end || null,
+        status: isMasterEmail ? "ativo" : statusVal,
+        status_assinatura: isMasterEmail ? "ativo" : (d.status_assinatura || statusVal),
+        status_sistema: isMasterEmail ? "ativo" : (d.status_sistema || d.status || statusVal),
+        is_admin: isMasterEmail ? true : (d.is_admin ?? (d.role === "admin" || d.role === "administrador" || !d.owner_id || d.owner_id === d.id || d.email === "sistemavendaadm@gmail.com" || d.email === "sistemadevendaadm@gmail.com"))
+      };
+    };
+
     if (loggedInUserId) {
       try {
         const { data, error } = await supabase
@@ -536,19 +566,7 @@ export async function dbGetUsers(loggedInUserId?: string): Promise<User[] | null
           .or(`owner_id.eq.${loggedInUserId},id.eq.${loggedInUserId}`);
         
         if (!error && data) {
-          return data.map((d: any) => ({
-            id: d.id,
-            name: d.name || d.nome || "",
-            username: d.username || d.usuario || "",
-            email: d.email || "",
-            password: d.password || d.senha || "",
-            owner_id: d.owner_id || null,
-            role: d.role || d.cargo || d.tipo || "",
-            created_at: d.created_at || null,
-            data_expiracao: d.data_expiracao || d.trial_end || null,
-            status_assinatura: d.status_assinatura || "trial",
-            is_admin: d.is_admin ?? (d.role === "admin" || d.role === "administrador" || !d.owner_id || d.owner_id === d.id || d.email === "vendas.impactodigital2@gmail.com" || d.email === "sistemavendaadm@gmail.com" || d.email === "sistemadevendaadm@gmail.com")
-          }));
+          return data.map(mapDbUser);
         } else {
           console.warn("Querying users with owner_id filter failed, trying simple select * schema fallback:", error);
         }
@@ -566,19 +584,7 @@ export async function dbGetUsers(loggedInUserId?: string): Promise<User[] | null
     
     if (!data) return [];
  
-    return data.map((d: any) => ({
-      id: d.id,
-      name: d.name || d.nome || "",
-      username: d.username || d.usuario || "",
-      email: d.email || "",
-      password: d.password || d.senha || "",
-      owner_id: d.owner_id || null,
-      role: d.role || d.cargo || d.tipo || "",
-      created_at: d.created_at || null,
-      data_expiracao: d.data_expiracao || d.trial_end || null,
-      status_assinatura: d.status_assinatura || "trial",
-      is_admin: d.is_admin ?? (d.role === "admin" || d.role === "administrador" || !d.owner_id || d.owner_id === d.id || d.email === "vendas.impactodigital2@gmail.com" || d.email === "sistemavendaadm@gmail.com" || d.email === "sistemadevendaadm@gmail.com")
-    }));
+    return data.map(mapDbUser);
   } catch (err) {
     console.error("Supabase user query exception:", err);
     return null;

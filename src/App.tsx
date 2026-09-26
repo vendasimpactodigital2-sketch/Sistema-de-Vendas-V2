@@ -196,12 +196,48 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     try {
       const saved = localStorage.getItem("NUCLEO_CURRENT_USER");
-      return saved ? JSON.parse(saved) : null;
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const isMaster = parsed?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+        if (isMaster) {
+          return {
+            ...parsed,
+            role: "master",
+            cargo: "master",
+            is_admin: true,
+            status: "ativo",
+            status_sistema: "ativo",
+            status_assinatura: "ativo"
+          };
+        }
+        const s = (parsed.status || "").toLowerCase().trim();
+        const ss = (parsed.status_sistema || "").toLowerCase().trim();
+        const sa = (parsed.status_assinatura || "").toLowerCase().trim();
+        if (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado") {
+          localStorage.removeItem("NUCLEO_CURRENT_USER");
+          return null;
+        }
+        return parsed;
+      }
+      return null;
     } catch (err) {
       console.warn("NUCLEO_CURRENT_USER parse failed", err);
       return null;
     }
   });
+
+  const isMasterUser = currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com" || currentUser?.role === "master";
+
+  const forceLogoutBlocked = (reason = "Acesso bloqueado pelo administrador") => {
+    localStorage.removeItem("NUCLEO_CURRENT_USER");
+    sessionStorage.clear();
+    setCurrentUser(null);
+    if (isSupabaseConfigured()) {
+      dbSignOut().catch(() => {});
+    }
+    alert(reason);
+    window.location.replace("/");
+  };
 
   // Subscription & 15-day Trial logic
   const [isSubscribing, setIsSubscribing] = useState(false);
@@ -210,8 +246,7 @@ export default function App() {
     if (!currentUser) return false;
     
     // Master admin is NEVER blocked
-    const isMasterAdmin = currentUser.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
-    if (isMasterAdmin) {
+    if (isMasterUser) {
       return false;
     }
 
@@ -338,7 +373,7 @@ export default function App() {
   const [adminUnlockSuccessCallback, setAdminUnlockSuccessCallback] = useState<{ fn: () => void } | null>(null);
   const [adminUnlockMessage, setAdminUnlockMessage] = useState("");
 
-  const isAttendant = currentUser && (
+  const isAttendant = !isMasterUser && currentUser && (
     currentUser.role === "atendente" ||
     currentUser.role === "seller" ||
     (currentUser.owner_id && currentUser.owner_id !== currentUser.id && currentUser.role !== "administrador" && !currentUser.is_admin)
@@ -618,11 +653,19 @@ export default function App() {
         try {
           const { data: userData } = await client
             .from('users')
-            .select('status, status_assinatura')
+            .select('status, status_sistema, status_assinatura')
             .eq('id', currentUser.id)
             .maybeSingle();
           if (userData) {
             dbStatus = (userData.status || userData.status_assinatura || "").toString().trim();
+            const s = (userData.status || "").toString().trim().toLowerCase();
+            const ss = ((userData as any).status_sistema || "").toString().trim().toLowerCase();
+            const sa = ((userData as any).status_assinatura || "").toString().trim().toLowerCase();
+            if (!isMasterUser && (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked")) {
+              console.warn("[Realtime Check] Usuário com status bloqueado detectado no Supabase. Deslogando...");
+              forceLogoutBlocked("Acesso bloqueado pelo administrador");
+              return;
+            }
           }
         } catch (e) {}
 
@@ -697,7 +740,20 @@ export default function App() {
         },
         (payload: any) => {
           console.log("[Supabase Realtime App] Alteração detectada diretamente na tabela 'users':", payload.new);
-          const newStatus = (payload.new?.status || payload.new?.status_assinatura || "").toString().trim().toLowerCase();
+          const u = payload.new;
+          if (!u) return;
+
+          const s = (u.status || "").toString().trim().toLowerCase();
+          const ss = ((u as any).status_sistema || "").toString().trim().toLowerCase();
+          const sa = ((u as any).status_assinatura || "").toString().trim().toLowerCase();
+
+          if (!isMasterUser && (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked")) {
+            console.warn("[Realtime Users] Bloqueio forçado detectado no Supabase. Deslogando...");
+            forceLogoutBlocked("Acesso bloqueado pelo administrador");
+            return;
+          }
+
+          const newStatus = (u.status || u.status_assinatura || "").toString().trim().toLowerCase();
           if (newStatus) {
             const isNowAtivo = newStatus === "ativo" || newStatus === "active";
             setCurrentUser(prev => {
@@ -705,7 +761,8 @@ export default function App() {
               const updated = {
                 ...prev,
                 status: isNowAtivo ? "ativo" : newStatus,
-                status_assinatura: isNowAtivo ? "ativo" : newStatus
+                status_assinatura: isNowAtivo ? "ativo" : newStatus,
+                status_sistema: isNowAtivo ? "ativo" : newStatus
               };
               try {
                 localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(updated));
@@ -730,6 +787,16 @@ export default function App() {
             (currentUser.email && u.email && String(u.email).toLowerCase().trim() === String(currentUser.email).toLowerCase().trim());
           if (!isMe) return;
 
+          const s = (u.status || "").toString().trim().toLowerCase();
+          const ss = ((u as any).status_sistema || "").toString().trim().toLowerCase();
+          const sa = ((u as any).status_assinatura || "").toString().trim().toLowerCase();
+
+          if (!isMasterUser && (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked")) {
+            console.warn("[Realtime Users Broad] Bloqueio forçado detectado no Supabase. Deslogando...");
+            forceLogoutBlocked("Acesso bloqueado pelo administrador");
+            return;
+          }
+
           const newStatus = (u.status || u.status_assinatura || "").toString().trim().toLowerCase();
           if (newStatus) {
             const isNowAtivo = newStatus === "ativo" || newStatus === "active";
@@ -738,7 +805,8 @@ export default function App() {
               const updated = {
                 ...prev,
                 status: isNowAtivo ? "ativo" : newStatus,
-                status_assinatura: isNowAtivo ? "ativo" : newStatus
+                status_assinatura: isNowAtivo ? "ativo" : newStatus,
+                status_sistema: isNowAtivo ? "ativo" : newStatus
               };
               try {
                 localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(updated));
@@ -779,6 +847,17 @@ export default function App() {
           if (!isMe) return;
 
           console.log("[Supabase Realtime App] Alteração detectada diretamente na tabela 'profiles':", p);
+
+          const s = (p.status || "").toString().trim().toLowerCase();
+          const ss = ((p as any).status_sistema || "").toString().trim().toLowerCase();
+          const sa = (p.status_assinatura || "").toString().trim().toLowerCase();
+
+          if (!isMasterUser && (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked")) {
+            console.warn("[Realtime Profiles] Bloqueio forçado detectado em profiles. Deslogando...");
+            forceLogoutBlocked("Acesso bloqueado pelo administrador");
+            return;
+          }
+
           const newStatus = (p.status || p.status_assinatura || "").toString().trim();
           const newPlan = (p.plano || p.plan || "").toString().trim();
           const newTrialEnd = p.trial_end || p.data_expiracao || null;
@@ -1181,7 +1260,7 @@ export default function App() {
 
     // 3. Conexão Realtime Multi-dispositivo via canal oficial 'cash-register-sync'
     const channel = supabase
-      .channel(`cash-register-sync-${Date.now()}`)
+      .channel("cash-register-sync")
       .on(
         "postgres_changes",
         {
@@ -1757,6 +1836,22 @@ export default function App() {
         }
 
         if (sessionUser) {
+          const isMaster = sessionUser.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+          if (!isMaster) {
+            const s = (sessionUser.status || "").toLowerCase().trim();
+            const ss = ((sessionUser as any).status_sistema || "").toLowerCase().trim();
+            const sa = ((sessionUser as any).status_assinatura || "").toLowerCase().trim();
+            if (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked") {
+              console.warn("[checkSession] Usuário bloqueado no Supabase. Forçando logout...");
+              forceLogoutBlocked("Acesso bloqueado pelo administrador");
+              return;
+            }
+          } else {
+            sessionUser.role = "master";
+            sessionUser.cargo = "master";
+            sessionUser.is_admin = true;
+          }
+
           setCurrentUser(sessionUser);
           localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(sessionUser));
           setFilterPeriod("today");
@@ -1779,6 +1874,22 @@ export default function App() {
               if (parsed && parsed.id) {
                 const dbUser = await dbVerifyUserSession(parsed.id);
                 if (dbUser) {
+                  const isMaster = dbUser.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+                  if (!isMaster) {
+                    const s = (dbUser.status || "").toLowerCase().trim();
+                    const ss = ((dbUser as any).status_sistema || "").toLowerCase().trim();
+                    const sa = ((dbUser as any).status_assinatura || "").toLowerCase().trim();
+                    if (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked") {
+                      console.warn("[checkSession Local] Usuário bloqueado no Supabase. Forçando logout...");
+                      forceLogoutBlocked("Acesso bloqueado pelo administrador");
+                      return;
+                    }
+                  } else {
+                    dbUser.role = "master";
+                    dbUser.cargo = "master";
+                    dbUser.is_admin = true;
+                  }
+
                   // User exists in custom database users table (e.g., attendant). Preserve current session.
                   setCurrentUser(dbUser);
                   localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(dbUser));
@@ -5313,7 +5424,7 @@ export default function App() {
       setActiveTab("adminMaster");
       return;
     }
-    if (!isRegisterOpenForToday) {
+    if (!isRegisterOpenForToday && !isMasterUser) {
       setShowCashRegisterModal(true);
       return;
     }
@@ -5395,6 +5506,25 @@ export default function App() {
     return (
       <AuthScreen
         onLoginSuccess={(user) => {
+          const isMaster = user.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+          if (!isMaster) {
+            const s = (user.status || "").toLowerCase().trim();
+            const ss = ((user as any).status_sistema || "").toLowerCase().trim();
+            const sa = ((user as any).status_assinatura || "").toLowerCase().trim();
+            if (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked") {
+              alert("Acesso bloqueado pelo administrador");
+              localStorage.removeItem("NUCLEO_CURRENT_USER");
+              sessionStorage.clear();
+              return;
+            }
+          } else {
+            user.role = "master";
+            user.cargo = "master";
+            user.is_admin = true;
+            user.status = "ativo";
+            user.status_sistema = "ativo";
+            user.status_assinatura = "ativo";
+          }
           setCurrentUser(user);
           localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(user));
           setFilterPeriod("today");
@@ -5463,9 +5593,15 @@ export default function App() {
   };
 
   // EXPLICIT FRONTEND SUBSCRIPTION WALL:
-  // Se o usuário comum estiver com status 'blocked' ou com 'trial_end' vencido (e plano != 'lifetime'), impeça o acesso mostrando a tela de renovação.
   const directStatusStr = (currentUser?.status_assinatura || (currentUser as any)?.status || "").toString().trim().toLowerCase();
-  const isMasterUser = currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+  const directSysStatusStr = ((currentUser as any)?.status_sistema || "").toString().trim().toLowerCase();
+
+  // Bloqueio forçado pelo administrador: desloga imediatamente
+  if (!isMasterUser && (directStatusStr === "bloqueado" || directStatusStr === "blocked" || directSysStatusStr === "bloqueado" || directSysStatusStr === "blocked")) {
+    forceLogoutBlocked("Acesso bloqueado pelo administrador");
+    return null;
+  }
+
   const userPlan = ((currentUser as any)?.plano || (currentUser as any)?.plan || "").toString().trim().toLowerCase();
   const isLifetimePlan = userPlan === "lifetime";
 
@@ -5481,8 +5617,6 @@ export default function App() {
   }
 
   const isLocked = !isMasterUser && (
-    directStatusStr === "blocked" ||
-    directStatusStr === "bloqueado" ||
     directStatusStr === "vencido" ||
     directStatusStr === "expired" ||
     (!isLifetimePlan && isDirectTrialExpired) ||
@@ -5576,7 +5710,13 @@ export default function App() {
   }
 
   if (isAdminPath) {
-    if (!isAdmin) {
+    if (isMasterUser) {
+      return (
+        <main className="min-h-screen bg-slate-950 text-slate-100 p-4 sm:p-6">
+          <AdminPanel />
+        </main>
+      );
+    } else if (!isAdmin) {
       window.history.replaceState({}, "", "/");
       setTimeout(() => {
         addToast("Acesso restrito: área exclusiva para administradores. Redirecionando...", "error");
@@ -5602,7 +5742,7 @@ export default function App() {
           companyProfile={company}
           currentUser={currentUser}
           onStartNewSale={() => {
-            if (!isRegisterOpenForToday) {
+            if (!isRegisterOpenForToday && !isMasterUser) {
               setShowCashRegisterModal(true);
               return;
             }
@@ -5794,13 +5934,13 @@ export default function App() {
             <RefreshCw className="h-8 w-8 animate-spin text-cyan-500 stroke-[1.5]" />
             <p className="text-xs font-mono uppercase tracking-widest text-slate-455">Sincronizando painel operacional...</p>
           </div>
-        ) : activeTab === "adminMaster" && currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com" ? (
+        ) : activeTab === "adminMaster" && isMasterUser ? (
           /* PAINEL MASTER DISPONÍVEL DIRETAMENTE AO MASTER ADMIN */
           <React.Suspense fallback={<LazyLoader />}>
             <AdminPanel />
           </React.Suspense>
-        ) : false && !isRegisterOpenForToday ? (
-          /* HARD BLOCK SCREEN WHEN CASH REGISTER IS CLOSED */
+        ) : (!isRegisterOpenForToday && !isMasterUser) ? (
+          /* HARD BLOCK SCREEN WHEN CASH REGISTER IS CLOSED (Master Admin has unrestricted access) */
           <ClosedRegisterGate
             onOpenRegisterClick={() => setShowCashRegisterModal(true)}
             operatorName={currentUser?.name || currentUser?.username}

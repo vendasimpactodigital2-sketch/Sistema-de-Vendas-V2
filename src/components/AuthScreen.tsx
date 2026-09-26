@@ -78,6 +78,16 @@ export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
         if (loginError) {
           setError(loginError);
         } else if (user) {
+          const isMaster = user.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+          if (!isMaster) {
+            const s = (user.status || "").toLowerCase().trim();
+            const ss = ((user as any).status_sistema || "").toLowerCase().trim();
+            const sa = ((user as any).status_assinatura || "").toLowerCase().trim();
+            if (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked") {
+              setError("Acesso bloqueado pelo administrador");
+              return;
+            }
+          }
           onLoginSuccess(user);
         } else {
           setError("Erro inesperado ao realizar login.");
@@ -107,6 +117,16 @@ export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
 
     setLoading(false);
     if (foundUser) {
+      const isMaster = foundUser.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
+      if (!isMaster) {
+        const s = (foundUser.status || "").toLowerCase().trim();
+        const ss = ((foundUser as any).status_sistema || "").toLowerCase().trim();
+        const sa = ((foundUser as any).status_assinatura || "").toLowerCase().trim();
+        if (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked") {
+          setError("Acesso bloqueado pelo administrador");
+          return;
+        }
+      }
       onLoginSuccess(foundUser);
     } else {
       setError("Usuário ou senha incorretos. Tente novamente.");

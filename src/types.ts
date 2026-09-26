@@ -151,11 +151,13 @@ export interface User {
   email?: string;
   password?: string;
   owner_id?: string;
-  role?: "motoboy" | "atendente" | "administrador" | string;
+  role?: "motoboy" | "atendente" | "administrador" | "master" | string;
+  cargo?: string;
   created_at?: string;
   data_expiracao?: string;
   status_assinatura?: string;
   status?: string;
+  status_sistema?: string;
   is_admin?: boolean;
 }
 

@@ -138,7 +138,9 @@ export function Header({
   const isGoalReached = dailyMetaGoal > 0 && todayNetProfitLive >= dailyMetaGoal;
   const isNearGoal = dailyMetaGoal > 0 && !isGoalReached && progressPercent >= 90;
 
-  const isAttendant = currentUser && (
+  const isMasterUser = currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com" || currentUser?.role === "master";
+
+  const isAttendant = !isMasterUser && currentUser && (
     currentUser.role === "atendente" ||
     currentUser.role === "seller" ||
     (currentUser.owner_id && currentUser.owner_id !== currentUser.id && currentUser.role !== "administrador" && !currentUser.is_admin)
@@ -556,24 +558,6 @@ export function Header({
                     Usuários {isAttendant && !adminUnlocked && <Lock className="h-2.5 w-2.5 text-brand-cyan shrink-0 font-bold" />}
                   </span>
                 </button>
-
-                {isGeneralAdmin && (
-  <button
-    onClick={() => {
-      window.history.pushState({}, "", "/admin/mensalistas");
-    }}
-    className="relative flex-grow sm:flex-grow-0 flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-950/20 text-violet-300 border border-violet-850/40 hover:bg-violet-900/10 transition-all cursor-pointer whitespace-nowrap"
-  >
-    <Fingerprint className="h-4 w-4 text-violet-400" />
-    <span>Mensalistas</span>
-    {unansweredSupportCount > 0 && (
-      <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500 px-1.5 text-[9px] font-black text-white animate-bounce shadow-md shadow-red-500/20">
-        {unansweredSupportCount}
-      </span>
-    )}
-  </button>
-)}
-
               </>
             )}
           </div>
@@ -588,7 +572,16 @@ export function Header({
                 <div className="text-left leading-none">
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <p className="text-[10px] font-bold text-slate-200">{currentUser.name}</p>
-                    {isAttendant ? (
+                    {isMasterUser ? (
+                      <div className="flex items-center gap-1">
+                        <span className="inline-flex items-center px-1.5 py-0.25 rounded text-[8px] font-black font-sans uppercase bg-gradient-to-r from-amber-500/25 to-purple-500/25 text-amber-300 border border-amber-500/40 shadow-sm shadow-amber-500/20">
+                          👑 MASTER ADMIN
+                        </span>
+                        <span className="inline-flex items-center px-1.5 py-0.25 rounded text-[7px] font-mono font-bold uppercase bg-purple-950/60 text-purple-300 border border-purple-800/50">
+                          master
+                        </span>
+                      </div>
+                    ) : isAttendant ? (
                       <span className="inline-flex items-center px-1.5 py-0.25 rounded text-[7px] font-black font-sans uppercase bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
                         👤 Atendente
                       </span>
@@ -597,19 +590,17 @@ export function Header({
                         👑 Administrador
                       </span>
                     )}
-                    {currentUser.status_assinatura !== "ativo" && (
-<button 
-  type="button"
-  onClick={() => {
-    alert("Seu período de testes de 15 dias está ativo! Para assinar os planos de 30 dias recorrentes ou renovar sua licença, acesse a aba Empresa ou fale com o administrador pelo e-mail sistemadevendaadm@gmail.com.");
-  }}
-  className="inline-flex items-center px-1 py-0.25 rounded text-[7px] font-extrabold font-sans uppercase bg-amber-500/10 text-amber-500 border border-amber-500/25 cursor-pointer hover:bg-amber-500/25 transition-colors" 
-  title="Período de testes de 15 dias ativo. Clique para ver instruções de renovação e assinatura."
->
-  Teste (Clique para Assinar)
-</button>
-
-
+                    {!isMasterUser && currentUser.status_assinatura !== "ativo" && (
+                      <button 
+                        type="button"
+                        onClick={() => {
+                          alert("Seu período de testes de 15 dias está ativo! Para assinar os planos de 30 dias recorrentes ou renovar sua licença, acesse a aba Empresa ou fale com o administrador pelo e-mail sistemadevendaadm@gmail.com.");
+                        }}
+                        className="inline-flex items-center px-1 py-0.25 rounded text-[7px] font-extrabold font-sans uppercase bg-amber-500/10 text-amber-500 border border-amber-500/25 cursor-pointer hover:bg-amber-500/25 transition-colors" 
+                        title="Período de testes de 15 dias ativo. Clique para ver instruções de renovação e assinatura."
+                      >
+                        Teste (Clique para Assinar)
+                      </button>
                     )}
                   </div>
                   <p className="text-[8px] text-slate-500 font-mono mt-0.5">@{currentUser.username}</p>
@@ -661,25 +652,6 @@ export function Header({
                   </div>
                 )}
               </div>
-{isGeneralAdmin && (
-  <button
-    type="button"
-    onClick={() => {
-      window.history.pushState({}, "", "/admin/mensalistas");
-    }}
-    className="relative flex items-center gap-1.5 px-2.5 py-1 bg-violet-950/45 hover:bg-violet-900/40 text-[9px] font-bold text-violet-300 rounded-md border border-violet-800/35"
-    title="Painel de Administração de Mensalistas"
-  >
-    <Fingerprint className="h-3 w-3 text-violet-400" />
-    <span>Gerenciar Mensalistas</span>
-    {unansweredSupportCount > 0 && (
-      <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[8px] font-black text-white animate-bounce shadow-md shadow-red-500/20" title={`${unansweredSupportCount} mensagens de suporte não respondidas`}>
-        {unansweredSupportCount}
-      </span>
-    )}
-  </button>
-)}
-
 
               <button
                 type="button"
