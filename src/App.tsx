@@ -1260,7 +1260,7 @@ export default function App() {
 
     // 3. Conexão Realtime Multi-dispositivo via canal oficial 'cash-register-sync'
     const channel = supabase
-      .channel("cash-register-sync")
+      .channel(`cash-register-sync-${Date.now()}`)
       .on(
         "postgres_changes",
         {
