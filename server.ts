@@ -1,9 +1,7 @@
-import { EventEmitter } from "events";
 import http from "http";
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { WebSocketServer, WebSocket } from "ws";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
@@ -13,34 +11,10 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-// Global Realtime SSE Sync Emitter for multi-device instant sync
-const syncEmitter = new EventEmitter();
-syncEmitter.setMaxListeners(500);
-
-let activeWss: WebSocketServer | null = null;
-
-function broadcastSyncEvent(companyId: string, event: string, data?: any) {
-  const payload = { companyId: companyId || "global", event, data, timestamp: Date.now() };
-  try {
-    syncEmitter.emit("sync", payload);
-    if (companyId && companyId !== "global") {
-      syncEmitter.emit("sync", { ...payload, companyId: "global" });
-    }
-  } catch (e) {
-    console.warn("broadcastSyncEvent warning:", e);
-  }
-
-  // Instant broadcast to all open WebSocket connections across all terminals/links
-  if (activeWss && activeWss.clients) {
-    const raw = JSON.stringify(payload);
-    activeWss.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        try {
-          client.send(raw);
-        } catch (e) {}
-      }
-    });
-  }
+// Sincronização em tempo real tratada diretamente pelo cliente via Supabase Realtime (@supabase/supabase-js)
+// Em ambiente Serverless (Vercel), conexões WebSocket contínuas e streams não são suportadas.
+function broadcastSyncEvent(_companyId?: string, _event?: string, _data?: any) {
+  // No-op no backend; clientes conectam e escutam diretamente via Supabase Realtime
 }
 
 // Global in-memory cache for fast, non-blocking Asaas payment status polling
@@ -1816,46 +1790,9 @@ ${JSON.stringify(sales, null, 2)}
     return { canonicalOwnerId, companyUserIds };
   }
 
-  // Realtime Server-Sent Events (SSE) Stream Endpoint for Instant Multi-Terminal Sync
-  app.get("/api/realtime/stream", (req, res) => {
-    const companyId = (req.query.companyId as string) || "global";
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive"
-    });
-    res.write(`data: ${JSON.stringify({ type: "connected", companyId })}\n\n`);
-
-    const listener = (eventData: any) => {
-      try {
-        res.write(`data: ${JSON.stringify(eventData)}\n\n`);
-      } catch (e) {
-        // Socket write error handled on close
-      }
-    };
-
-    syncEmitter.on("sync", listener);
-
-    const pingInterval = setInterval(() => {
-      try {
-        res.write(": ping\n\n");
-      } catch (e) {}
-    }, 15000);
-
-    req.on("close", () => {
-      clearInterval(pingInterval);
-      syncEmitter.off("sync", listener);
-    });
-  });
-
-  // Client notification broadcast endpoint
-  app.post("/api/realtime/notify", (req, res) => {
-    const { companyId, event, data } = req.body;
-    broadcastSyncEvent(companyId || "global", event || "sync", data);
-    if (companyId && companyId !== "global") {
-      broadcastSyncEvent("global", event || "sync", data);
-    }
-    return res.json({ success: true });
+  // Endpoint de notificação simples para compatibilidade legada (sem streaming contínuo)
+  app.post("/api/realtime/notify", (_req, res) => {
+    return res.json({ success: true, message: "Realtime handled via Supabase client" });
   });
 
   // Helper to ensure 'comprovantes' bucket exists and convert base64 image strings to public storage URLs
@@ -3987,37 +3924,11 @@ async function startServer() {
     });
   }
 
-  // Inicia listener HTTP e WebSocket Server para sincronização em tempo real instantânea
+  // Inicia listener HTTP simples sem servidores WebSocket manuais ou streaming contínuo
   if (!process.env.VERCEL) {
     const server = http.createServer(app);
-
-    const wss = new WebSocketServer({ server, path: "/ws/realtime" });
-    activeWss = wss;
-
-    wss.on("connection", (ws: WebSocket, req) => {
-      try {
-        ws.send(JSON.stringify({ type: "connected", timestamp: Date.now() }));
-      } catch (e) {}
-
-      ws.on("message", (msg) => {
-        try {
-          const parsed = JSON.parse(msg.toString());
-          if (parsed.type === "ping") {
-            ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
-            return;
-          }
-          const event = parsed.event || parsed.type || "sync";
-          const data = parsed.data || {};
-          const companyId = parsed.companyId || "global";
-          broadcastSyncEvent(companyId, event, data);
-        } catch (err) {}
-      });
-
-      ws.on("error", () => {});
-    });
-
     server.listen(PORT, "0.0.0.0", () => {
-      console.log(`Server running on http://0.0.0.0:${PORT} with WebSocket on /ws/realtime`);
+      console.log(`Server running on http://0.0.0.0:${PORT}`);
     });
   }
 }

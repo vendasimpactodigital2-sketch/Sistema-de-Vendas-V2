@@ -38,21 +38,28 @@ const getEnvVar = (viteKey: string, nextKey: string): string => {
   return "";
 };
 
-const supabaseUrl = getEnvVar("VITE_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL");
-const supabaseAnonKey = getEnvVar("VITE_SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY");
+export const getSupabaseUrl = (): string => {
+  return getEnvVar("VITE_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL");
+};
+
+export const getSupabaseAnonKey = (): string => {
+  return getEnvVar("VITE_SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY");
+};
 
 let clientInstance: SupabaseClient | null = null;
 
 export function getSupabase(): SupabaseClient | null {
-  if (!supabaseUrl || !supabaseAnonKey) {
+  const url = getSupabaseUrl();
+  const key = getSupabaseAnonKey();
+  if (!url || !key) {
     return null;
   }
   if (!clientInstance) {
     try {
-      clientInstance = createClient(supabaseUrl, supabaseAnonKey, {
+      clientInstance = createClient(url, key, {
         auth: {
           persistSession: true,
-          storage: window.localStorage,
+          storage: typeof window !== "undefined" ? window.localStorage : undefined,
           autoRefreshToken: true,
           detectSessionInUrl: true
         }
@@ -66,7 +73,9 @@ export function getSupabase(): SupabaseClient | null {
 }
 
 export function isSupabaseConfigured(): boolean {
-  return !!supabaseUrl && !!supabaseAnonKey;
+  const url = getSupabaseUrl();
+  const key = getSupabaseAnonKey();
+  return !!url && !!key;
 }
 
 export function normalizeUserString(str: string): string {
@@ -2663,8 +2672,33 @@ export async function dbGetQuickSales(userId: string): Promise<DbQuickSale[] | n
   const supabase = getSupabase();
   if (!supabase && !isSupabaseConfigured()) return null;
 
-  // 1. Primary: Direct query on vendas_rapidas_itens table as requested
+  // 1. Primary: Direct query on quick_sales table
   if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("quick_sales")
+        .select("*")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: true });
+
+      if (!error && data !== null) {
+        const formatted: DbQuickSale[] = data.map((item: any) => ({
+          id: item.id,
+          description: item.description || item.descricao || item.nome || "",
+          price: Number(item.price ?? item.preco ?? 0),
+          cost: Number(item.cost ?? item.custo ?? 0),
+          gradient: item.gradient || item.cor || "from-purple-600 via-fuchsia-600 to-pink-500",
+        }));
+        try {
+          localStorage.setItem(`NUCLEO_QUICK_SALES_${userId}`, JSON.stringify(formatted));
+        } catch {}
+        return formatted;
+      }
+    } catch (err) {
+      console.warn("Supabase quick_sales query notice:", err);
+    }
+
+    // 2. Secondary: vendas_rapidas_itens table
     try {
       const { data, error } = await supabase
         .from("vendas_rapidas_itens")
@@ -2672,7 +2706,7 @@ export async function dbGetQuickSales(userId: string): Promise<DbQuickSale[] | n
         .eq("user_id", userId)
         .order("created_at", { ascending: true });
 
-      if (!error && data && data.length > 0) {
+      if (!error && data !== null) {
         const formatted: DbQuickSale[] = data.map((item: any) => ({
           id: item.id,
           description: item.description || item.descricao || item.nome || "",
@@ -2690,69 +2724,33 @@ export async function dbGetQuickSales(userId: string): Promise<DbQuickSale[] | n
     }
   }
 
-  // 2. Try fetching via server API (which uses service_role and bypasses client RLS)
+  // 3. Try fetching via server API
   try {
     const res = await fetch(`/api/quick-sales?userId=${encodeURIComponent(userId)}`);
     if (res.ok) {
       const json = await res.json();
-      if (json.success && Array.isArray(json.data) && json.data.length > 0) {
+      if (json.success && Array.isArray(json.data)) {
         try {
           localStorage.setItem(`NUCLEO_QUICK_SALES_${userId}`, JSON.stringify(json.data));
         } catch {}
         return json.data;
       }
     }
-  } catch {
-    // Continue to client direct queries if server API is unavailable
-  }
+  } catch {}
 
-  // 3. Fallback query on legacy quick_sales table
-  if (supabase) {
-    try {
-      const { data, error } = await supabase
-        .from("quick_sales")
-        .select("*")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: true });
-
-      if (!error && data && data.length > 0) {
-        const formatted: DbQuickSale[] = data.map((item: any) => ({
-          id: item.id,
-          description: item.description,
-          price: Number(item.price) || 0,
-          cost: Number(item.cost) || 0,
-          gradient: item.gradient || "from-purple-600 via-fuchsia-600 to-pink-500",
-        }));
-        try {
-          localStorage.setItem(`NUCLEO_QUICK_SALES_${userId}`, JSON.stringify(formatted));
-        } catch {}
-        return formatted;
-      }
-
-      // 4. Fallback: check sales table row quick_sales_config
-      const { data: salesRow } = await supabase
-        .from("sales")
-        .select("items")
-        .eq("id", "quick_sales_config")
-        .maybeSingle();
-
-      if (salesRow?.items && Array.isArray(salesRow.items) && salesRow.items.length > 0) {
-        try {
-          localStorage.setItem(`NUCLEO_QUICK_SALES_${userId}`, JSON.stringify(salesRow.items));
-        } catch {}
-        return salesRow.items;
-      }
-    } catch (err) {
-      console.warn("Supabase quick_sales query notice:", err);
-    }
-  }
-
-  // 5. Local storage fallback
+  // 4. Local storage fallback (strictly filtered - never resurrects the 6 old static default buttons)
   try {
     const saved = localStorage.getItem(`NUCLEO_QUICK_SALES_${userId}`) || localStorage.getItem("NUCLEO_QUICK_SALES");
     if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      let parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) {
+        parsed = parsed.filter(
+          (p: any) =>
+            !["q1", "q2", "q3", "q4", "q5", "q6"].includes(p.id) &&
+            p.description !== "Impressão Colorida A4" &&
+            p.description !== "Plastificação de Documento" &&
+            p.description !== "Formatação de PC / Notbook"
+        );
         return parsed;
       }
     }

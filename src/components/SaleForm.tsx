@@ -228,21 +228,52 @@ export function SaleForm({
   const [sessionClientId] = useState(() => Math.random().toString(36).substring(2, 9));
   const channelRef = useRef<any>(null);
 
-  // Direct select from vendas_rapidas_itens table
+  // Direct select from quick_sales and vendas_rapidas_itens tables
   const fetchQuickSalesFromDb = async () => {
     if (!currentUser || !currentUser.id) return;
     const ownerId = currentUser.owner_id || currentUser.id;
+
+    // Purge any stale legacy default fallback buttons from localStorage
+    try {
+      const savedKey = `NUCLEO_QUICK_SALES_${ownerId}`;
+      const saved = localStorage.getItem(savedKey) || localStorage.getItem("NUCLEO_QUICK_SALES");
+      if (saved && (saved.includes("Impressão Colorida A4") || saved.includes("Plastificação de Documento") || saved.includes("Formatação de PC"))) {
+        localStorage.removeItem(savedKey);
+        localStorage.removeItem("NUCLEO_QUICK_SALES");
+      }
+    } catch {}
+
     const supabase = getSupabase();
     if (supabase) {
       try {
-        const { data, error } = await supabase
+        // 1. Tabela quick_sales (primária)
+        const { data: qsData, error: qsError } = await supabase
+          .from("quick_sales")
+          .select("*")
+          .eq("user_id", ownerId)
+          .order("created_at", { ascending: true });
+
+        if (!qsError && qsData !== null) {
+          const formatted = qsData.map((item: any) => ({
+            id: item.id,
+            description: item.description || item.descricao || item.nome || "",
+            price: Number(item.price ?? item.preco ?? 0),
+            cost: Number(item.cost ?? item.custo ?? 0),
+            gradient: item.gradient || item.cor || "from-purple-600 via-fuchsia-600 to-pink-500",
+          }));
+          setQuickSales(formatted);
+          return;
+        }
+
+        // 2. Tabela vendas_rapidas_itens (secundária)
+        const { data: vriData, error: vriError } = await supabase
           .from("vendas_rapidas_itens")
           .select("*")
           .eq("user_id", ownerId)
           .order("created_at", { ascending: true });
 
-        if (!error && data && data.length > 0) {
-          const formatted = data.map((item: any) => ({
+        if (!vriError && vriData !== null) {
+          const formatted = vriData.map((item: any) => ({
             id: item.id,
             description: item.description || item.descricao || item.nome || "",
             price: Number(item.price ?? item.preco ?? 0),
@@ -253,11 +284,12 @@ export function SaleForm({
           return;
         }
       } catch (err) {
-        console.warn("Direct select vendas_rapidas_itens:", err);
+        console.warn("Direct select quick_sales / vendas_rapidas_itens:", err);
       }
     }
+
     const dbSales = await dbGetQuickSales(ownerId);
-    if (dbSales && dbSales.length > 0) {
+    if (dbSales !== null) {
       setQuickSales(dbSales);
     }
   };
@@ -269,19 +301,18 @@ export function SaleForm({
 
     const scopeId = currentUser.owner_id || currentUser.id;
 
-    // 1. Initial direct fetch from vendas_rapidas_itens
+    // 1. Initial direct fetch from quick_sales / vendas_rapidas_itens
     fetchQuickSalesFromDb();
 
-    // 2. Active Realtime listener (postgres_changes) on table vendas_rapidas_itens
+    // 2. Active Realtime listener (postgres_changes) on both quick_sales and vendas_rapidas_itens
     const channel = supabase
-      .channel(`realtime_vendas_rapidas_${scopeId}_${Date.now()}`)
+      .channel(`realtime_quick_sales_${scopeId}_${Date.now()}`)
       .on(
         "postgres_changes",
         {
           event: "*",
           schema: "public",
-          table: "vendas_rapidas_itens",
-          filter: `user_id=eq.${scopeId}`,
+          table: "quick_sales",
         },
         () => {
           fetchQuickSalesFromDb();
@@ -397,17 +428,8 @@ export function SaleForm({
   const [showLocateClientModal, setShowLocateClientModal] = useState(false);
   const [clientSearchTerm, setClientSearchTerm] = useState("");
 
-  // Quick Sales (Vendas Rápidas) States
-  const [quickSales, setQuickSales] = useState<{ id: string; description: string; price: number; cost?: number; gradient: string }[]>(() => {
-    return [
-      { id: "q1", description: "Impressão Colorida A4", price: 2.50, cost: 0.50, gradient: "from-purple-600 via-fuchsia-600 to-pink-500" },
-      { id: "q2", description: "Plastificação de Documento", price: 5.00, cost: 1.20, gradient: "from-cyan-500 to-blue-600" },
-      { id: "q3", description: "Cópia / Xerox Preto", price: 0.50, cost: 0.10, gradient: "from-slate-700 to-slate-900" },
-      { id: "q4", description: "Adesivo Personalizado", price: 1.50, cost: 0.35, gradient: "from-pink-500 to-rose-500" },
-      { id: "q5", description: "Encadernação Completa", price: 12.00, cost: 3.50, gradient: "from-emerald-500 to-teal-600" },
-      { id: "q6", description: "Formatação de PC / Notbook", price: 80.00, cost: 0.00, gradient: "from-blue-600 to-indigo-700" }
-    ];
-  });
+  // Quick Sales (Vendas Rápidas) States - Nenhum array estático de fallback
+  const [quickSales, setQuickSales] = useState<{ id: string; description: string; price: number; cost?: number; gradient: string }[]>([]);
 
   const [showQuickSalesManager, setShowQuickSalesManager] = useState(false);
   const [newQSDescription, setNewQSDescription] = useState("");
@@ -516,6 +538,15 @@ export function SaleForm({
         const supabase = getSupabase();
         if (supabase) {
           try {
+            await supabase.from("quick_sales").upsert({
+              id: updatedItem.id,
+              user_id: ownerId,
+              description: updatedItem.description,
+              price: updatedItem.price,
+              cost: updatedItem.cost || 0,
+              gradient: updatedItem.gradient,
+              created_at: new Date().toISOString()
+            });
             await supabase.from("vendas_rapidas_itens").upsert({
               id: updatedItem.id,
               user_id: ownerId,
@@ -530,7 +561,7 @@ export function SaleForm({
               created_at: new Date().toISOString()
             });
           } catch (e) {
-            console.warn("Direct upsert vendas_rapidas_itens error:", e);
+            console.warn("Direct upsert quick_sales error:", e);
           }
         }
         await dbSaveQuickSale(ownerId, updatedItem);
@@ -565,6 +596,15 @@ export function SaleForm({
         const supabase = getSupabase();
         if (supabase) {
           try {
+            await supabase.from("quick_sales").upsert({
+              id: newQS.id,
+              user_id: ownerId,
+              description: newQS.description,
+              price: newQS.price,
+              cost: newQS.cost || 0,
+              gradient: newQS.gradient,
+              created_at: new Date().toISOString()
+            });
             await supabase.from("vendas_rapidas_itens").upsert({
               id: newQS.id,
               user_id: ownerId,
@@ -579,7 +619,7 @@ export function SaleForm({
               created_at: new Date().toISOString()
             });
           } catch (e) {
-            console.warn("Direct insert vendas_rapidas_itens error:", e);
+            console.warn("Direct insert quick_sales error:", e);
           }
         }
         await dbSaveQuickSale(ownerId, newQS);
@@ -617,12 +657,17 @@ export function SaleForm({
         if (supabase) {
           try {
             await supabase
+              .from("quick_sales")
+              .delete()
+              .eq("id", id)
+              .eq("user_id", ownerId);
+            await supabase
               .from("vendas_rapidas_itens")
               .delete()
               .eq("id", id)
               .eq("user_id", ownerId);
           } catch (e) {
-            console.warn("Direct delete vendas_rapidas_itens error:", e);
+            console.warn("Direct delete quick_sales error:", e);
           }
         }
         await dbDeleteQuickSale(ownerId, id);
@@ -2863,23 +2908,29 @@ export function SaleForm({
                   Clique nos botões gradientes para escolher a quantidade do item. O valor e a soma serão gerados automaticamente para salvar ou imprimir de forma ultra-rápida!
                 </p>
 
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {quickSales.map((qs) => (
-                    <button
-                      key={qs.id}
-                      type="button"
-                      onClick={() => {
-                        if (!checkRegisterBeforeAction("lançar itens de vendas rápidas")) return;
-                        setActiveQuickSaleItem(qs);
-                        setQuickSaleQty("1");
-                      }}
-                      className="group flex items-center justify-center gap-2 px-3 py-2.5 text-xs font-bold rounded-lg text-slate-300 bg-slate-950 border border-slate-800 hover:bg-gradient-to-r hover:from-brand-magenta hover:to-pink-600 hover:text-white hover:border-transparent shadow-sm hover:scale-[1.02] active:scale-95 cursor-pointer transition-all duration-200 min-w-0"
-                    >
-                      <Zap className="h-3.5 w-3.5 text-brand-magenta group-hover:text-white shrink-0 transition-colors" />
-                      <span className="truncate tracking-wide">{qs.description}</span>
-                    </button>
-                  ))}
-                </div>
+                {quickSales.length === 0 ? (
+                  <div className="py-6 px-4 text-center rounded-xl bg-slate-950/40 border border-dashed border-slate-800 text-slate-500 text-xs">
+                    Nenhum botão de venda rápida configurado. Clique em &quot;Personalizar Botões&quot; para adicionar.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {quickSales.map((qs) => (
+                      <button
+                        key={qs.id}
+                        type="button"
+                        onClick={() => {
+                          if (!checkRegisterBeforeAction("lançar itens de vendas rápidas")) return;
+                          setActiveQuickSaleItem(qs);
+                          setQuickSaleQty("1");
+                        }}
+                        className="group flex items-center justify-center gap-2 px-3 py-2.5 text-xs font-bold rounded-lg text-slate-300 bg-slate-950 border border-slate-800 hover:bg-gradient-to-r hover:from-brand-magenta hover:to-pink-600 hover:text-white hover:border-transparent shadow-sm hover:scale-[1.02] active:scale-95 cursor-pointer transition-all duration-200 min-w-0"
+                      >
+                        <Zap className="h-3.5 w-3.5 text-brand-magenta group-hover:text-white shrink-0 transition-colors" />
+                        <span className="truncate tracking-wide">{qs.description}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 {/* Real-time Order Summary and Fast Actions */}
                 <div className="mt-4 pt-4 border-t border-slate-800/80 space-y-4">

@@ -5656,7 +5656,7 @@ export default function App() {
           {/* Tiny latency and protocol status line */}
           <div className="flex items-center justify-center gap-2 text-[10px] text-slate-500 uppercase tracking-widest font-mono">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
-            <span>Conexão WebSocket Ativa</span>
+            <span>Sincronização Supabase Realtime Ativa</span>
           </div>
         </div>
       </div>
@@ -5788,7 +5788,7 @@ export default function App() {
             {/* Tiny latency and protocol status line */}
             <div className="flex items-center justify-center gap-2 text-[10px] text-slate-500 uppercase tracking-widest font-mono">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
-              <span>Conexão WebSocket Ativa</span>
+              <span>Sincronização Supabase Realtime Ativa</span>
             </div>
           </div>
         </div>

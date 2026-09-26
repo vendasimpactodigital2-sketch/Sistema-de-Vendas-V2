@@ -53,35 +53,61 @@ export function AdminPanel() {
     }
 
     try {
-      const { data, error: queryError } = await client
-        .from("profiles")
+      // 1. Tabela users (fonte autoritativa de status e autenticação)
+      const { data: usersData, error: usersErr } = await client
+        .from("users")
         .select("*")
         .order("created_at", { ascending: false });
 
-      if (queryError) {
-        console.error("Erro ao buscar tabela profiles:", queryError);
-        // Fallback without order in case created_at doesn't exist
-        const { data: fallbackData, error: fallbackError } = await client
-          .from("profiles")
-          .select("*");
+      // 2. Tabela profiles (fonte complementar)
+      const { data: profilesData } = await client
+        .from("profiles")
+        .select("*");
 
-        if (fallbackError) {
-          setError(fallbackError.message);
-        } else {
-          setProfiles(fallbackData || []);
-        }
+      const map = new Map<string, ProfileRecord>();
+
+      if (profilesData && Array.isArray(profilesData)) {
+        profilesData.forEach((p: any) => {
+          if (p.id) map.set(p.id, p);
+        });
+      }
+
+      if (usersData && Array.isArray(usersData)) {
+        usersData.forEach((u: any) => {
+          const existing = map.get(u.id);
+          map.set(u.id, {
+            ...existing,
+            ...u,
+            id: u.id,
+            email: u.email || existing?.email || "",
+            status: u.status || existing?.status || "active",
+            status_assinatura: u.status_assinatura || u.status || existing?.status_assinatura || "ativo",
+            plano: u.plano || u.plan || existing?.plano || existing?.plan || "trial",
+            plan: u.plano || u.plan || existing?.plano || existing?.plan || "trial",
+            trial_end: u.trial_end || u.data_expiracao || existing?.trial_end || existing?.data_expiracao || null
+          });
+        });
+      }
+
+      const combined = Array.from(map.values());
+      if (combined.length > 0) {
+        setProfiles(combined);
+      } else if (usersErr) {
+        // Fallback direto para profiles
+        const { data: fallbackProfiles } = await client.from("profiles").select("*");
+        setProfiles(fallbackProfiles || []);
       } else {
-        setProfiles(data || []);
+        setProfiles([]);
       }
     } catch (err: any) {
-      console.error("Exceção ao consultar profiles:", err);
+      console.error("Exceção ao consultar users e profiles:", err);
       setError(err?.message || "Erro desconhecido ao carregar perfis.");
     } finally {
       setLoading(false);
     }
   };
 
-  // Carregamento inicial e canal Realtime do Supabase
+  // Carregamento inicial e canal Realtime do Supabase (monitora users e profiles)
   useEffect(() => {
     fetchProfiles();
 
@@ -89,7 +115,19 @@ export function AdminPanel() {
     if (!client) return;
 
     const channel = client
-      .channel("profiles-realtime-master-channel")
+      .channel(`admin-users-profiles-realtime-${Date.now()}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "users"
+        },
+        (payload: any) => {
+          console.log("[AdminPanel Realtime] Evento na tabela 'users':", payload);
+          fetchProfiles();
+        }
+      )
       .on(
         "postgres_changes",
         {
@@ -121,26 +159,23 @@ export function AdminPanel() {
 
     setActionLoadingId(profile.id);
     try {
-      const { error: updateError } = await client
-        .from("profiles")
-        .update({
-          status: nextStatus,
-          status_assinatura: nextStatusAssinatura,
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", profile.id);
+      const updateData = {
+        status: nextStatus,
+        status_assinatura: nextStatusAssinatura,
+        updated_at: new Date().toISOString()
+      };
 
-      if (updateError) {
-        alert(`Erro ao atualizar status: ${updateError.message}`);
-      } else {
-        setProfiles((prev) =>
-          prev.map((p) =>
-            p.id === profile.id
-              ? { ...p, status: nextStatus, status_assinatura: nextStatusAssinatura }
-              : p
-          )
-        );
-      }
+      // Atualiza na tabela users e na tabela profiles
+      await client.from("users").update(updateData).eq("id", profile.id);
+      await client.from("profiles").update(updateData).eq("id", profile.id);
+
+      setProfiles((prev) =>
+        prev.map((p) =>
+          p.id === profile.id
+            ? { ...p, status: nextStatus, status_assinatura: nextStatusAssinatura }
+            : p
+        )
+      );
     } catch (err: any) {
       alert(`Falha ao alterar status: ${err?.message || "Erro inesperado."}`);
     } finally {
@@ -172,18 +207,13 @@ export function AdminPanel() {
 
     setActionLoadingId(profile.id);
     try {
-      const { error: updateError } = await client
-        .from("profiles")
-        .update(payload)
-        .eq("id", profile.id);
+      // Atualiza na tabela users e na tabela profiles
+      await client.from("users").update(payload).eq("id", profile.id);
+      await client.from("profiles").update(payload).eq("id", profile.id);
 
-      if (updateError) {
-        alert(`Erro ao alternar plano: ${updateError.message}`);
-      } else {
-        setProfiles((prev) =>
-          prev.map((p) => (p.id === profile.id ? { ...p, ...payload } : p))
-        );
-      }
+      setProfiles((prev) =>
+        prev.map((p) => (p.id === profile.id ? { ...p, ...payload } : p))
+      );
     } catch (err: any) {
       alert(`Falha ao alternar plano: ${err?.message || "Erro inesperado."}`);
     } finally {
@@ -203,16 +233,10 @@ export function AdminPanel() {
 
     setActionLoadingId(profile.id);
     try {
-      const { error: deleteError } = await client
-        .from("profiles")
-        .delete()
-        .eq("id", profile.id);
+      await client.from("users").delete().eq("id", profile.id);
+      await client.from("profiles").delete().eq("id", profile.id);
 
-      if (deleteError) {
-        alert(`Erro ao excluir perfil: ${deleteError.message}`);
-      } else {
-        setProfiles((prev) => prev.filter((p) => p.id !== profile.id));
-      }
+      setProfiles((prev) => prev.filter((p) => p.id !== profile.id));
     } catch (err: any) {
       alert(`Falha ao excluir registro: ${err?.message || "Erro inesperado."}`);
     } finally {

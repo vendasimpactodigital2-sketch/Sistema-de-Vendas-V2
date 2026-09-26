@@ -1,35 +1,34 @@
 /**
- * Real-Time Multi-Terminal Synchronization Engine
- * Connects via WebSocket (/ws/realtime) with automatic fallback to SSE (/api/realtime/stream).
- * Broadcasts and listens for sales, expenses, cash register, products, clients, bills, and goals across all open links.
+ * Real-Time Client Synchronization Engine
+ * Operates purely client-side via official @supabase/supabase-js channels.
+ * Zero custom backend WebSockets and zero server-side streaming endpoints (Vercel Serverless safe).
  */
 
-type RealtimeListener = (event: string, data: any) => void;
+import { getSupabase, isSupabaseConfigured } from "./supabase";
+
+export type RealtimeListener = (event: string, data: any) => void;
 
 class RealtimeSyncManager {
-  private ws: WebSocket | null = null;
-  private sse: EventSource | null = null;
   private listeners: Set<RealtimeListener> = new Set();
-  private reconnectTimer: any = null;
-  private pingInterval: any = null;
-  private isConnecting = false;
   private companyId = "global";
+  private supabaseChannel: any = null;
+  private lastProcessedTimestamp = 0;
+  private lastProcessedPayload = "";
 
   constructor() {
     if (typeof window !== "undefined") {
-      this.init();
-      // Handle tab visibility and focus changes (reconnect and trigger sync if wake from sleep)
+      setTimeout(() => {
+        this.initSupabaseChannel();
+      }, 0);
+
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "visible") {
-          this.ensureConnected();
           window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: { event: "visibility_refresh" } }));
         }
       });
-      window.addEventListener("focus", () => {
-        this.ensureConnected();
-      });
+
       window.addEventListener("online", () => {
-        this.ensureConnected();
+        this.initSupabaseChannel();
         window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: { event: "network_online" } }));
       });
     }
@@ -38,118 +37,53 @@ class RealtimeSyncManager {
   public setCompanyId(id: string) {
     if (id && id !== this.companyId) {
       this.companyId = id;
-      this.reconnect();
+      this.initSupabaseChannel();
     }
   }
 
-  public init() {
-    this.connectWebSocket();
-    this.connectSSE();
-  }
+  private initSupabaseChannel() {
+    if (typeof window === "undefined" || !isSupabaseConfigured()) return;
+    const client = getSupabase();
+    if (!client) return;
 
-  private getWsUrl(): string {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host = window.location.host;
-    return `${protocol}//${host}/ws/realtime`;
-  }
-
-  private connectWebSocket() {
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-      return;
+    if (this.supabaseChannel) {
+      try {
+        client.removeChannel(this.supabaseChannel);
+      } catch (e) {}
+      this.supabaseChannel = null;
     }
 
     try {
-      const url = this.getWsUrl();
-      const socket = new WebSocket(url);
-      (window as any).__syncSocket = socket;
-
-      socket.onopen = () => {
-        this.ws = socket;
-        console.log("[Realtime WS] Conectado em tempo real via WebSocket!");
-        // Envia mensagem inicial
-        socket.send(JSON.stringify({ type: "register", companyId: this.companyId }));
-        
-        // Inicia heartbeat
-        if (this.pingInterval) clearInterval(this.pingInterval);
-        this.pingInterval = setInterval(() => {
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ type: "ping" }));
+      const channelName = `realtime_sync_${this.companyId || "global"}`;
+      this.supabaseChannel = client
+        .channel(channelName)
+        .on("broadcast", { event: "*" }, (payload: any) => {
+          if (payload && payload.event) {
+            this.handleIncomingMessage({
+              event: payload.event,
+              data: payload.payload || payload.data || {},
+              timestamp: payload.timestamp || Date.now()
+            });
           }
-        }, 20000);
-      };
-
-      socket.onmessage = (e) => {
-        try {
-          if (!e.data) return;
-          const parsed = JSON.parse(e.data);
-          if (parsed.type === "pong" || parsed.type === "connected") return;
-          this.handleIncomingMessage(parsed);
-        } catch (err) {
-          console.warn("[Realtime WS Parse Error]:", err);
-        }
-      };
-
-      socket.onerror = (e) => {
-        // Fallback para SSE cuidará da conexão
-      };
-
-      socket.onclose = () => {
-        this.ws = null;
-        if (this.pingInterval) clearInterval(this.pingInterval);
-        this.scheduleReconnect();
-      };
+        })
+        .subscribe();
     } catch (e) {
-      this.scheduleReconnect();
+      console.warn("[Supabase Realtime Channel Init Error]:", e);
     }
   }
 
-  private connectSSE() {
-    if (this.sse && this.sse.readyState !== EventSource.CLOSED) {
-      return;
-    }
-
-    try {
-      const sseUrl = `/api/realtime/stream?companyId=${encodeURIComponent(this.companyId)}`;
-      const source = new EventSource(sseUrl);
-
-      source.onopen = () => {
-        this.sse = source;
-      };
-
-      source.onmessage = (event) => {
-        try {
-          if (!event.data || event.data.startsWith(":")) return;
-          const parsed = JSON.parse(event.data);
-          if (parsed.type === "connected") return;
-          this.handleIncomingMessage(parsed);
-        } catch (err) {}
-      };
-
-      source.onerror = () => {
-        if (this.sse) {
-          this.sse.close();
-          this.sse = null;
-        }
-        setTimeout(() => this.connectSSE(), 4000);
-      };
-    } catch (e) {}
-  }
-
-  private lastProcessedTimestamp = 0;
-  private lastProcessedPayload = "";
-
-  private handleIncomingMessage(parsed: any) {
-    const evType = parsed.event || parsed.type;
+  public handleIncomingMessage(parsed: any) {
+    const evType = parsed.event || parsed.type || "sync";
     const data = parsed.data || {};
     const timestamp = parsed.timestamp || Date.now();
 
-    // Deduplicate identical events received simultaneously via WS and SSE within 200ms
+    // Deduplicate identical events received within 250ms
     const payloadSignature = `${evType}_${JSON.stringify(data)}`;
     if (this.lastProcessedPayload === payloadSignature && (Date.now() - this.lastProcessedTimestamp) < 250) {
       return;
     }
     this.lastProcessedPayload = payloadSignature;
-    this.lastProcessedTimestamp = Date.now();
+    this.lastProcessedTimestamp = timestamp;
 
     // 1. Notify internal subscribers
     this.listeners.forEach((listener) => {
@@ -198,35 +132,6 @@ class RealtimeSyncManager {
     } catch (e) {}
   }
 
-  private scheduleReconnect() {
-    if (this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connectWebSocket();
-    }, 2500);
-  }
-
-  public ensureConnected() {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.connectWebSocket();
-    }
-    if (!this.sse || this.sse.readyState === EventSource.CLOSED) {
-      this.connectSSE();
-    }
-  }
-
-  public reconnect() {
-    if (this.ws) {
-      try { this.ws.close(); } catch (e) {}
-      this.ws = null;
-    }
-    if (this.sse) {
-      try { this.sse.close(); } catch (e) {}
-      this.sse = null;
-    }
-    this.init();
-  }
-
   public subscribe(listener: RealtimeListener): () => void {
     this.listeners.add(listener);
     return () => {
@@ -242,31 +147,24 @@ class RealtimeSyncManager {
       timestamp: Date.now()
     };
 
-    // 1. Try sending over WebSocket (instant < 10ms)
-    let wsSent = false;
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(JSON.stringify(payload));
-        wsSent = true;
-      } catch (e) {}
-    }
-
-    // 2. Always POST to /api/realtime/notify to guarantee server persistence and broadcast to SSE listeners
-    fetch("/api/realtime/notify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    }).catch(() => {});
-
-    // 3. Local dispatch for same-tab responsiveness
+    // 1. Broadcast directly via Supabase Realtime client if available
     try {
-      window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: payload }));
+      const client = getSupabase();
+      if (client && this.supabaseChannel) {
+        this.supabaseChannel.send({
+          type: "broadcast",
+          event,
+          payload: data
+        }).catch(() => {});
+      }
     } catch (e) {}
+
+    // 2. Local dispatch for instant UI responsiveness
+    this.handleIncomingMessage(payload);
   }
 
   public isConnected(): boolean {
-    return (this.ws !== null && this.ws.readyState === WebSocket.OPEN) ||
-           (this.sse !== null && this.sse.readyState === EventSource.OPEN);
+    return isSupabaseConfigured();
   }
 }
 
