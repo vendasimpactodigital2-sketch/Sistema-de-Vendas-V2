@@ -39,7 +39,7 @@ import { Sale, CompanyProfile, Expense, User, CatalogProduct, getSaleOrderDate, 
 import { getLocalDeletionAuditRecords, saveLocalDeletionAuditRecord, clearLocalDeletionAuditRecords, fetchDeletionAuditFromSupabase } from "./utils/deletionAudit";
 import { AuthScreen } from "./components/AuthScreen";
 import { AdminMensalistas } from "./components/AdminMensalistas";
-import { Sparkles, DollarSign, Building2, ShieldAlert, ShieldCheck, TrendingDown, RefreshCw, X, Trophy, CheckCircle, Info, AlertTriangle, Trash2, Bell, Volume2, VolumeX, Package, MapPin, Calendar, Clock, Check, Gift, Fingerprint, Eye, EyeOff, Phone, Wallet, Search, UserCheck, Sunset, BellRing, Moon, Rocket } from "lucide-react";
+import { Sparkles, DollarSign, Building2, ShieldAlert, ShieldCheck, TrendingDown, RefreshCw, X, Trophy, CheckCircle, Info, AlertTriangle, Trash2, Bell, Volume2, VolumeX, Package, MapPin, Calendar, Clock, Check, Gift, Fingerprint, Eye, EyeOff, Phone, Wallet, Search, UserCheck, Sunset, BellRing, Moon, Rocket, MessageCircle, LogOut } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { WeeklyGoalModal } from "./components/WeeklyGoalModal";
 import { TrialCountdown } from "./components/TrialCountdown";
@@ -210,13 +210,6 @@ export default function App() {
             status_assinatura: "ativo"
           };
         }
-        const s = (parsed.status || "").toLowerCase().trim();
-        const ss = (parsed.status_sistema || "").toLowerCase().trim();
-        const sa = (parsed.status_assinatura || "").toLowerCase().trim();
-        if (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado") {
-          localStorage.removeItem("NUCLEO_CURRENT_USER");
-          return null;
-        }
         return parsed;
       }
       return null;
@@ -227,10 +220,6 @@ export default function App() {
   });
 
   const isMasterUser = currentUser?.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com" || currentUser?.role === "master";
-
-  const forceLogoutBlocked = (_reason = "") => {
-  // Não desloga o usuário para permitir que ele veja a tela de pagamento e regularização
-};
 
   // Subscription & 15-day Trial logic
   const [isSubscribing, setIsSubscribing] = useState(false);
@@ -655,8 +644,15 @@ export default function App() {
             const ss = ((userData as any).status_sistema || "").toString().trim().toLowerCase();
             const sa = ((userData as any).status_assinatura || "").toString().trim().toLowerCase();
             if (!isMasterUser && (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked")) {
-              console.warn("[Realtime Check] Usuário com status bloqueado detectado no Supabase. Deslogando...");
-              forceLogoutBlocked("Acesso bloqueado pelo administrador");
+              console.log("[Realtime Check] Usuário com status bloqueado detectado no Supabase. Atualizando estado...");
+              const updatedUser = { 
+                ...currentUser, 
+                status_assinatura: "bloqueado", 
+                status: "bloqueado",
+                status_sistema: "bloqueado"
+              };
+              localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(updatedUser));
+              setCurrentUser(updatedUser);
               return;
             }
           }
@@ -741,8 +737,20 @@ export default function App() {
           const sa = ((u as any).status_assinatura || "").toString().trim().toLowerCase();
 
           if (!isMasterUser && (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked")) {
-            console.warn("[Realtime Users] Bloqueio forçado detectado no Supabase. Deslogando...");
-            forceLogoutBlocked("Acesso bloqueado pelo administrador");
+            console.log("[Realtime Users] Bloqueio detectado no Supabase. Atualizando estado...");
+            setCurrentUser(prev => {
+              if (!prev) return null;
+              const updated = {
+                ...prev,
+                status: "bloqueado",
+                status_assinatura: "bloqueado",
+                status_sistema: "bloqueado"
+              };
+              try {
+                localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(updated));
+              } catch (e) {}
+              return updated;
+            });
             return;
           }
 
@@ -785,8 +793,20 @@ export default function App() {
           const sa = ((u as any).status_assinatura || "").toString().trim().toLowerCase();
 
           if (!isMasterUser && (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked")) {
-            console.warn("[Realtime Users Broad] Bloqueio forçado detectado no Supabase. Deslogando...");
-            forceLogoutBlocked("Acesso bloqueado pelo administrador");
+            console.log("[Realtime Users Broad] Bloqueio detectado no Supabase. Atualizando estado...");
+            setCurrentUser(prev => {
+              if (!prev) return null;
+              const updated = {
+                ...prev,
+                status: "bloqueado",
+                status_assinatura: "bloqueado",
+                status_sistema: "bloqueado"
+              };
+              try {
+                localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(updated));
+              } catch (e) {}
+              return updated;
+            });
             return;
           }
 
@@ -846,8 +866,20 @@ export default function App() {
           const sa = (p.status_assinatura || "").toString().trim().toLowerCase();
 
           if (!isMasterUser && (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked")) {
-            console.warn("[Realtime Profiles] Bloqueio forçado detectado em profiles. Deslogando...");
-            forceLogoutBlocked("Acesso bloqueado pelo administrador");
+            console.log("[Realtime Profiles] Bloqueio detectado em profiles. Atualizando estado...");
+            setCurrentUser(prev => {
+              if (!prev) return null;
+              const updated = {
+                ...prev,
+                status: "bloqueado",
+                status_assinatura: "bloqueado",
+                status_sistema: "bloqueado"
+              };
+              try {
+                localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(updated));
+              } catch (e) {}
+              return updated;
+            });
             return;
           }
 
@@ -1251,7 +1283,7 @@ export default function App() {
 
     checkInitialSession();
 
-    // 3. Conexão Realtime Multi-dispositivo via canal oficial 'cash-register-sync'
+    // 3. Conexão Realtime Multi-dispositivo via canal dinâmico 'cash-register-sync-${Date.now()}'
     const channel = supabase
       .channel(`cash-register-sync-${Date.now()}`)
       .on(
@@ -1830,16 +1862,7 @@ export default function App() {
 
         if (sessionUser) {
           const isMaster = sessionUser.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
-          if (!isMaster) {
-            const s = (sessionUser.status || "").toLowerCase().trim();
-            const ss = ((sessionUser as any).status_sistema || "").toLowerCase().trim();
-            const sa = ((sessionUser as any).status_assinatura || "").toLowerCase().trim();
-            if (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked") {
-              console.warn("[checkSession] Usuário bloqueado no Supabase. Forçando logout...");
-              forceLogoutBlocked("Acesso bloqueado pelo administrador");
-              return;
-            }
-          } else {
+          if (isMaster) {
             sessionUser.role = "master";
             sessionUser.cargo = "master";
             sessionUser.is_admin = true;
@@ -1868,16 +1891,7 @@ export default function App() {
                 const dbUser = await dbVerifyUserSession(parsed.id);
                 if (dbUser) {
                   const isMaster = dbUser.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
-                  if (!isMaster) {
-                    const s = (dbUser.status || "").toLowerCase().trim();
-                    const ss = ((dbUser as any).status_sistema || "").toLowerCase().trim();
-                    const sa = ((dbUser as any).status_assinatura || "").toLowerCase().trim();
-                    if (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked") {
-                      console.warn("[checkSession Local] Usuário bloqueado no Supabase. Forçando logout...");
-                      forceLogoutBlocked("Acesso bloqueado pelo administrador");
-                      return;
-                    }
-                  } else {
+                  if (isMaster) {
                     dbUser.role = "master";
                     dbUser.cargo = "master";
                     dbUser.is_admin = true;
@@ -5499,18 +5513,7 @@ export default function App() {
     return (
       <AuthScreen
         onLoginSuccess={(user) => {
-          const isMaster = user.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com";
-          if (!isMaster) {
-            const s = (user.status || "").toLowerCase().trim();
-            const ss = ((user as any).status_sistema || "").toLowerCase().trim();
-            const sa = ((user as any).status_assinatura || "").toLowerCase().trim();
-            if (s === "bloqueado" || ss === "bloqueado" || sa === "bloqueado" || s === "blocked" || ss === "blocked" || sa === "blocked") {
-              alert("Acesso bloqueado pelo administrador");
-              localStorage.removeItem("NUCLEO_CURRENT_USER");
-              sessionStorage.clear();
-              return;
-            }
-          } else {
+          if (user.email?.toLowerCase().trim() === "vendas.impactodigital2@gmail.com") {
             user.role = "master";
             user.cargo = "master";
             user.is_admin = true;
@@ -5585,14 +5588,108 @@ export default function App() {
     window.location.replace("/");
   };
 
-  // EXPLICIT FRONTEND SUBSCRIPTION WALL:
+  // EXPLICIT FRONTEND SUBSCRIPTION WALL / SUSPENSION:
   const directStatusStr = (currentUser?.status_assinatura || (currentUser as any)?.status || "").toString().trim().toLowerCase();
   const directSysStatusStr = ((currentUser as any)?.status_sistema || "").toString().trim().toLowerCase();
+  const directUserStatusStr = (currentUser?.status || "").toString().trim().toLowerCase();
 
-  // Bloqueio forçado pelo administrador: desloga imediatamente
-  if (!isMasterUser && (directStatusStr === "bloqueado" || directStatusStr === "blocked" || directSysStatusStr === "bloqueado" || directSysStatusStr === "blocked")) {
-    forceLogoutBlocked("Acesso bloqueado pelo administrador");
-    return null;
+  const isSuspendedAccount = currentUser && !isMasterUser && (
+    directStatusStr === "bloqueado" ||
+    directStatusStr === "blocked" ||
+    directSysStatusStr === "bloqueado" ||
+    directSysStatusStr === "blocked" ||
+    directUserStatusStr === "bloqueado" ||
+    directUserStatusStr === "blocked"
+  );
+
+  if (isSuspendedAccount) {
+    const rawPhone = company?.phone?.replace(/\D/g, "") || "";
+    const userEmail = currentUser.email || currentUser.username || "Cliente";
+    const whatsappMsg = encodeURIComponent(
+      `Olá, meu acesso ao sistema está suspenso para a conta ${userEmail}. Gostaria de solicitar a regularização/PIX para liberação imediata do acesso.`
+    );
+    const whatsappUrl = rawPhone
+      ? `https://api.whatsapp.com/send?phone=${rawPhone.startsWith("55") ? rawPhone : "55" + rawPhone}&text=${whatsappMsg}`
+      : `https://api.whatsapp.com/send?text=${whatsappMsg}`;
+
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex items-center justify-center p-4 relative overflow-hidden select-none">
+        {/* Glow ambient background effects */}
+        <div className="absolute top-1/4 -left-20 w-96 h-96 bg-red-600/10 rounded-full blur-3xl pointer-events-none animate-pulse" />
+        <div className="absolute bottom-1/4 -right-20 w-96 h-96 bg-amber-600/10 rounded-full blur-3xl pointer-events-none animate-pulse" />
+
+        <div className="max-w-lg w-full bg-slate-900/90 border border-red-500/30 rounded-3xl p-6 sm:p-8 backdrop-blur-xl shadow-2xl relative z-10 text-center space-y-6 animate-fade-in">
+          {/* Status Icon */}
+          <div className="mx-auto w-20 h-20 rounded-2xl bg-gradient-to-br from-red-500/20 via-rose-500/10 to-amber-500/10 border border-red-500/40 flex items-center justify-center shadow-lg shadow-red-500/10">
+            <ShieldAlert className="w-10 h-10 text-red-400 animate-pulse" />
+          </div>
+
+          {/* Titles & Message */}
+          <div className="space-y-2">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest bg-red-950/80 text-red-300 border border-red-800/80 font-mono">
+              <span className="w-2 h-2 rounded-full bg-red-400 animate-ping" />
+              Acesso Suspenso
+            </span>
+            <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
+              Acesso Suspenso - Pagamento Pendente
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed max-w-md mx-auto">
+              Seu período de teste ou mensalidade expirou. O acesso aos módulos operacionais (PDV, Caixa, Produtos, Clientes e Configurações) encontra-se temporariamente suspenso até a confirmação da renovação.
+            </p>
+          </div>
+
+          {/* Account info card */}
+          <div className="bg-slate-950/70 border border-slate-800/80 rounded-2xl p-4 text-left space-y-2.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-400 font-medium">Conta / Usuário:</span>
+              <span className="font-bold text-slate-200 font-mono truncate max-w-[200px]">{currentUser.name} ({currentUser.email || currentUser.username})</span>
+            </div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-400 font-medium">Situação do Sistema:</span>
+              <span className="font-black text-red-400 uppercase tracking-wide flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-red-500" />
+                Bloqueado / Pagamento Pendente
+              </span>
+            </div>
+            {company?.pixKey && (
+              <div className="pt-2 border-t border-slate-850 flex items-center justify-between text-xs">
+                <span className="text-slate-400 font-medium">Chave PIX da Empresa:</span>
+                <span className="font-mono text-amber-300 font-bold">{company.pixKey}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Action Buttons */}
+          <div className="space-y-3 pt-2">
+            {/* WhatsApp action button */}
+            <a
+              href={whatsappUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full py-3.5 px-6 rounded-2xl font-black text-xs sm:text-sm text-slate-950 bg-gradient-to-r from-emerald-400 via-emerald-300 to-teal-300 hover:from-emerald-300 hover:to-teal-200 transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2.5 cursor-pointer transform hover:-translate-y-0.5 active:translate-y-0"
+            >
+              <MessageCircle className="w-5 h-5 fill-slate-950" />
+              <span>Regularizar / Enviar PIX via WhatsApp</span>
+            </a>
+
+            {/* Logout button */}
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="w-full py-3 px-4 rounded-xl text-xs font-bold text-slate-400 hover:text-white bg-slate-950/60 hover:bg-slate-800/60 border border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <LogOut className="w-4 h-4 text-slate-400" />
+              <span>Sair da Conta (Trocar de Usuário)</span>
+            </button>
+          </div>
+
+          {/* Notice */}
+          <div className="pt-2 text-[11px] text-slate-500 font-mono">
+            Assim que a regularização for concluída, seu acesso ao PDV, Caixa e Estoque será restabelecido automaticamente.
+          </div>
+        </div>
+      </div>
+    );
   }
 
   const userPlan = ((currentUser as any)?.plano || (currentUser as any)?.plan || "").toString().trim().toLowerCase();
@@ -5932,46 +6029,12 @@ export default function App() {
           <React.Suspense fallback={<LazyLoader />}>
             <AdminPanel />
           </React.Suspense>
-        ) : (!isMasterUser && (currentUser?.status === "bloqueado" || currentUser?.status_sistema === "bloqueado" || currentUser?.status_assinatura === "bloqueado")) ? (
-  /* ECRÃ DE BLOQUEIO / PAGAMENTO PARA UTILIZADORES SUSPENSOS OU TRIAL EXPIRADO */
-  <div className="min-h-[85vh] flex items-center justify-center p-4">
-    <div className="max-w-md w-full bg-slate-900/90 border border-rose-500/40 rounded-2xl p-6 text-center shadow-2xl backdrop-blur-md">
-      <div className="w-16 h-16 bg-rose-500/10 text-rose-500 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl font-bold border border-rose-500/20">
-        🔒
-      </div>
-      <h2 className="text-xl font-bold text-white mb-2 uppercase tracking-wide">Acesso Suspenso</h2>
-      <p className="text-slate-300 text-sm mb-6 leading-relaxed">
-        A sua assinatura ou período de testes expirou. Para regularizar o seu acesso e continuar a utilizar o sistema, efetue o pagamento da mensalidade.
-      </p>
-
-      <div className="space-y-3">
-        <a 
-          href="https://wa.me/5511982417583?text=Olá,%20gostaria%20de%20regularizar%20o%20meu%20acesso%20ao%20sistema" 
-          target="_blank" 
-          rel="noreferrer"
-          className="w-full block py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-900/30 text-sm"
-        >
-          Regularizar via PIX / WhatsApp
-        </a>
-
-        <button
-          onClick={() => {
-            localStorage.clear();
-            window.location.reload();
-          }}
-          className="w-full py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-xl transition-all text-xs"
-        >
-          Sair da Conta
-        </button>
-      </div>
-    </div>
-  </div>
-) : (!isRegisterOpenForToday && !isMasterUser) ? (
-  /* HARD BLOCK SCREEN WHEN CASH REGISTER IS CLOSED */
-  <ClosedRegisterGate
-    onOpenRegisterClick={() => setShowCashRegisterModal(true)}
-    operatorName={currentUser?.name || currentUser?.username}
-  />
+        ) : (!isRegisterOpenForToday && !isMasterUser) ? (
+          /* HARD BLOCK SCREEN WHEN CASH REGISTER IS CLOSED (Master Admin has unrestricted access) */
+          <ClosedRegisterGate
+            onOpenRegisterClick={() => setShowCashRegisterModal(true)}
+            operatorName={currentUser?.name || currentUser?.username}
+          />
         ) : (
           /* REGULAR OPERATIONAL VIEWPORTS CONTENT */
           <>
