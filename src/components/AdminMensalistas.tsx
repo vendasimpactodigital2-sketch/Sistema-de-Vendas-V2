@@ -22,7 +22,12 @@ import {
   Play,
   Volume2,
   X,
-  Send
+  Send,
+  Zap,
+  KeyRound,
+  Copy,
+  ExternalLink,
+  QrCode
 } from "lucide-react";
 import { User, SupportConfig, SupportFeedback } from "../types";
 import { 
@@ -50,9 +55,69 @@ export function AdminMensalistas({ currentUser, onBack, addToast }: AdminMensali
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
   // Support states
-  const [activeSubTab, setActiveSubTab] = useState<"mensalistas" | "mensagens_suporte" | "config_suporte">("mensalistas");
+  const [activeSubTab, setActiveSubTab] = useState<"mensalistas" | "mensagens_suporte" | "config_suporte" | "integracao_asaas">("mensalistas");
   const [supportConfig, setSupportConfig] = useState<SupportConfig | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
+
+  // Asaas Integration State
+  const [asaasConfig, setAsaasConfig] = useState<{
+    configured: boolean;
+    maskedKey?: string;
+    isSandbox?: boolean;
+    baseUrl?: string;
+    webhookUrl?: string;
+    recommendedEvents?: string[];
+  } | null>(null);
+  const [asaasApiKeyInput, setAsaasApiKeyInput] = useState("");
+  const [asaasWebhookSecretInput, setAsaasWebhookSecretInput] = useState("");
+  const [savingAsaas, setSavingAsaas] = useState(false);
+  const [copiedWebhook, setCopiedWebhook] = useState(false);
+  const [loadingAsaasConfig, setLoadingAsaasConfig] = useState(false);
+
+  const fetchAsaasConfig = async () => {
+    setLoadingAsaasConfig(true);
+    try {
+      const res = await fetch("/api/asaas/config");
+      if (res.ok) {
+        const data = await res.json();
+        setAsaasConfig(data);
+      }
+    } catch (err) {
+      console.warn("Erro ao buscar config Asaas:", err);
+    } finally {
+      setLoadingAsaasConfig(false);
+    }
+  };
+
+  const handleSaveAsaasConfig = async () => {
+    if (!asaasApiKeyInput.trim() && !asaasWebhookSecretInput.trim()) {
+      localAddToast("Por favor, insira a chave da API do Asaas para salvar.", "warning");
+      return;
+    }
+    setSavingAsaas(true);
+    try {
+      const res = await fetch("/api/asaas/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey: asaasApiKeyInput.trim(),
+          webhookSecret: asaasWebhookSecretInput.trim()
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        localAddToast("Chave do Asaas configurada e sincronizada com sucesso! ⚡", "success");
+        setAsaasApiKeyInput("");
+        fetchAsaasConfig();
+      } else {
+        localAddToast(data.error || "Erro ao salvar chaves do Asaas.", "error");
+      }
+    } catch (err: any) {
+      localAddToast(`Erro de rede: ${err.message}`, "error");
+    } finally {
+      setSavingAsaas(false);
+    }
+  };
 
   // Reply states
   const [selectedUserForSupport, setSelectedUserForSupport] = useState<User | null>(null);
@@ -89,6 +154,7 @@ export function AdminMensalistas({ currentUser, onBack, addToast }: AdminMensali
     };
     loadConfig();
     fetchAllFeedbacks();
+    fetchAsaasConfig();
   }, []);
 
   const handleSaveSupportConfig = async () => {
@@ -616,6 +682,23 @@ export function AdminMensalistas({ currentUser, onBack, addToast }: AdminMensali
           >
             Configurações do Suporte 🎧
           </button>
+          <button
+            onClick={() => {
+              setActiveSubTab("integracao_asaas");
+              fetchAsaasConfig();
+            }}
+            className={`px-4 py-2.5 text-xs font-black uppercase tracking-wider border-b-2 transition-all cursor-pointer flex items-center gap-1.5 ${
+              activeSubTab === "integracao_asaas" 
+                ? "border-emerald-500 text-emerald-400" 
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Integração Asaas / Pix Automático ⚡</span>
+            {asaasConfig?.configured && (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            )}
+          </button>
         </div>
 
         {activeSubTab === "mensalistas" && (
@@ -905,6 +988,192 @@ export function AdminMensalistas({ currentUser, onBack, addToast }: AdminMensali
                 <span>Salvar Configurações</span>
               )}
             </button>
+          </div>
+        )}
+
+        {/* Asaas Integration & Pix Keys */}
+        {activeSubTab === "integracao_asaas" && (
+          <div className="mt-6 space-y-6">
+            <div className="bg-slate-900/60 border border-slate-850 p-6 rounded-2xl space-y-6">
+              {/* Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
+                <div>
+                  <h3 className="text-base font-black text-white flex items-center gap-2">
+                    <Zap className="h-5 w-5 text-emerald-400" />
+                    Integração Oficial Asaas • Cobrança Pix & Liberação Automática
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Gera QR Code Pix automático ao expirar o prazo do usuário e destrava o sistema imediatamente após o pagamento.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className={`px-3 py-1 rounded-full text-xs font-mono font-black uppercase tracking-wider flex items-center gap-1.5 ${
+                    asaasConfig?.configured 
+                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+                      : "bg-amber-500/10 text-amber-400 border border-amber-500/30"
+                  }`}>
+                    <span className={`w-2 h-2 rounded-full ${asaasConfig?.configured ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`} />
+                    {asaasConfig?.configured ? (asaasConfig.isSandbox ? "Asaas Sandbox Ativo" : "Asaas Produção Conectado") : "Aguardando Chave de API"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Status Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl space-y-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Status da Chave</span>
+                  <div className="text-sm font-bold text-white font-mono flex items-center justify-between">
+                    <span>{asaasConfig?.configured ? `Conectada (${asaasConfig.maskedKey || "OK"})` : "Não Configurada"}</span>
+                    {asaasConfig?.configured && <CheckCircle2 className="h-4 w-4 text-emerald-400" />}
+                  </div>
+                </div>
+
+                <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl space-y-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Ambiente da API</span>
+                  <div className="text-sm font-bold text-white font-mono">
+                    {asaasConfig?.baseUrl || "https://api.asaas.com/v3"}
+                  </div>
+                </div>
+
+                <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl space-y-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Sincronização</span>
+                  <div className="text-sm font-bold text-emerald-400 flex items-center gap-1.5 font-mono">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                    Webhook + Polling Ativos
+                  </div>
+                </div>
+              </div>
+
+              {/* Webhook URL Configuration Card */}
+              <div className="bg-slate-950/80 border border-emerald-500/30 p-5 rounded-2xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <QrCode className="w-5 h-5 text-emerald-400" />
+                    <span className="text-xs font-black uppercase tracking-wider text-slate-200">
+                      1. URL do Webhook do Asaas (Sincronização Automática)
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                    Endpoint de Retorno
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-400">
+                  Copie esta URL e cadastre no painel do Asaas em <strong>Configurações da Conta &gt; Integrações &gt; Webhooks para Cobranças</strong>:
+                </p>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={asaasConfig?.webhookUrl || `${window.location.origin}/api/webhook/asaas`}
+                    className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-emerald-300 font-mono select-all focus:outline-none focus:border-emerald-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const url = asaasConfig?.webhookUrl || `${window.location.origin}/api/webhook/asaas`;
+                      navigator.clipboard.writeText(url);
+                      setCopiedWebhook(true);
+                      localAddToast("URL do Webhook copiada para a área de transferência! 📋", "success");
+                      setTimeout(() => setCopiedWebhook(false), 3000);
+                    }}
+                    className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs uppercase rounded-xl transition-all cursor-pointer flex items-center gap-1.5 shrink-0 shadow-lg shadow-emerald-600/10"
+                  >
+                    {copiedWebhook ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    <span>{copiedWebhook ? "Copiado!" : "Copiar URL"}</span>
+                  </button>
+                </div>
+
+                <div className="text-[11px] text-slate-400 bg-slate-900/60 p-3 rounded-xl border border-slate-800/80 space-y-1">
+                  <strong className="text-slate-200 block">Eventos que você deve marcar no Webhook do Asaas:</strong>
+                  <div className="flex flex-wrap gap-2 pt-1 font-mono text-[10px]">
+                    <span className="bg-emerald-950/60 text-emerald-300 border border-emerald-800/60 px-2 py-0.5 rounded-md font-bold">
+                      ✓ Cobrança Recebida (PAYMENT_RECEIVED)
+                    </span>
+                    <span className="bg-emerald-950/60 text-emerald-300 border border-emerald-800/60 px-2 py-0.5 rounded-md font-bold">
+                      ✓ Cobrança Confirmada (PAYMENT_CONFIRMED)
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* API Key Configuration Card */}
+              <div className="bg-slate-950/80 border border-slate-800 p-5 rounded-2xl space-y-4">
+                <div className="flex items-center gap-2">
+                  <KeyRound className="w-5 h-5 text-amber-400" />
+                  <span className="text-xs font-black uppercase tracking-wider text-slate-200">
+                    2. Chave de API do Asaas (ASAAS_API_KEY)
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-400">
+                  Gere sua chave no painel do Asaas em <strong>Configurações da Conta &gt; Integrações &gt; Chaves de API &gt; Gerar Chave de API</strong> e cole abaixo:
+                </p>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                      Chave de API do Asaas (começa com <code className="text-amber-400 font-mono">$aact_...</code> em Produção ou <code className="text-cyan-400 font-mono">$aae...</code> em Sandbox):
+                    </label>
+                    <input
+                      type="password"
+                      placeholder={asaasConfig?.configured ? "Chave já cadastrada (digite nova para atualizar)" : "Cole sua chave do Asaas aqui ($aact_...)"}
+                      value={asaasApiKeyInput}
+                      onChange={(e) => setAsaasApiKeyInput(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                      Token de Autenticação do Webhook (Opcional - ASAAS_WEBHOOK_SECRET):
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Token secreto definido no webhook do Asaas (opcional)"
+                      value={asaasWebhookSecretInput}
+                      onChange={(e) => setAsaasWebhookSecretInput(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleSaveAsaasConfig}
+                    disabled={savingAsaas}
+                    className="w-full sm:w-auto px-6 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-white font-black text-xs uppercase rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/20"
+                  >
+                    {savingAsaas ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Sincronizando...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-4 h-4" />
+                        <span>Salvar e Sincronizar Chaves do Asaas</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Instructions Guide */}
+              <div className="bg-slate-950/50 border border-slate-800/80 p-5 rounded-2xl space-y-3 text-xs text-slate-300">
+                <h4 className="font-bold text-white uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                  Como funciona a liberação automática:
+                </h4>
+                <ol className="list-decimal list-inside space-y-1.5 text-slate-400 leading-relaxed">
+                  <li>Quando os dias de teste ou a mensalidade do cliente expirarem, ele verá a <strong>Tela de Pagamento Pix com QR Code Oficial do Asaas</strong> diretamente no sistema.</li>
+                  <li>O cliente realiza o pagamento via QR Code ou Copia e Cola em qualquer banco.</li>
+                  <li>O Asaas dispara o webhook para o sistema e o sistema também verifica a cada 2,5 segundos via polling.</li>
+                  <li>O sistema atualiza o status do cliente para <strong>ATIVO</strong> e renova a data de expiração por mais 30 dias automaticamente, liberando o PDV, Caixa e Estoque na mesma hora sem precisar de intervenção manual!</li>
+                </ol>
+              </div>
+            </div>
           </div>
         )}
 

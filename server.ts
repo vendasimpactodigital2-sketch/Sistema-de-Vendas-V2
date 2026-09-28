@@ -213,18 +213,19 @@ function registerApiRoutes(app: express.Express) {
             status: "ATIVO", 
             status_assinatura: "ativo",
             trial_end: trialEndDate,
+            data_expiracao: trialEndDate,
             updated_at: new Date().toISOString()
           })
           .eq("id", userId);
 
         if (userErr) {
           console.warn("[Supabase Activation] Tentando atualizar 'users' apenas com status='ATIVO':", userErr.message);
-          const { error: fallbackErr } = await supabase.from("users").update({ status: "ATIVO", trial_end: trialEndDate }).eq("id", userId);
+          const { error: fallbackErr } = await supabase.from("users").update({ status: "ATIVO", trial_end: trialEndDate, data_expiracao: trialEndDate }).eq("id", userId);
           if (!fallbackErr) {
             userUpdated = true;
           } else {
             // Tenta também com status_assinatura="ativo"
-            await supabase.from("users").update({ status_assinatura: "ativo", trial_end: trialEndDate }).eq("id", userId);
+            await supabase.from("users").update({ status_assinatura: "ativo", trial_end: trialEndDate, data_expiracao: trialEndDate }).eq("id", userId);
             userUpdated = true;
           }
         } else {
@@ -255,6 +256,7 @@ function registerApiRoutes(app: express.Express) {
             status: "ATIVO", 
             status_assinatura: "ATIVO",
             trial_end: trialEndDate,
+            data_expiracao: trialEndDate,
             updated_at: new Date().toISOString()
           })
           .eq("id", userId);
@@ -290,11 +292,24 @@ function registerApiRoutes(app: express.Express) {
     const candidates = [
       process.env.ASAAS_API_KEY,
       process.env.ASAAS_TOKEN,
-      process.env.VITE_ASAAS_TOKEN
+      process.env.VITE_ASAAS_TOKEN,
+      process.env.ASAAS_ACCESS_TOKEN
     ].map(k => (k || "").trim()).filter(Boolean);
 
     const validKey = candidates.find(k => !isAsaasKeyPlaceholder(k));
-    return validKey || candidates[0] || "";
+    if (validKey) return validKey;
+
+    try {
+      const cfgPath = path.join(process.cwd(), "asaas_config.json");
+      if (fs.existsSync(cfgPath)) {
+        const raw = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+        if (raw.apiKey && !isAsaasKeyPlaceholder(raw.apiKey)) {
+          return raw.apiKey.trim();
+        }
+      }
+    } catch (e) {}
+
+    return candidates[0] || "";
   };
 
   // Helper to resolve Asaas API base URL safely (Default: Produção Asaas v3 - https://api.asaas.com/v3)
@@ -1076,6 +1091,7 @@ ${JSON.stringify(sales, null, 2)}
 
         // 3. Atualizar o status do usuário DIRETAMENTE na tabela 'users' do Supabase para 'ATIVO' (Realtime ativo)
         console.log(`[Asaas Webhook] Atualizando status do usuário DIRETAMENTE na tabela 'users' para 'ATIVO' (ID: ${usuarioIdNoSupabase})...`);
+        const trialEndDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
         let userUpdated = false;
         try {
           const { error: userError } = await supabase
@@ -1083,6 +1099,8 @@ ${JSON.stringify(sales, null, 2)}
             .update({
               status: "ATIVO",
               status_assinatura: "ativo",
+              trial_end: trialEndDate,
+              data_expiracao: trialEndDate,
               asaas_customer_id: clienteIdNoAsaas,
               updated_at: new Date().toISOString()
             })
@@ -1092,7 +1110,7 @@ ${JSON.stringify(sales, null, 2)}
             console.warn("[Asaas Webhook] Tentando atualizar 'users' apenas com status='ATIVO':", userError.message);
             const { error: fallbackErr1 } = await supabase
               .from("users")
-              .update({ status: "ATIVO" })
+              .update({ status: "ATIVO", trial_end: trialEndDate, data_expiracao: trialEndDate })
               .eq("id", usuarioIdNoSupabase);
 
             if (!fallbackErr1) {
@@ -1102,7 +1120,7 @@ ${JSON.stringify(sales, null, 2)}
               // Tenta com status_assinatura
               const { error: fallbackErr2 } = await supabase
                 .from("users")
-                .update({ status_assinatura: "ativo" })
+                .update({ status_assinatura: "ativo", trial_end: trialEndDate, data_expiracao: trialEndDate })
                 .eq("id", usuarioIdNoSupabase);
               if (!fallbackErr2) {
                 userUpdated = true;
@@ -1120,7 +1138,6 @@ ${JSON.stringify(sales, null, 2)}
         }
 
         // Sincroniza na tabela 'assinaturas' com status 'ativo' e trial_end
-        const trialEndDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
         let assinaturaUpdated = false;
         try {
           const { error: assError } = await supabase
@@ -1161,6 +1178,7 @@ ${JSON.stringify(sales, null, 2)}
               status: "ATIVO",
               status_assinatura: "ATIVO",
               trial_end: trialEndDate,
+              data_expiracao: trialEndDate,
               asaas_customer_id: clienteIdNoAsaas,
               updated_at: new Date().toISOString()
             })
@@ -1196,6 +1214,59 @@ ${JSON.stringify(sales, null, 2)}
   app.post("/api/webhooks/asaas", handleAsaasWebhook);
   app.get(["/api/webhook/asaas", "/api/webhooks/asaas"], (req, res) => res.json({ status: "ok", message: "Asaas Webhook endpoint ativo" }));
   app.head(["/api/webhook/asaas", "/api/webhooks/asaas"], (req, res) => res.sendStatus(200));
+
+  // Endpoint de configuração e verificação das chaves do Asaas
+  app.get("/api/asaas/config", (req, res) => {
+    const activeKey = getActiveAsaasKey();
+    const hasValidKey = !isAsaasKeyPlaceholder(activeKey);
+    const maskedKey = hasValidKey 
+      ? (activeKey.length > 10 ? `${activeKey.slice(0, 7)}...${activeKey.slice(-4)}` : "***") 
+      : "";
+    const isSandbox = activeKey.startsWith("$aae") || (process.env.ASAAS_API_URL || "").includes("sandbox");
+    
+    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+    const host = req.headers["x-forwarded-host"] || req.headers.host;
+    const webhookUrl = `${protocol}://${host}/api/webhook/asaas`;
+
+    res.json({
+      configured: hasValidKey,
+      maskedKey,
+      isSandbox,
+      baseUrl: getAsaasBaseUrl(activeKey),
+      webhookUrl,
+      recommendedEvents: ["PAYMENT_RECEIVED", "PAYMENT_CONFIRMED"],
+      envKeysNeeded: {
+        ASAAS_API_KEY: "Chave de API do Asaas gerada em Meu Perfil > Integrações > Gerar Chave de API",
+        ASAAS_WEBHOOK_SECRET: "Token de autenticação do Webhook (opcional)"
+      }
+    });
+  });
+
+  app.post("/api/asaas/config", (req, res) => {
+    try {
+      const { apiKey, webhookSecret } = req.body || {};
+      if (apiKey && typeof apiKey === "string") {
+        process.env.ASAAS_API_KEY = apiKey.trim();
+      }
+      if (webhookSecret && typeof webhookSecret === "string") {
+        process.env.ASAAS_WEBHOOK_SECRET = webhookSecret.trim();
+      }
+
+      const cfgPath = path.join(process.cwd(), "asaas_config.json");
+      const currentConfig = fs.existsSync(cfgPath) ? JSON.parse(fs.readFileSync(cfgPath, "utf-8")) : {};
+      if (apiKey) currentConfig.apiKey = apiKey.trim();
+      if (webhookSecret) currentConfig.webhookSecret = webhookSecret.trim();
+      fs.writeFileSync(cfgPath, JSON.stringify(currentConfig, null, 2));
+
+      res.json({ 
+        success: true, 
+        message: "Configuração do Asaas sincronizada com sucesso!",
+        configured: !isAsaasKeyPlaceholder(getActiveAsaasKey())
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
 
   // ==========================================
   // STRIPE CHECKOUT & SUBSCRIPTION INTEGRATION
