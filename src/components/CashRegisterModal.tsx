@@ -123,6 +123,18 @@ export function CashRegisterModal({
               setCaixaDbStatus("FECHADO");
             }
           } else {
+            const cur = cashRegister.currentSession;
+            if (cur && cur.status === "aberto" && getLocalDateFromISO(cur.dataAbertura) === getLocalDateFromISO(new Date().toISOString())) {
+              setCaixaDbStatus("ABERTO");
+            } else {
+              setCaixaDbStatus("FECHADO");
+            }
+          }
+        } else {
+          const cur = cashRegister.currentSession;
+          if (cur && cur.status === "aberto" && getLocalDateFromISO(cur.dataAbertura) === getLocalDateFromISO(new Date().toISOString())) {
+            setCaixaDbStatus("ABERTO");
+          } else {
             setCaixaDbStatus("FECHADO");
           }
         }
@@ -142,8 +154,11 @@ export function CashRegisterModal({
           const row = (payload.new || payload.old) as any;
           const status = String(row?.status || "").toLowerCase().trim();
           if (payload.eventType === "DELETE" || status === "fechado" || row?.data_fechamento) {
-            setCaixaDbStatus("FECHADO");
-            onRefreshRegister?.();
+            const currentSessionId = cashRegister.currentSession?.id;
+            if (currentSessionId && row?.id && String(row.id) === String(currentSessionId)) {
+              setCaixaDbStatus("FECHADO");
+              onRefreshRegister?.();
+            }
           } else if (status === "aberto") {
             const openDate = getLocalDateFromISO(row?.data_abertura);
             const todayDate = getLocalDateFromISO(new Date().toISOString());
@@ -164,9 +179,14 @@ export function CashRegisterModal({
           table: "caixa_status"
         },
         (payload: any) => {
+          const rowUserId = payload.new?.user_id;
+          if (rowUserId && rowUserId !== companyId) return;
           const st = String(payload.new?.status || "").toUpperCase();
           if (st === "FECHADO") {
-            setCaixaDbStatus("FECHADO");
+            const cur = cashRegister.currentSession;
+            if (!cur || cur.status !== "aberto") {
+              setCaixaDbStatus("FECHADO");
+            }
           } else if (st === "ABERTO") {
             setCaixaDbStatus("ABERTO");
           }
@@ -177,13 +197,10 @@ export function CashRegisterModal({
     return () => {
       supabase.removeChannel(channel).catch(() => {});
     };
-  }, [currentUser, onRefreshRegister]);
+  }, [currentUser, onRefreshRegister, cashRegister.currentSession]);
 
   // Active session resolution: handles multi-terminal sync and strictly enforces daily order
   const activeSession: CashRegisterSession | null = useMemo(() => {
-    if (caixaDbStatus === "FECHADO") {
-      return null;
-    }
     const current = cashRegister.currentSession;
     if (current && current.status === "aberto") {
       const openDate = getLocalDateFromISO(current.dataAbertura);
@@ -191,7 +208,9 @@ export function CashRegisterModal({
       if (openDate === todayDate) {
         return current;
       }
-      // Sessão de dia anterior expirada
+    }
+
+    if (caixaDbStatus === "FECHADO" && (!current || current.status !== "aberto")) {
       return null;
     }
 
@@ -516,6 +535,20 @@ export function CashRegisterModal({
     const op = operatorInput.trim() || activeOperatorName || "Operador Principal";
 
     const userId = currentUser?.owner_id || currentUser?.id || "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+    fetch("/api/cash-register/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId,
+        session: {
+          valorAbertura: val,
+          operador: op,
+          dataAbertura: new Date().toISOString(),
+          status: "aberto"
+        }
+      })
+    }).catch(() => {});
+
     const supabase = getSupabase();
     if (supabase) {
       (async () => {

@@ -3487,7 +3487,31 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
         }
       }
 
-      // Se não há sessão aberta na tabela oficial sessoes_caixa, o caixa está fechado
+      // Se não há sessão aberta na tabela sessoes_caixa, verificar candidatos na tabela sales
+      try {
+        const { data: salesCandidates } = await supabase
+          .from("sales")
+          .select("id, items, date")
+          .in("id", [`cash_register_state_${companyId}`, `cash_register_state_${effectiveUserId}`, "cash_register_state"])
+          .limit(3);
+
+        if (salesCandidates && salesCandidates.length > 0) {
+          for (const cand of salesCandidates) {
+            let candState = cand.items;
+            if (typeof candState === "string") {
+              try { candState = JSON.parse(candState); } catch (e) {}
+            }
+            if (candState && candState.currentSession && isCashSessionActiveOrOpen(candState.currentSession)) {
+              return {
+                currentSession: candState.currentSession,
+                history: historyItems.length > 0 ? historyItems : (candState.history || [])
+              };
+            }
+          }
+        }
+      } catch (salesErr) {}
+
+      // Se não há sessão aberta em nenhuma das tabelas, o caixa está fechado
       return {
         currentSession: null,
         history: historyItems

@@ -3446,12 +3446,13 @@ ${JSON.stringify(sales, null, 2)}
           .limit(10);
 
         if (sessRows && sessRows.length > 0) {
-          const latestSess = sessRows[0];
-          const latestStatus = String(latestSess.status || latestSess.situacao || "").toLowerCase().trim();
-          const isLatestClosed = latestStatus === "fechado" || latestStatus === "fechada" || latestStatus === "closed" || latestStatus === "encerrado" || !!latestSess.data_fechamento || !!latestSess.fechado_em;
+          const openSess = sessRows.find((s: any) => {
+            const st = String(s.status || s.situacao || "").toLowerCase().trim();
+            const isClosed = st === "fechado" || st === "fechada" || st === "closed" || st === "encerrado" || !!s.data_fechamento || !!s.fechado_em;
+            return !isClosed && (st.includes("abert") || st.includes("ativ") || st.includes("open") || s.aberto === true);
+          });
 
-          if (!isLatestClosed && (latestStatus.includes("abert") || latestStatus.includes("ativ") || latestStatus.includes("open") || latestSess.aberto === true)) {
-            const openSess = latestSess;
+          if (openSess) {
             let histItems: any[] = [];
             try {
               const { data: hRows } = await supabase
@@ -3520,7 +3521,7 @@ ${JSON.stringify(sales, null, 2)}
         console.warn("[/api/cash-register GET] sessoes_caixa check notice:", sessErr);
       }
 
-      // Se a sessão mais recente está fechada ou não existe sessão aberta para hoje, retornar caixa fechado
+      // Se não encontrou sessão aberta em sessoes_caixa, verificar se o latestCandidate da tabela sales possui sessão aberta válida
       let safeHist: any[] = [];
       try {
         const { data: hRows } = await supabase
@@ -3537,6 +3538,25 @@ ${JSON.stringify(sales, null, 2)}
           });
         }
       } catch (e) {}
+
+      if (latestCandidate?.state) {
+        const candState = latestCandidate.state;
+        const candSession = candState.currentSession;
+        if (candSession && (candSession.status === "aberto" || candSession.status === "open" || candSession.status === "ativo")) {
+          const sessDate = (candSession.dataAbertura || "").substring(0, 10);
+          const todayDate = new Date().toISOString().substring(0, 10);
+          if (!candSession.dataFechamento && (sessDate === todayDate || !sessDate)) {
+            return res.json({
+              success: true,
+              data: {
+                currentSession: candSession,
+                history: safeHist.length > 0 ? safeHist : (candState.history || [])
+              },
+              date: candSession.dataAbertura || new Date().toISOString()
+            });
+          }
+        }
+      }
 
       return res.json({
         success: true,
