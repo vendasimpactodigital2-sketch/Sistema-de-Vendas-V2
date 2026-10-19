@@ -3167,6 +3167,82 @@ export default function App() {
     };
   }, [handleApplyRemoteSystemStructure]);
 
+  // Listener para restauração de cópias de segurança (local ou nuvem): recarrega dados silenciosamente
+  useEffect(() => {
+    const handleRestoreReload = (evt: any) => {
+      console.log("[App] Backup restaurado detectado, atualizando dados em memória a partir do localStorage...");
+      try {
+        const savedSales = localStorage.getItem("NUCLEO_SALES");
+        if (savedSales) {
+          const parsed = JSON.parse(savedSales);
+          if (Array.isArray(parsed)) {
+            setSales(parsed);
+            salesRef.current = parsed;
+          }
+        }
+        const savedBudgets = localStorage.getItem("NUCLEO_BUDGETS");
+        if (savedBudgets) {
+          const parsed = JSON.parse(savedBudgets);
+          if (Array.isArray(parsed)) {
+            setBudgets(parsed);
+            budgetsRef.current = parsed;
+          }
+        }
+        const savedExpenses = localStorage.getItem("NUCLEO_EXPENSES");
+        if (savedExpenses) {
+          const parsed = JSON.parse(savedExpenses);
+          if (Array.isArray(parsed)) {
+            setExpenses(parsed);
+          }
+        }
+        const savedBills = localStorage.getItem("NUCLEO_MONTHLY_BILLS") || localStorage.getItem("NUCLEO_RECURRING_EXPENSES");
+        if (savedBills) {
+          const parsed = JSON.parse(savedBills);
+          if (Array.isArray(parsed)) {
+            setBills(parsed);
+          }
+        }
+        const savedProducts = localStorage.getItem("NUCLEO_PRODUCTS");
+        if (savedProducts) {
+          const parsed = JSON.parse(savedProducts);
+          if (Array.isArray(parsed)) {
+            setCatalogProducts(parsed);
+          }
+        }
+        const savedCompany = localStorage.getItem("NUCLEO_COMPANY_PROFILE");
+        if (savedCompany) {
+          const parsed = JSON.parse(savedCompany);
+          if (parsed && typeof parsed === "object") {
+            setCompany(parsed);
+          }
+        }
+        const savedGoals = localStorage.getItem("NUCLEO_GOALS");
+        if (savedGoals) {
+          const parsed = JSON.parse(savedGoals);
+          if (parsed.goalValue !== undefined) setGoalValue(parsed.goalValue);
+          if (parsed.goalType) setGoalType(parsed.goalType);
+        }
+        const savedCashRegister = localStorage.getItem("NUCLEO_CASH_REGISTER");
+        if (savedCashRegister) {
+          const parsed = JSON.parse(savedCashRegister);
+          setCashRegister(parsed);
+          cashRegisterRef.current = parsed;
+          const isOpen = !!parsed.currentSession && isCashSessionActiveOrOpen(parsed.currentSession);
+          setIsGlobalRegisterOpen(isOpen);
+        }
+      } catch (err) {
+        console.warn("[App] Erro ao sincronizar estados locais após restauração:", err);
+      }
+    };
+
+    window.addEventListener("backup_restored_sync" as any, handleRestoreReload);
+    window.addEventListener("local_storage_restored" as any, handleRestoreReload);
+    return () => {
+      window.removeEventListener("backup_restored_sync" as any, handleRestoreReload);
+      window.removeEventListener("local_storage_restored" as any, handleRestoreReload);
+    };
+  }, []);
+
   // Instant Real-Time Cross-Terminal Synchronizer (SSE Stream + Custom Event Bus)
   useEffect(() => {
     if (!currentUser) return;

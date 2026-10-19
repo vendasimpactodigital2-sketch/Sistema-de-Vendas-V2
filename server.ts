@@ -3045,10 +3045,11 @@ ${JSON.stringify(sales, null, 2)}
 
       if (error) {
         console.warn("[Server GET /api/backups] meus_dados query notice:", error.message);
-        return res.json({ success: true, backups: [] });
+        const isTableMissing = error.message?.includes("meus_dados") || error.message?.includes("schema cache") || (error as any).code === "PGRST205" || (error as any).code === "42P01";
+        return res.json({ success: true, backups: [], tableMissing: isTableMissing });
       }
 
-      return res.json({ success: true, backups: data || [] });
+      return res.json({ success: true, backups: data || [], tableMissing: false });
     } catch (err: any) {
       console.error("[Server GET /api/backups Exception]:", err);
       return res.status(500).json({ error: err.message, backups: [] });
@@ -3086,7 +3087,14 @@ ${JSON.stringify(sales, null, 2)}
 
       if (error) {
         console.error("[Server POST /api/backups] Insert error:", error);
-        return res.status(500).json({ error: error.message });
+        const isTableMissing = error.message?.includes("meus_dados") || error.message?.includes("schema cache") || (error as any).code === "PGRST205" || (error as any).code === "42P01";
+        return res.status(isTableMissing ? 200 : 500).json({ 
+          success: false, 
+          tableMissing: isTableMissing, 
+          error: isTableMissing 
+            ? "Tabela 'meus_dados' não encontrada no banco Supabase. Execute o script SQL para criá-la." 
+            : error.message 
+        });
       }
 
       // Broadcast to all computers logged into the system
@@ -3105,7 +3113,7 @@ ${JSON.stringify(sales, null, 2)}
         broadcastSyncEvent(t, "backup_sync", { backup: data, timestamp: Date.now() });
       });
 
-      return res.json({ success: true, backup: data });
+      return res.json({ success: true, backup: data, tableMissing: false });
     } catch (err: any) {
       console.error("[Server POST /api/backups Exception]:", err);
       return res.status(500).json({ error: err.message });
@@ -3128,7 +3136,12 @@ ${JSON.stringify(sales, null, 2)}
         .eq("id", id);
 
       if (error) {
-        return res.status(500).json({ error: error.message });
+        const isTableMissing = error.message?.includes("meus_dados") || error.message?.includes("schema cache") || (error as any).code === "PGRST205" || (error as any).code === "42P01";
+        return res.status(isTableMissing ? 200 : 500).json({ 
+          success: false, 
+          tableMissing: isTableMissing, 
+          error: isTableMissing ? "Tabela 'meus_dados' não encontrada no Supabase." : error.message 
+        });
       }
 
       const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";

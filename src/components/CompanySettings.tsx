@@ -60,6 +60,41 @@ const defaultBusinessHours: BusinessHours = {
   sunday: { isOpen: false, openTime: "09:00", closeTime: "18:00" },
 };
 
+export const MEUS_DADOS_SQL_SCRIPT = `-- =========================================================================
+-- SCRIPT DE CRIAÇÃO DA TABELA DE BACKUPS NA NUVEM ('public.meus_dados')
+-- Execute este script no SQL Editor do painel do seu Supabase
+-- =========================================================================
+
+-- 1. Criação da tabela meus_dados
+CREATE TABLE IF NOT EXISTS public.meus_dados (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    titulo TEXT NOT NULL,
+    descricao TEXT,
+    valor NUMERIC DEFAULT 0,
+    empresa_id UUID,
+    user_id TEXT,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 2. Índices para performance e consultas rápidas
+CREATE INDEX IF NOT EXISTS idx_meus_dados_user_id ON public.meus_dados(user_id);
+CREATE INDEX IF NOT EXISTS idx_meus_dados_created_at ON public.meus_dados(created_at DESC);
+
+-- 3. Habilita Row Level Security (RLS)
+ALTER TABLE public.meus_dados ENABLE ROW LEVEL SECURITY;
+
+-- 4. Criação de política permissiva para leitura, gravação e exclusão
+DROP POLICY IF EXISTS "Permitir acesso completo a meus_dados" ON public.meus_dados;
+CREATE POLICY "Permitir acesso completo a meus_dados" 
+ON public.meus_dados 
+FOR ALL 
+TO public, anon, authenticated 
+USING (true) 
+WITH CHECK (true);
+
+-- 5. Habilitar sincronização em tempo real (Supabase Realtime)
+ALTER PUBLICATION supabase_realtime ADD TABLE public.meus_dados;`;
+
 interface CompanySettingsProps {
   company: CompanyProfile;
   onSaveCompany: (updated: CompanyProfile) => void;
@@ -510,6 +545,7 @@ export function CompanySettings({
   const [backupError, setBackupError] = useState<string | null>(null);
   const [backupSuccessMsg, setBackupSuccessMsg] = useState<string | null>(null);
   const backupFileInputRef = useRef<HTMLInputElement>(null);
+  const localBackupFileInputRef = useRef<HTMLInputElement>(null);
 
   // Backup list and Realtime sync from meus_dados table
   interface BackupCloudItem {
@@ -524,6 +560,9 @@ export function CompanySettings({
 
   const [cloudBackups, setCloudBackups] = useState<BackupCloudItem[]>([]);
   const [loadingCloudBackups, setLoadingCloudBackups] = useState<boolean>(false);
+  const [isTableMissing, setIsTableMissing] = useState<boolean>(false);
+  const [showSqlScriptModal, setShowSqlScriptModal] = useState<boolean>(false);
+  const [copiedSql, setCopiedSql] = useState<boolean>(false);
   const uploadCloudBackupInputRef = useRef<HTMLInputElement>(null);
   const [uploadingCloud, setUploadingCloud] = useState<boolean>(false);
 
@@ -538,6 +577,11 @@ export function CompanySettings({
         const res = await fetch("/api/backups");
         if (res.ok) {
           const json = await res.json();
+          if (json.tableMissing) {
+            setIsTableMissing(true);
+          } else if (json.success) {
+            setIsTableMissing(false);
+          }
           if (json.success && Array.isArray(json.backups)) {
             setCloudBackups(json.backups);
             setLoadingCloudBackups(false);
@@ -557,10 +601,26 @@ export function CompanySettings({
         .select("*")
         .order("created_at", { ascending: false });
 
-      if (data) {
+      if (error) {
+        if (
+          error.message?.includes("meus_dados") ||
+          error.message?.includes("schema cache") ||
+          (error as any).code === "PGRST205" ||
+          (error as any).code === "42P01"
+        ) {
+          setIsTableMissing(true);
+        }
+      } else if (data) {
+        setIsTableMissing(false);
         setCloudBackups(data);
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (
+        err?.message?.includes("meus_dados") ||
+        err?.message?.includes("schema cache")
+      ) {
+        setIsTableMissing(true);
+      }
       console.warn("Aviso ao carregar backups da tabela meus_dados:", err);
     } finally {
       setLoadingCloudBackups(false);
@@ -679,6 +739,7 @@ export function CompanySettings({
 
       // 1. Tentar salvar pelo endpoint do servidor que propaga SSE/Realtime para todas as máquinas
       let savedViaServer = false;
+      let isMissingTable = false;
       try {
         const srvRes = await fetch("/api/backups", {
           method: "POST",
@@ -690,15 +751,24 @@ export function CompanySettings({
             userId: activeUserId
           })
         });
-        if (srvRes.ok) {
+        const json = await srvRes.json().catch(() => ({}));
+        if (srvRes.ok && json.success) {
           savedViaServer = true;
+          setIsTableMissing(false);
+        } else if (
+          json.tableMissing ||
+          json.error?.includes("meus_dados") ||
+          json.error?.includes("schema cache")
+        ) {
+          isMissingTable = true;
+          setIsTableMissing(true);
         }
       } catch (srvErr) {
         console.warn("Aviso ao salvar backup via servidor:", srvErr);
       }
 
-      // 2. Se não foi pelo servidor, salvar direto via client Supabase
-      if (!savedViaServer && supabase) {
+      // 2. Se não foi pelo servidor e a tabela não está confirmadamente ausente, tentar direto via client Supabase
+      if (!savedViaServer && !isMissingTable && supabase) {
         const payloadRecord: any = {
           titulo: file.name,
           descricao: updatedText,
@@ -706,7 +776,31 @@ export function CompanySettings({
           user_id: activeUserId
         };
         const { error } = await supabase.from("meus_dados").insert(payloadRecord);
-        if (error) throw error;
+        if (error) {
+          if (
+            error.message?.includes("meus_dados") ||
+            error.message?.includes("schema cache") ||
+            (error as any).code === "PGRST205" ||
+            (error as any).code === "42P01"
+          ) {
+            isMissingTable = true;
+            setIsTableMissing(true);
+          } else {
+            throw error;
+          }
+        } else {
+          setIsTableMissing(false);
+        }
+      }
+
+      if (isMissingTable) {
+        setBackupError(
+          "⚠️ A tabela 'meus_dados' ainda não foi criada no seu Supabase. " +
+          "Os backups locais continuam 100% disponíveis abaixo! " +
+          "Para ativar o backup em nuvem, copie o comando SQL no painel de instruções e execute no SQL Editor do Supabase."
+        );
+        setShowSqlScriptModal(true);
+        return;
       }
 
       // Propagar para todos os computadores conectados
@@ -718,8 +812,20 @@ export function CompanySettings({
       setTimeout(() => setBackupSuccessMsg(null), 6000);
       await fetchCloudBackups();
     } catch (err: any) {
-      console.error("Erro ao enviar backup:", err);
-      setBackupError("Falha ao salvar backup na nuvem: " + (err.message || err));
+      if (
+        err?.message?.includes("meus_dados") ||
+        err?.message?.includes("schema cache")
+      ) {
+        setIsTableMissing(true);
+        setBackupError(
+          "⚠️ A tabela 'meus_dados' não foi encontrada no Supabase. " +
+          "Para salvar backups na nuvem, execute o script SQL no seu painel Supabase. Enquanto isso, use o Backup Local!"
+        );
+        setShowSqlScriptModal(true);
+      } else {
+        console.error("Erro ao enviar backup:", err);
+        setBackupError("Falha ao salvar backup na nuvem: " + (err.message || err));
+      }
     } finally {
       setUploadingCloud(false);
     }
@@ -824,6 +930,7 @@ export function CompanySettings({
 
       // Salvar via API do servidor (propaga para todos os computadores conectados via SSE)
       let savedViaServer = false;
+      let cloudTableMissing = false;
       try {
         const srvRes = await fetch("/api/backups", {
           method: "POST",
@@ -835,14 +942,23 @@ export function CompanySettings({
             userId: activeUserId
           })
         });
-        if (srvRes.ok) {
+        const json = await srvRes.json().catch(() => ({}));
+        if (srvRes.ok && json.success) {
           savedViaServer = true;
+          setIsTableMissing(false);
+        } else if (
+          json.tableMissing ||
+          json.error?.includes("meus_dados") ||
+          json.error?.includes("schema cache")
+        ) {
+          cloudTableMissing = true;
+          setIsTableMissing(true);
         }
       } catch (srvErr) {
         console.warn("Aviso ao salvar backup via API do servidor:", srvErr);
       }
 
-      if (!savedViaServer && supabase) {
+      if (!savedViaServer && !cloudTableMissing && supabase) {
         try {
           const payloadRecord: any = {
             titulo: fileName,
@@ -850,7 +966,20 @@ export function CompanySettings({
             valor: jsonString.length,
             user_id: activeUserId
           };
-          await supabase.from("meus_dados").insert(payloadRecord);
+          const { error: insErr } = await supabase.from("meus_dados").insert(payloadRecord);
+          if (insErr) {
+            if (
+              insErr.message?.includes("meus_dados") ||
+              insErr.message?.includes("schema cache") ||
+              (insErr as any).code === "PGRST205" ||
+              (insErr as any).code === "42P01"
+            ) {
+              cloudTableMissing = true;
+              setIsTableMissing(true);
+            }
+          } else {
+            setIsTableMissing(false);
+          }
         } catch (dbErr) {
           console.warn("Aviso ao salvar backup na tabela meus_dados:", dbErr);
         }
@@ -862,8 +991,15 @@ export function CompanySettings({
       window.dispatchEvent(new CustomEvent("cloud_backups_updated", { detail: { backup: { titulo: fileName } } }));
 
       fetchCloudBackups();
-      setBackupSuccessMsg("Cópia de segurança exportada com sucesso! O arquivo .json foi salvo na sua pasta de Downloads e sincronizado na Nuvem para todos os computadores.");
-      setTimeout(() => setBackupSuccessMsg(null), 6000);
+      if (cloudTableMissing) {
+        setBackupSuccessMsg(
+          `Cópia de segurança "${fileName}" exportada e baixada com sucesso no seu dispositivo! ` +
+          `(Nota: A tabela 'meus_dados' ainda não foi criada no seu Supabase para backup na nuvem. Use o comando SQL fornecido se desejar ativá-la).`
+        );
+      } else {
+        setBackupSuccessMsg("Cópia de segurança exportada com sucesso! O arquivo .json foi salvo na sua pasta de Downloads e sincronizado na Nuvem para todos os computadores.");
+      }
+      setTimeout(() => setBackupSuccessMsg(null), 8000);
     } catch (err: any) {
       console.error(err);
       alert("Falha ao exportar backup: " + (err.message || err));
@@ -882,11 +1018,24 @@ export function CompanySettings({
       setBackupFile(file);
       // Reset input value so user can reselect the same file if needed
       e.target.value = "";
-      await executeDirectRestore(file);
+      await executeDirectRestore(file, false);
     }
   };
 
-  const executeDirectRestore = async (file: File) => {
+  const handleLocalBackupFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    setBackupError(null);
+    setBackupSuccessMsg(null);
+    setBackupPreview(null);
+    
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      setBackupFile(file);
+      e.target.value = "";
+      await executeDirectRestore(file, true /* isLocalOnly: independent of Supabase */);
+    }
+  };
+
+  const executeDirectRestore = async (file: File, isLocalOnly: boolean = false) => {
     setImporting(true);
     setBackupError(null);
     setBackupSuccessMsg(null);
@@ -916,7 +1065,7 @@ export function CompanySettings({
       const dumpCandidate = source.localStorageDump || (parsed.localStorageDump) || source;
       if (dumpCandidate && typeof dumpCandidate === "object" && !Array.isArray(dumpCandidate)) {
         Object.keys(dumpCandidate).forEach((k) => {
-          if (k.startsWith("NUCLEO_") || k.startsWith("COMPANY_")) {
+          if (k.startsWith("NUCLEO_") || k.startsWith("COMPANY_") || k.startsWith("nexvolt_")) {
             try {
               const val = typeof dumpCandidate[k] === "string" ? dumpCandidate[k] : JSON.stringify(dumpCandidate[k]);
               localStorage.setItem(k, val);
@@ -929,6 +1078,7 @@ export function CompanySettings({
 
       // Extract entities from all possible structures (arrays, camelCase, snake_case, pt/en)
       let sales: any[] = [];
+      let budgets: any[] = [];
       let produtos: any[] = [];
       let expenses: any[] = [];
       let gastos_mensais: any[] = [];
@@ -937,27 +1087,36 @@ export function CompanySettings({
       let company_profile: any = null;
       let goals: any = null;
       let cash_register_state: any = null;
+      let custom_reminders: any[] = [];
 
       if (Array.isArray(source)) {
         sales = source;
       } else if (typeof source === "object") {
         sales = Array.isArray(source.sales) ? source.sales : 
-                Array.isArray(source.vendas) ? source.vendas : [];
+                Array.isArray(source.vendas) ? source.vendas : 
+                Array.isArray(source.orders) ? source.orders : [];
+        budgets = Array.isArray(source.budgets) ? source.budgets : 
+                  Array.isArray(source.orcamentos) ? source.orcamentos : [];
         produtos = Array.isArray(source.produtos) ? source.produtos : 
-                   Array.isArray(source.products) ? source.products : [];
+                   Array.isArray(source.products) ? source.products : 
+                   Array.isArray(source.itens) ? source.itens : [];
         expenses = Array.isArray(source.expenses) ? source.expenses : 
                    Array.isArray(source.despesas) ? source.despesas : 
                    Array.isArray(source.gastos) ? source.gastos : [];
         gastos_mensais = Array.isArray(source.gastos_mensais) ? source.gastos_mensais : 
+                         Array.isArray(source.monthly_bills) ? source.monthly_bills : 
                          Array.isArray(source.faturas) ? source.faturas : 
                          Array.isArray(source.fixed_expenses) ? source.fixed_expenses : [];
         clientes = Array.isArray(source.clientes) ? source.clientes : 
                    Array.isArray(source.clients) ? source.clients : [];
         vendas_rapidas_itens = Array.isArray(source.vendas_rapidas_itens) ? source.vendas_rapidas_itens :
                                Array.isArray(source.quick_sales) ? source.quick_sales : [];
-        company_profile = source.company_profile || source.empresa || null;
+        company_profile = source.company_profile || source.empresa || source.company || null;
         goals = source.goals || source.metas || null;
-        cash_register_state = source.cash_register_state || source.cashRegister || null;
+        cash_register_state = source.cash_register_state || source.cash_register || source.cashRegister || null;
+        custom_reminders = Array.isArray(source.custom_reminders) ? source.custom_reminders : 
+                           Array.isArray(source.reminders) ? source.reminders : 
+                           Array.isArray(source.lembretes) ? source.lembretes : [];
       }
 
       // Fallback: check localStorageDump for missing entities
@@ -966,14 +1125,18 @@ export function CompanySettings({
           if (sales.length === 0 && dumpCandidate["NUCLEO_SALES"]) {
             sales = typeof dumpCandidate["NUCLEO_SALES"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_SALES"]) : dumpCandidate["NUCLEO_SALES"];
           }
+          if (budgets.length === 0 && dumpCandidate["NUCLEO_BUDGETS"]) {
+            budgets = typeof dumpCandidate["NUCLEO_BUDGETS"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_BUDGETS"]) : dumpCandidate["NUCLEO_BUDGETS"];
+          }
           if (produtos.length === 0 && dumpCandidate["NUCLEO_PRODUCTS"]) {
             produtos = typeof dumpCandidate["NUCLEO_PRODUCTS"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_PRODUCTS"]) : dumpCandidate["NUCLEO_PRODUCTS"];
           }
           if (expenses.length === 0 && dumpCandidate["NUCLEO_EXPENSES"]) {
             expenses = typeof dumpCandidate["NUCLEO_EXPENSES"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_EXPENSES"]) : dumpCandidate["NUCLEO_EXPENSES"];
           }
-          if (gastos_mensais.length === 0 && dumpCandidate["NUCLEO_RECURRING_EXPENSES"]) {
-            gastos_mensais = typeof dumpCandidate["NUCLEO_RECURRING_EXPENSES"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_RECURRING_EXPENSES"]) : dumpCandidate["NUCLEO_RECURRING_EXPENSES"];
+          if (gastos_mensais.length === 0 && (dumpCandidate["NUCLEO_MONTHLY_BILLS"] || dumpCandidate["NUCLEO_RECURRING_EXPENSES"])) {
+            const rawBills = dumpCandidate["NUCLEO_MONTHLY_BILLS"] || dumpCandidate["NUCLEO_RECURRING_EXPENSES"];
+            gastos_mensais = typeof rawBills === "string" ? JSON.parse(rawBills) : rawBills;
           }
           if (clientes.length === 0 && dumpCandidate["NUCLEO_CLIENTS"]) {
             clientes = typeof dumpCandidate["NUCLEO_CLIENTS"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_CLIENTS"]) : dumpCandidate["NUCLEO_CLIENTS"];
@@ -990,30 +1153,53 @@ export function CompanySettings({
           if (!cash_register_state && dumpCandidate["NUCLEO_CASH_REGISTER"]) {
             cash_register_state = typeof dumpCandidate["NUCLEO_CASH_REGISTER"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_CASH_REGISTER"]) : dumpCandidate["NUCLEO_CASH_REGISTER"];
           }
+          if (custom_reminders.length === 0 && dumpCandidate["NUCLEO_CUSTOM_REMINDERS"]) {
+            custom_reminders = typeof dumpCandidate["NUCLEO_CUSTOM_REMINDERS"] === "string" ? JSON.parse(dumpCandidate["NUCLEO_CUSTOM_REMINDERS"]) : dumpCandidate["NUCLEO_CUSTOM_REMINDERS"];
+          }
         } catch (dumpParseErr) {
           console.warn("Aviso ao extrair entidades do dump local:", dumpParseErr);
         }
       }
 
+      // If budgets are embedded in sales as isBudget: true, extract them
+      if (budgets.length === 0 && sales.length > 0) {
+        budgets = sales.filter((s: any) => s && (s.isBudget || s.is_budget));
+      }
+
       // Immediately write primary entity keys to localStorage for offline readiness & speed
       if (sales.length > 0) localStorage.setItem("NUCLEO_SALES", JSON.stringify(sales));
+      if (budgets.length > 0) localStorage.setItem("NUCLEO_BUDGETS", JSON.stringify(budgets));
       if (expenses.length > 0) localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(expenses));
       if (produtos.length > 0) localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(produtos));
-      if (gastos_mensais.length > 0) localStorage.setItem("NUCLEO_RECURRING_EXPENSES", JSON.stringify(gastos_mensais));
+      if (gastos_mensais.length > 0) {
+        localStorage.setItem("NUCLEO_MONTHLY_BILLS", JSON.stringify(gastos_mensais));
+        localStorage.setItem("NUCLEO_RECURRING_EXPENSES", JSON.stringify(gastos_mensais));
+      }
       if (clientes.length > 0) localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(clientes));
       if (vendas_rapidas_itens.length > 0) localStorage.setItem("NUCLEO_QUICK_SALES", JSON.stringify(vendas_rapidas_itens));
-      if (company_profile) localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(company_profile));
-      if (goals) localStorage.setItem("NUCLEO_GOALS", JSON.stringify(goals));
+      if (company_profile) {
+        localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(company_profile));
+        if (onSaveCompany) {
+          try { onSaveCompany(company_profile); } catch (e) {}
+        }
+      }
+      if (goals) {
+        localStorage.setItem("NUCLEO_GOALS", JSON.stringify(goals));
+        if (goals.goalValue !== undefined) localStorage.setItem("NUCLEO_GOAL_VALUE", String(goals.goalValue));
+        if (goals.goalType) localStorage.setItem("NUCLEO_GOAL_TYPE", goals.goalType);
+      }
       if (cash_register_state) localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(cash_register_state));
+      if (custom_reminders.length > 0) localStorage.setItem("NUCLEO_CUSTOM_REMINDERS", JSON.stringify(custom_reminders));
 
       const ownerId = currentUser ? (currentUser.owner_id || currentUser.id) : "";
 
-      // Import to remote Supabase database if configured
-      if (ownerId && isSupabaseConfigured()) {
+      // Import to remote Supabase database only if not strictly local and configured
+      if (!isLocalOnly && ownerId && isSupabaseConfigured()) {
         try {
           const res = await dbImportAllData(ownerId, {
             ...parsed,
             sales,
+            budgets,
             produtos,
             expenses,
             gastos_mensais,
@@ -1028,36 +1214,45 @@ export function CompanySettings({
           if (res.success) {
             setBackupSuccessMsg(
               `Backup restaurado com sucesso no sistema e em todos os terminais! 🎉\n` +
-              `• Vendas: ${res.counts.sales}\n` +
-              `• Produtos: ${res.counts.produtos}\n` +
-              `• Despesas: ${res.counts.expenses}\n` +
-              `• Clientes: ${res.counts.clientes}\n` +
-              `• Vendas Rápidas: ${res.counts.vendas_rapidas_itens || vendas_rapidas_itens.length}\n` +
-              `• Faturas fixas: ${res.counts.gastos_mensais}`
+              `• Vendas: ${res.counts.sales || sales.length}\n` +
+              `• Produtos: ${res.counts.produtos || produtos.length}\n` +
+              `• Despesas: ${res.counts.expenses || expenses.length}\n` +
+              `• Clientes: ${res.counts.clientes || clientes.length}\n` +
+              `• Faturas fixas: ${res.counts.gastos_mensais || gastos_mensais.length}`
             );
           } else {
             setBackupSuccessMsg(`Dados restaurados localmente (${sales.length} vendas, ${produtos.length} produtos, ${expenses.length} despesas). Aviso: ${res.error}`);
           }
         } catch (dbErr: any) {
           console.warn("Aviso ao importar no banco:", dbErr);
-          setBackupSuccessMsg(`Backup restaurado localmente com ${sales.length} vendas e ${produtos.length} produtos.`);
+          setBackupSuccessMsg(`Backup restaurado localmente com ${sales.length} vendas, ${produtos.length} produtos e ${expenses.length} despesas.`);
         }
       } else {
-        setBackupSuccessMsg(`Backup restaurado com sucesso no sistema local! 🎉 (${sales.length} vendas, ${produtos.length} produtos, ${expenses.length} despesas prontas).`);
+        setBackupSuccessMsg(
+          `Backup local "${file.name}" restaurado com sucesso! 🎉\n` +
+          `• Vendas: ${sales.length}\n` +
+          `• Orçamentos: ${budgets.length}\n` +
+          `• Produtos: ${produtos.length}\n` +
+          `• Despesas: ${expenses.length}\n` +
+          `• Clientes: ${clientes.length}\n` +
+          `• Faturas fixas: ${gastos_mensais.length}`
+        );
       }
 
       // Broadcast real-time sync notification across all terminals and devices
-      if (ownerId) {
+      if (ownerId && !isLocalOnly) {
         notifyRealtimeSync(ownerId, "backup_restored", { timestamp: Date.now() });
       }
 
       // Local browser window events for instant UI reactivity
-      window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: { event: "backup_restored" } }));
+      window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: { event: "backup_restored", isLocalOnly } }));
+      window.dispatchEvent(new CustomEvent("local_storage_restored", { detail: { sales, budgets, produtos, expenses, clientes, gastos_mensais, company_profile } }));
+      window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: { count: sales.length } }));
       window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: { event: "backup_restored" } }));
 
-      // Refresh global app data immediately
+      // Refresh global app data silently
       if (onRefreshData) {
-        await onRefreshData(currentUser || undefined, false, true);
+        await onRefreshData(currentUser || undefined, true, true);
       }
     } catch (err: any) {
       console.error("Erro ao processar restauração de backup:", err);
@@ -1075,17 +1270,54 @@ export function CompanySettings({
 
   const handleExportLocalStorageBackup = () => {
     try {
-      const backup: Record<string, string> = {};
+      const localStorageDump: Record<string, string> = {};
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (key && key.startsWith("NUCLEO_")) {
+        if (key && (key.startsWith("NUCLEO_") || key.startsWith("COMPANY_") || key.startsWith("nexvolt_"))) {
           const val = localStorage.getItem(key);
           if (val !== null) {
-            backup[key] = val;
+            localStorageDump[key] = val;
           }
         }
       }
-      const dataStr = JSON.stringify(backup, null, 2);
+
+      const getParsedSafe = (key: string) => {
+        try {
+          const val = localStorage.getItem(key);
+          return val ? JSON.parse(val) : null;
+        } catch {
+          return null;
+        }
+      };
+
+      const structuredPayload = {
+        app: "Impacto Visual / Nexvolt",
+        backup_type: "local_storage_backup",
+        version: "2.0.0",
+        exported_at: new Date().toISOString(),
+        sales: getParsedSafe("NUCLEO_SALES") || [],
+        budgets: getParsedSafe("NUCLEO_BUDGETS") || [],
+        produtos: getParsedSafe("NUCLEO_PRODUCTS") || [],
+        expenses: getParsedSafe("NUCLEO_EXPENSES") || [],
+        gastos_mensais: getParsedSafe("NUCLEO_MONTHLY_BILLS") || getParsedSafe("NUCLEO_RECURRING_EXPENSES") || [],
+        clientes: getParsedSafe("NUCLEO_CLIENTS") || [],
+        vendas_rapidas_itens: getParsedSafe("NUCLEO_QUICK_SALES") || [],
+        company_profile: getParsedSafe("NUCLEO_COMPANY_PROFILE"),
+        goals: getParsedSafe("NUCLEO_GOALS") || {
+          goalValue: Number(localStorage.getItem("NUCLEO_GOAL_VALUE")) || 0,
+          goalType: localStorage.getItem("NUCLEO_GOAL_TYPE") || "daily"
+        },
+        cash_register: getParsedSafe("NUCLEO_CASH_REGISTER"),
+        custom_reminders: getParsedSafe("NUCLEO_CUSTOM_REMINDERS") || [],
+        localStorageDump
+      };
+
+      const exportObject: Record<string, any> = {
+        ...localStorageDump,
+        ...structuredPayload
+      };
+
+      const dataStr = JSON.stringify(exportObject, null, 2);
       const blob = new Blob([dataStr], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       
@@ -1100,7 +1332,7 @@ export function CompanySettings({
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
       
-      setBackupSuccessMsg("Cópia de segurança do armazenamento local (LocalStorage) exportada com sucesso! Salva na pasta de Downloads.");
+      setBackupSuccessMsg("Cópia de segurança do armazenamento local (LocalStorage) exportada com sucesso! O arquivo foi salvo na sua pasta de Downloads.");
       setTimeout(() => setBackupSuccessMsg(null), 6000);
     } catch (err: any) {
       alert("Erro ao exportar backup local: " + err.message);
@@ -1111,12 +1343,11 @@ export function CompanySettings({
     const confirmRestore = window.confirm(
       "⚠️ RESTAURAR CÓPIA LOCAL (LocalStorage)\n\n" +
       "ATENÇÃO: Este procedimento atualizará seus dados locais de vendas, produtos, gastos e clientes cadastrados com as informações do arquivo de backup.\n\n" +
-      "Deseja prosseguir com a restauração imediata? O sistema reiniciará para atualizar os dados."
+      "Deseja prosseguir com a restauração imediata?"
     );
     if (!confirmRestore) return;
     
     try {
-      // Set the restored keys without wiping authentication or open cash register state
       Object.entries(backupObj).forEach(([key, val]) => {
         if (typeof val === "string") {
           localStorage.setItem(key, val);
@@ -1125,8 +1356,12 @@ export function CompanySettings({
         }
       });
       
-      alert("✓ Restauração local realizada com sucesso! O aplicativo será recarregado.");
-      window.location.reload();
+      window.dispatchEvent(new CustomEvent("backup_restored_sync", { detail: { event: "backup_restored", isLocalOnly: true } }));
+      window.dispatchEvent(new CustomEvent("local_storage_restored", { detail: backupObj }));
+      window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: { count: 0 } }));
+      
+      setBackupSuccessMsg("✓ Restauração local realizada com sucesso! Seus dados foram atualizados no sistema.");
+      setTimeout(() => setBackupSuccessMsg(null), 6000);
     } catch (err: any) {
       alert("Falha ao salvar dados de backup local: " + err.message);
     }
@@ -2264,7 +2499,7 @@ export function CompanySettings({
               </p>
             </div>
 
-            {/* Input Oculto */}
+            {/* Input Oculto para Backup Nuvem */}
             <input
               ref={backupFileInputRef}
               type="file"
@@ -2273,17 +2508,26 @@ export function CompanySettings({
               className="hidden"
             />
 
+            {/* Input Oculto para Backup Local (LocalStorage) */}
+            <input
+              ref={localBackupFileInputRef}
+              type="file"
+              accept=".json"
+              onChange={handleLocalBackupFileChange}
+              className="hidden"
+            />
+
             {/* Mensagens de Feedback */}
             {backupSuccessMsg && (
               <div className="bg-emerald-950/50 border border-emerald-500/30 rounded-lg p-2 text-emerald-400 font-sans text-[10px]">
                 <p className="font-bold flex items-center gap-1">✓ Operação concluída com sucesso!</p>
-                <p className="text-[9px] text-emerald-500 mt-0.5">{backupSuccessMsg}</p>
+                <p className="text-[9px] text-emerald-500 mt-0.5 whitespace-pre-line">{backupSuccessMsg}</p>
               </div>
             )}
 
             {backupError && (
               <div className="bg-red-950/50 border border-red-500/30 rounded-lg p-2 text-red-400 font-sans text-[10px]">
-                <p className="font-bold">❌ Falha: {backupError}</p>
+                <p className="font-bold">❌ Aviso: {backupError}</p>
               </div>
             )}
 
@@ -2308,16 +2552,89 @@ export function CompanySettings({
             <div className="space-y-2 bg-slate-950/40 p-2.5 rounded-lg border border-slate-900/40">
               <div className="flex items-center justify-between">
                 <span className="text-[9px] font-black text-brand-magenta uppercase tracking-wider block">1. Backup Remoto (Nuvem Supabase)</span>
-                <button
-                  type="button"
-                  onClick={fetchCloudBackups}
-                  className="text-[8px] text-slate-400 hover:text-brand-magenta flex items-center gap-1 font-mono transition-colors"
-                  title="Atualizar lista de backups"
-                >
-                  <RefreshCw className={`h-2.5 w-2.5 ${loadingCloudBackups ? "animate-spin" : ""}`} />
-                  <span>Sincronizar</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowSqlScriptModal(!showSqlScriptModal)}
+                    className="text-[8px] text-cyan-400 hover:text-cyan-300 flex items-center gap-0.5 font-mono transition-colors font-bold"
+                    title="Exibir comando SQL para criar a tabela meus_dados no Supabase"
+                  >
+                    <FileText className="h-2.5 w-2.5" />
+                    <span>{showSqlScriptModal ? "Ocultar SQL" : "Script SQL Nuvem"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={fetchCloudBackups}
+                    className="text-[8px] text-slate-400 hover:text-brand-magenta flex items-center gap-1 font-mono transition-colors"
+                    title="Atualizar lista de backups"
+                  >
+                    <RefreshCw className={`h-2.5 w-2.5 ${loadingCloudBackups ? "animate-spin" : ""}`} />
+                    <span>Sincronizar</span>
+                  </button>
+                </div>
               </div>
+
+              {/* BANNER INFORMATIVO SE A TABELA MEUS_DADOS NÃO EXISTE */}
+              {isTableMissing && (
+                <div className="bg-amber-950/40 border border-amber-500/30 rounded-lg p-2.5 text-[9px] space-y-1.5 animate-fadeIn">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-bold flex items-center gap-1 text-amber-300">
+                      <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />
+                      Tabela 'meus_dados' ausente no Supabase
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowSqlScriptModal(!showSqlScriptModal)}
+                      className="px-1.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 font-bold uppercase text-[8px] cursor-pointer shrink-0"
+                    >
+                      {showSqlScriptModal ? "Fechar SQL" : "Ver Comando SQL"}
+                    </button>
+                  </div>
+                  <p className="text-slate-350 text-[8.5px] leading-relaxed">
+                    O erro <em>"Could not find the table 'public.meus_dados'"</em> indica que a tabela de sincronização ainda não foi criada no seu banco.
+                    Seus <strong>Backups Locais funcionam perfeitamente</strong> logo abaixo! Para ativar também a nuvem, basta rodar o comando SQL no painel do Supabase.
+                  </p>
+                </div>
+              )}
+
+              {/* MODAL / VISUALIZADOR DO SCRIPT SQL DO SUPABASE */}
+              {showSqlScriptModal && (
+                <div className="bg-slate-900/90 border border-cyan-500/40 rounded-lg p-2.5 space-y-2 animate-fadeIn">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[9px] font-bold text-cyan-300 flex items-center gap-1">
+                      <Database className="h-3 w-3 text-cyan-400" />
+                      Script SQL para Criar Tabela 'meus_dados' no Supabase:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(MEUS_DADOS_SQL_SCRIPT);
+                        setCopiedSql(true);
+                        setTimeout(() => setCopiedSql(false), 3000);
+                      }}
+                      className="flex items-center gap-1 px-2 py-0.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-[8px] uppercase transition-colors cursor-pointer"
+                    >
+                      {copiedSql ? (
+                        <>
+                          <Check className="h-2.5 w-2.5 text-white" />
+                          <span>Copiado!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-2.5 w-2.5" />
+                          <span>Copiar SQL</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  <p className="text-[8px] text-slate-400">
+                    Passo a passo: 1) Abra seu painel do <strong>Supabase</strong> &rarr; 2) Acesse <strong>SQL Editor</strong> no menu lateral &rarr; 3) Cole o script abaixo e clique em <strong>Run</strong>.
+                  </p>
+                  <pre className="bg-slate-950 p-2 rounded border border-slate-800 text-[8px] text-emerald-400 font-mono overflow-x-auto max-h-36 leading-relaxed select-all custom-scrollbar">
+                    {MEUS_DADOS_SQL_SCRIPT}
+                  </pre>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-2 pt-1">
                 <button
@@ -2381,7 +2698,7 @@ export function CompanySettings({
                   </div>
                 ) : cloudBackups.length === 0 ? (
                   <div className="p-2 rounded bg-slate-900/40 border border-slate-900 text-center text-[9px] text-slate-500 font-mono">
-                    Nenhum backup em nuvem encontrado.
+                    {isTableMissing ? "Tabela 'meus_dados' ainda não criada no Supabase." : "Nenhum backup em nuvem encontrado."}
                   </div>
                 ) : (
                   <div className="max-h-40 overflow-y-auto space-y-1 pr-0.5 custom-scrollbar">
@@ -2444,8 +2761,14 @@ export function CompanySettings({
             </div>
 
             {/* --- SEÇÃO LOCALSTORAGE BACKUP --- */}
-            <div className="space-y-1 bg-slate-950/40 p-2 rounded-lg border border-slate-900/40">
-              <span className="text-[9px] font-black text-brand-cyan uppercase tracking-wider block">2. Backup Local (LocalStorage do Navegador)</span>
+            <div className="space-y-1 bg-slate-950/40 p-2.5 rounded-lg border border-slate-900/40">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-black text-brand-cyan uppercase tracking-wider block">2. Backup Local (LocalStorage do Navegador)</span>
+                <span className="text-[8px] text-emerald-400 font-mono font-bold">100% Offline / Imediato</span>
+              </div>
+              <p className="text-[8.5px] text-slate-400 leading-tight">
+                Carregue ou salve backups diretamente no navegador, sem depender de banco de dados ou da tabela 'meus_dados'.
+              </p>
               <div className="grid grid-cols-2 gap-2 pt-1">
                 <button
                   type="button"
@@ -2460,7 +2783,7 @@ export function CompanySettings({
                 <button
                   type="button"
                   onClick={() => {
-                    backupFileInputRef.current?.click();
+                    localBackupFileInputRef.current?.click();
                   }}
                   disabled={importing}
                   className="flex items-center justify-center gap-1 py-1 px-2 rounded-lg bg-slate-905 border border-slate-800 hover:bg-slate-800 hover:text-white text-slate-350 active:scale-95 transition-all text-[9px] font-extrabold uppercase cursor-pointer h-[30px]"
