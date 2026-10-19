@@ -277,10 +277,15 @@ export function UsersManager({ currentUser, onUpdateCurrentUser, onNavigateToAte
       }
     }
 
-     // Manager security PIN gate requested by TestSprite
-    const managerPin = prompt("Esta alteração exige autorização do Administrador. Digite o PIN do Gerente:");
-    if (!managerPin || managerPin !== "123") {
-      setError("PIN do Gerente incorreto ou operação cancelada. Alteração administrativa bloqueada!");
+     // Manager security PIN gate (senha para cadastrar)
+    const managerPin = prompt("Esta alteração exige autorização do Administrador. Digite a senha para cadastrar / PIN (120511):");
+    const validPins = ["120511", "123"];
+    if (currentUser?.password) {
+      const [pass] = currentUser.password.split("::");
+      if (pass) validPins.push(pass);
+    }
+    if (!managerPin || !validPins.includes(managerPin.trim())) {
+      setError("Senha incorreta ou operação cancelada. Alteração administrativa bloqueada! A senha correta é 120511.");
       return;
     }
 

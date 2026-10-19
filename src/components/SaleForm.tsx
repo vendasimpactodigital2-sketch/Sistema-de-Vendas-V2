@@ -125,8 +125,9 @@ export function SaleForm({
 
   // Strict Cash Register status check for SaleForm: prevents adding anything when register is closed
   const isRegisterOpen = Boolean(
-    isGlobalRegisterOpen ||
-    (cashRegister?.currentSession && cashRegister.currentSession.status === "aberto")
+    isGlobalRegisterOpen !== undefined
+      ? isGlobalRegisterOpen
+      : (cashRegister?.currentSession && cashRegister.currentSession.status === "aberto")
   );
 
   const checkRegisterBeforeAction = (actionDesc = "lançar informações na venda"): boolean => {

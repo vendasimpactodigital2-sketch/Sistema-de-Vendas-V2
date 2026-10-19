@@ -33,6 +33,32 @@ interface HeaderProps {
   onOpenStandby?: () => void;
 }
 
+function HeaderClock() {
+  const [now, setNow] = React.useState(() => new Date());
+
+  React.useEffect(() => {
+    const timer = setInterval(() => {
+      setNow(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const formattedTime = now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const formattedDate = now.toLocaleDateString("pt-BR", { day: "2-digit", month: "long" });
+
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-950/60 rounded-xl border border-slate-900/40 text-slate-300 shadow-inner select-none font-medium h-9 shrink-0">
+      <Clock className="h-3.5 w-3.5 text-brand-cyan shrink-0" />
+      <span className="font-mono text-xs font-bold tracking-wider text-slate-100">{formattedTime}</span>
+      <span className="text-slate-700 text-[10px]">|</span>
+      <Calendar className="h-3.5 w-3.5 text-brand-magenta shrink-0" />
+      <span className="text-[10px] font-bold text-slate-200 capitalize">
+        {formattedDate}
+      </span>
+    </div>
+  );
+}
+
 export function Header({ 
   activeTab, 
   setActiveTab, 
@@ -105,7 +131,6 @@ export function Header({
     }
   }, [isGeneralAdmin]);
 
-  const [time, setTime] = React.useState(new Date());
   const [isCalculatorOpen, setIsCalculatorOpen] = React.useState(false);
   const [theme, setTheme] = React.useState<"dark" | "light">(() => {
     const saved = localStorage.getItem("NUCLEO_THEME");
@@ -122,16 +147,6 @@ export function Header({
     }
     localStorage.setItem("NUCLEO_THEME", theme);
   }, [theme]);
-
-  React.useEffect(() => {
-    const timer = setInterval(() => {
-      setTime(new Date());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const formattedTime = time.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const formattedDate = time.toLocaleDateString("pt-BR", { day: "2-digit", month: "long" });
 
   const targetMissingValue = Math.max(0, dailyMetaGoal - todayNetProfitLive);
   const progressPercent = dailyMetaGoal > 0 ? (todayNetProfitLive / dailyMetaGoal) * 100 : 0;
@@ -190,8 +205,11 @@ export function Header({
   const [isCalendarOpen, setIsCalendarOpen] = React.useState(false);
 
   React.useEffect(() => {
+    let lastSavedRaw = "";
     const syncReminders = () => {
-      const saved = localStorage.getItem("NUCLEO_CUSTOM_REMINDERS");
+      const saved = localStorage.getItem("NUCLEO_CUSTOM_REMINDERS") || "";
+      if (saved === lastSavedRaw) return;
+      lastSavedRaw = saved;
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
@@ -204,7 +222,9 @@ export function Header({
             return item;
           });
           if (changed) {
-            localStorage.setItem("NUCLEO_CUSTOM_REMINDERS", JSON.stringify(updated));
+            const jsonStr = JSON.stringify(updated);
+            lastSavedRaw = jsonStr;
+            localStorage.setItem("NUCLEO_CUSTOM_REMINDERS", jsonStr);
           }
           setReminders(updated);
         } catch (e) {
@@ -214,10 +234,13 @@ export function Header({
         setReminders((prev) => prev.length === 0 ? prev : []);
       }
     };
+    syncReminders();
     window.addEventListener("storage", syncReminders);
-    const interval = setInterval(syncReminders, 1000);
+    window.addEventListener("reminders_updated", syncReminders);
+    const interval = setInterval(syncReminders, 15000);
     return () => {
       window.removeEventListener("storage", syncReminders);
+      window.removeEventListener("reminders_updated", syncReminders);
       clearInterval(interval);
     };
   }, []);
@@ -406,11 +429,15 @@ export function Header({
                   <button
                     type="button"
                     onClick={onCashRegisterClick}
-                    className="flex-grow sm:flex-grow-0 flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200 cursor-pointer whitespace-nowrap bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/35 shadow-sm"
-                    title="Abertura e Fechamento de Caixa do Turno"
+                    className={`flex-grow sm:flex-grow-0 flex items-center justify-center gap-2 px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200 cursor-pointer whitespace-nowrap border shadow-sm ${
+                      isCashRegisterOpen
+                        ? "bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border-emerald-500/35"
+                        : "bg-red-500/20 hover:bg-red-500/30 text-red-300 border-red-500/35"
+                    }`}
+                    title={isCashRegisterOpen ? "Caixa Aberto (clique para fechar ou gerenciar)" : "Caixa Fechado (clique para abrir o caixa)"}
                   >
-                    <Wallet className="h-4 w-4 text-emerald-400" />
-                    <span>{isCashRegisterOpen ? "Caixa (Fechar Turno)" : "Abrir Caixa"}</span>
+                    <Wallet className={`h-4 w-4 ${isCashRegisterOpen ? "text-emerald-400" : "text-red-400"}`} />
+                    <span>{isCashRegisterOpen ? "Caixa Aberto" : "Caixa Fechado"}</span>
                   </button>
                 )}
               </>
@@ -703,16 +730,8 @@ export function Header({
 
         {/* ROW 3: Real-time Telemetry Widgets (Clock, Reminders, Goals, Deliveries) aligned horizontally */}
         <div className="flex flex-wrap items-center justify-start lg:justify-end gap-2 bg-slate-950/20 p-2 rounded-2xl border border-slate-850/45 w-full">
-          {/* Digital Clock with Day and Month */}
-          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-950/60 rounded-xl border border-slate-900/40 text-slate-300 shadow-inner select-none font-medium h-9 shrink-0">
-            <Clock className="h-3.5 w-3.5 text-brand-cyan animate-pulse shrink-0" />
-            <span className="font-mono text-xs font-bold tracking-wider text-slate-100">{formattedTime}</span>
-            <span className="text-slate-700 text-[10px]">|</span>
-            <Calendar className="h-3.5 w-3.5 text-brand-magenta shrink-0" />
-            <span className="text-[10px] font-bold text-slate-200 capitalize">
-              {formattedDate}
-            </span>
-          </div>
+          {/* Digital Clock with Day and Month (isolated to avoid header re-renders) */}
+          <HeaderClock />
 
           {/* Real-time "Meus Lembretes" Animated & Clickable Panel */}
           <div className="relative group shrink-0">
@@ -731,10 +750,7 @@ export function Header({
               <div className="flex items-center gap-2 min-w-0">
                 <div className="relative flex items-center justify-center shrink-0">
                   {pendingReminders.length > 0 ? (
-                    <>
-                      <span className="animate-ping absolute inline-flex h-2.5 w-2.5 rounded-full bg-brand-magenta opacity-60" />
-                      <Bell className="h-4 w-4 text-brand-magenta animate-bounce shrink-0 relative z-10" />
-                    </>
+                    <Bell className="h-4 w-4 text-brand-magenta shrink-0" />
                   ) : (
                     <Bell className="h-4 w-4 text-slate-500 shrink-0" />
                   )}
@@ -944,7 +960,7 @@ export function Header({
                 }
                 onRetiradasClick();
               }}
-              className="px-3 py-1.5 bg-yellow-500/10 hover:bg-yellow-500/15 rounded-xl border border-yellow-500/20 flex items-center gap-1.5 text-yellow-500 transition-all cursor-pointer text-xs font-bold shrink-0 animate-pulse hover:animate-none h-9"
+              className="px-3 py-1.5 bg-yellow-500/10 hover:bg-yellow-500/15 rounded-xl border border-yellow-500/20 flex items-center gap-1.5 text-yellow-500 transition-all cursor-pointer text-xs font-bold shrink-0 h-9"
               title="Vendas com retirada pendente ou saldo a receber"
             >
               <ShieldAlert className="h-4 w-4 text-yellow-500 shrink-0" />
@@ -969,25 +985,25 @@ export function Header({
               className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/15 rounded-xl border border-emerald-500/20 flex items-center gap-1.5 text-emerald-400 hover:text-emerald-300 transition-all cursor-pointer text-xs font-bold shrink-0 h-9"
               title="Ver Metas da Semana"
             >
-              <Trophy className="h-4 w-4 text-emerald-400 animate-pulse shrink-0" />
+              <Trophy className="h-4 w-4 text-emerald-400 shrink-0" />
               <span>Metas da Semana</span>
             </button>
           )}
 
-          {/* 4. Caixa Aberto / Abrir Caixa Button */}
+          {/* 4. Caixa Aberto / Caixa Fechado Button */}
           {onCashRegisterClick && (
             <button
               type="button"
               onClick={onCashRegisterClick}
               className={`px-3 py-1.5 rounded-xl border flex items-center gap-1.5 transition-all cursor-pointer text-xs font-bold shrink-0 h-9 ${
                 isCashRegisterOpen
-                  ? "bg-emerald-500/10 hover:bg-emerald-500/15 border-emerald-500/20 text-emerald-400"
-                  : "bg-red-500/10 hover:bg-red-500/15 border-red-500/20 text-red-400 animate-pulse"
+                  ? "bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/35 text-emerald-400 shadow-sm shadow-emerald-500/10"
+                  : "bg-red-500/15 hover:bg-red-500/25 border-red-500/35 text-red-400"
               }`}
-              title="Controle de abertura/fechamento de Caixa diário"
+              title={isCashRegisterOpen ? "Caixa Aberto (clique para gerenciar/fechar)" : "Caixa Fechado (clique para abrir o caixa)"}
             >
               <Wallet className="h-4 w-4 shrink-0" />
-              <span>{isCashRegisterOpen ? "Caixa Aberto" : "Abrir Caixa"}</span>
+              <span>{isCashRegisterOpen ? "Caixa Aberto" : "Caixa Fechado"}</span>
             </button>
           )}
 

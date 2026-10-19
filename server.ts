@@ -1808,7 +1808,7 @@ ${JSON.stringify(sales, null, 2)}
           name: userId === "demo-admin" ? "Administrador" : (userId === "62f892b2-3855-4ae9-8b2d-42d4b6223815" ? "Empresa Principal" : "Usuário"),
           username: userId,
           email: userId === "demo-admin" ? "vendas.impactodigital2@gmail.com" : `${userId}@sistema.local`,
-          password: "123",
+          password: "120511",
           role: "admin",
           owner_id: userId,
           status_assinatura: "ativo",

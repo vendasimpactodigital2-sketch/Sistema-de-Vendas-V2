@@ -412,7 +412,7 @@ export default function App() {
 
   // Periodic interval status check to detect subscription updates in background
   React.useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser?.id) return;
 
     const interval = setInterval(async () => {
       try {
@@ -430,25 +430,22 @@ export default function App() {
           const dbStatusLower = dbStatus.toLowerCase();
           const localStatusLower = (currentUser.status || currentUser.status_assinatura || "").toString().trim().toLowerCase();
 
-          if (dbStatusLower !== localStatusLower) {
-            console.log(`[Interval Check] Syncing user status from DB: ${dbStatus}`);
+          if (dbStatusLower && dbStatusLower !== localStatusLower) {
+            console.log(`[Background Sync] Atualizando status do usuário silenciosamente: ${dbStatus}`);
             const updatedUser = { ...currentUser, status_assinatura: dbStatus, status: dbStatus };
-            localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(updatedUser));
+            try {
+              localStorage.setItem("NUCLEO_CURRENT_USER", JSON.stringify(updatedUser));
+            } catch (e) {}
             setCurrentUser(updatedUser);
-            
-            // Reload if they transition into locked state for clean layout reset, or just update state
-            if (dbStatusLower === 'vencido' || dbStatusLower === 'bloqueado' || dbStatusLower === 'expired') {
-              window.location.reload();
-            }
           }
         }
       } catch (err) {
         console.error("Erro na checagem periódica:", err);
       }
-    }, 15000);
+    }, 30000);
 
     return () => clearInterval(interval);
-  }, [currentUser]);
+  }, [currentUser?.id, currentUser?.status, currentUser?.status_assinatura]);
 
 
   const [activeTab, setActiveTab] = useState<"sale" | "dashboard" | "company" | "gastos" | "usuarios" | "relatorios" | "produtos" | "gastosMeta" | "clientes" | "suporte" | "atendentes" | "adminMaster">("sale");
@@ -1635,7 +1632,7 @@ export default function App() {
   };
 
   const isRegisterOpenForToday = useMemo(() => {
-    const session = cashRegister?.currentSession || cashRegisterRef.current?.currentSession;
+    const session = cashRegister?.currentSession;
     if (session && session.status === "aberto") {
       const openDate = getLocalDateFromISO(session.dataAbertura);
       const todayDate = getLocalDateFromISO(new Date().toISOString());
@@ -1649,8 +1646,8 @@ export default function App() {
         }
       }
     }
-    return isGlobalRegisterOpen;
-  }, [isGlobalRegisterOpen, cashRegister]);
+    return false;
+  }, [cashRegister?.currentSession]);
 
   const [readOnlyMode, setReadOnlyMode] = useState<boolean>(false);
   const [openingOperatorName, setOpeningOperatorName] = useState<string>("");
@@ -2328,21 +2325,20 @@ export default function App() {
           const [remoteCompany, remoteGoals, staticBillsRes, staticProductsRes] = staticRes;
 
           // 2.1 Company Profile
-          companyLoadedForUserId.current = activeUser.id; // Mark as loaded for this active user ID to allow safe auto-sync later
-          if (remoteCompany) {
-            setCompany(remoteCompany);
-            localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(remoteCompany));
-          } else {
-            setCompany(cleanDefaultCompanyProfile);
-            localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(cleanDefaultCompanyProfile));
-          }
+          companyLoadedForUserId.current = activeUser.id;
+          const targetCompany = remoteCompany || cleanDefaultCompanyProfile;
+          setCompany((prev) => {
+            if (JSON.stringify(prev) === JSON.stringify(targetCompany)) return prev;
+            localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(targetCompany));
+            return targetCompany;
+          });
 
           // 2.2 Goals
           if (remoteGoals) {
-            setGoalValue(remoteGoals.goalValue);
-            setGoalType(remoteGoals.goalType);
-            setNotifiedGoalValue(remoteGoals.notifiedGoalValue);
-            setNotifiedGoalDate(remoteGoals.notifiedGoalDate);
+            setGoalValue((prev) => prev === remoteGoals.goalValue ? prev : remoteGoals.goalValue);
+            setGoalType((prev) => prev === remoteGoals.goalType ? prev : remoteGoals.goalType);
+            setNotifiedGoalValue((prev) => prev === remoteGoals.notifiedGoalValue ? prev : remoteGoals.notifiedGoalValue);
+            setNotifiedGoalDate((prev) => prev === remoteGoals.notifiedGoalDate ? prev : remoteGoals.notifiedGoalDate);
             
             localStorage.setItem("NUCLEO_GOAL_VALUE", String(remoteGoals.goalValue));
             localStorage.setItem("NUCLEO_GOAL_TYPE", remoteGoals.goalType);
@@ -2360,30 +2356,41 @@ export default function App() {
               dueDate: d.due_date || d.dueDate || d.vencimento || "",
               observation: d.observation || d.observacao || ""
             }));
-            setBills(mappedBills);
-            localStorage.setItem("NUCLEO_MONTHLY_BILLS", JSON.stringify(mappedBills));
+            setBills((prev) => {
+              if (prev.length === mappedBills.length && prev.every((b, i) => b.id === mappedBills[i].id && b.value === mappedBills[i].value && b.dueDate === mappedBills[i].dueDate)) {
+                return prev;
+              }
+              localStorage.setItem("NUCLEO_MONTHLY_BILLS", JSON.stringify(mappedBills));
+              return mappedBills;
+            });
           }
 
           // 2.4 Product Catalog
-          if (staticProductsRes && Array.isArray(staticProductsRes) && staticProductsRes.length > 0) {
-            setCatalogProducts(staticProductsRes);
-            try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(staticProductsRes)); } catch (e) {}
-          } else if (staticProductsRes && !staticProductsRes.error && staticProductsRes.data) {
-            const mappedProducts: CatalogProduct[] = staticProductsRes.data.map((d: any) => {
-              const cost = Number(d.cost_price ?? d.costPrice ?? d.preco_custo ?? d.valor_custo ?? 0);
-              const sale = Number(d.sale_price ?? d.salePrice ?? d.preco_venda ?? d.valor_venda ?? 0);
-              return {
-                id: d.id,
-                description: d.description || d.name || d.nome || d.descricao || "",
-                costPrice: cost,
-                salePrice: sale,
-                profit: sale - cost,
-                minStock: Number(d.min_stock ?? d.minStock ?? d.estoque_minimo ?? 0),
-                currentStock: Number(d.current_stock ?? d.currentStock ?? d.estoque_atual ?? 0)
-              };
+          const incomingProducts: CatalogProduct[] = (staticProductsRes && Array.isArray(staticProductsRes) && staticProductsRes.length > 0)
+            ? staticProductsRes
+            : (staticProductsRes && !staticProductsRes.error && staticProductsRes.data)
+              ? staticProductsRes.data.map((d: any) => {
+                  const cost = Number(d.cost_price ?? d.costPrice ?? d.preco_custo ?? d.valor_custo ?? 0);
+                  const sale = Number(d.sale_price ?? d.salePrice ?? d.preco_venda ?? d.valor_venda ?? 0);
+                  return {
+                    id: d.id,
+                    description: d.description || d.name || d.nome || d.descricao || "",
+                    costPrice: cost,
+                    salePrice: sale,
+                    profit: sale - cost,
+                    minStock: Number(d.min_stock ?? d.minStock ?? d.estoque_minimo ?? 0),
+                    currentStock: Number(d.current_stock ?? d.currentStock ?? d.estoque_atual ?? 0)
+                  };
+                })
+              : [];
+          if (incomingProducts.length > 0) {
+            setCatalogProducts((prev) => {
+              if (prev.length === incomingProducts.length && prev.every((p, i) => p.id === incomingProducts[i].id && p.currentStock === incomingProducts[i].currentStock && p.salePrice === incomingProducts[i].salePrice)) {
+                return prev;
+              }
+              try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(incomingProducts)); } catch (e) {}
+              return incomingProducts;
             });
-            setCatalogProducts(mappedProducts);
-            try { localStorage.setItem("NUCLEO_PRODUCTS", JSON.stringify(mappedProducts)); } catch (e) {}
           }
         }
       }
@@ -2555,7 +2562,7 @@ export default function App() {
     return () => {
       clearInterval(syncInterval);
     };
-  }, [currentUser]);
+  }, [currentUser?.id]);
 
   // Automatic cash register auto-closing COMPLETELY DISABLED: Cash register stays open until manually closed by user
   useEffect(() => {
@@ -3388,23 +3395,16 @@ export default function App() {
           setIsGlobalRegisterOpen(true);
           localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remote));
         }
-        // Case 2: Local is open, remote is closed -> sync remote closure smoothly without re-opening fight
+        // Case 2: Local is open, remote is closed -> sync remote closure smoothly
         else if (localIsOpen && !remoteIsOpen) {
-          const localSessionId = currentLocal?.currentSession?.id;
-          const isExplicitlyClosedInRemote = !!localSessionId && Array.isArray(remote.history) && remote.history.some(
-            (s: any) => s.id === localSessionId && (s.status === "fechado" || !!s.dataFechamento)
-          );
-          if (isExplicitlyClosedInRemote) {
-            console.log("[Auto-Sync Terminal] Caixa fechado remotamente confirmado no histórico. Sincronizando estado fechado...");
-            setCashRegister(remote);
-            cashRegisterRef.current = remote;
-            setIsGlobalRegisterOpen(false);
-            try {
-              localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remote));
-            } catch (e) {}
-          } else {
-            console.warn("[Auto-Sync Terminal] Mantendo caixa local aberto: sessão local não foi explicitamente encerrada remotamente.");
-          }
+          console.log("[Auto-Sync Terminal] Caixa fechado remotamente detectado. Sincronizando estado fechado...");
+          setCashRegister(remote);
+          cashRegisterRef.current = remote;
+          setIsGlobalRegisterOpen(false);
+          try {
+            localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remote));
+            localStorage.removeItem("NUCLEO_CASH_REGISTER_ACTIVE");
+          } catch (e) {}
         }
         // Case 3: Both open, sync session if different session id
         else if (localIsOpen && remoteIsOpen) {
@@ -4443,7 +4443,7 @@ export default function App() {
 
           if (dirty) {
             localStorage.setItem("NUCLEO_CUSTOM_REMINDERS", JSON.stringify(updatedList));
-            window.dispatchEvent(new Event("storage"));
+            window.dispatchEvent(new CustomEvent("reminders_updated"));
           }
         }
 
@@ -4485,49 +4485,15 @@ export default function App() {
       }
     };
 
-    // run initially and then once every 10 seconds
     checkRemindersAndGoals();
-    const interval = setInterval(checkRemindersAndGoals, 10000);
+    const interval = setInterval(checkRemindersAndGoals, 20000);
     return () => clearInterval(interval);
-  }, [company, dailyMetaGoal, todayNetProfitLive, progressPercent, targetMissingValue, soundEnabled, cashRegister, sales, showAutoClosePrompt]);
+  }, [company, dailyMetaGoal, todayNetProfitLive, progressPercent, targetMissingValue, soundEnabled, cashRegister?.currentSession?.status, showAutoClosePrompt]);
 
   // Centralized cash register validation helper
   const requireOpenCashRegister = (actionDescription: string): boolean => {
-    let hasOpen = !!cashRegister?.currentSession && cashRegister.currentSession.status === "aberto";
-    if (!hasOpen && cashRegisterRef.current?.currentSession?.status === "aberto") {
-      hasOpen = true;
-      setCashRegister(cashRegisterRef.current);
-    }
-    if (!hasOpen) {
-      try {
-        const saved = localStorage.getItem("NUCLEO_CASH_REGISTER");
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (parsed?.currentSession?.status === "aberto") {
-            hasOpen = true;
-            setCashRegister(parsed);
-            cashRegisterRef.current = parsed;
-          }
-        }
-      } catch (e) {}
-    }
-
-    if (!hasOpen) {
-      if (isGlobalRegisterOpen) {
-        // Global cash register is already open for the company! Attempt to adopt session
-        const companyOwnerId = currentUser?.owner_id || currentUser?.id;
-        if (companyOwnerId && isSupabaseConfigured()) {
-          dbGetCashRegister(companyOwnerId).then((remote) => {
-            if (remote?.currentSession) {
-              setCashRegister(remote);
-              cashRegisterRef.current = remote;
-              localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(remote));
-            }
-          }).catch(console.error);
-        }
-        return true;
-      }
-      addToast(`⛔ Ação Bloqueada! O caixa precisa ser aberto para registrar ${actionDescription}.`, "error");
+    if (!isRegisterOpenForToday) {
+      addToast(`⛔ Caixa Fechado! É necessário abrir o caixa antes de ${actionDescription}.`, "error");
       setActiveTab("sale");
       setShowCashRegisterModal(true);
       return false;
@@ -5230,43 +5196,7 @@ export default function App() {
       `• Total de Pedidos Faturados: ${salesCount} vendas\n` +
       `• Saldo Total Entrado Livre (Dinheiro + Pix + Cartão): R$ ${totalFreeVolume.toFixed(2)}`;
 
-    const closedSession: CashRegisterSession = {
-      ...currentSession,
-      status: "fechado",
-      valorFechamentoEsperado: expectedInDrawer,
-      valorFechamentoReal: expectedInDrawer,
-      dataFechamento: new Date().toISOString(),
-      observacoes: observations
-    };
-
-    const existingHist = Array.isArray(cashRegister?.history) ? cashRegister.history : (Array.isArray(cashRegisterRef.current?.history) ? cashRegisterRef.current.history : []);
-    const updatedState: CashRegisterState = {
-      currentSession: null,
-      history: [closedSession, ...existingHist]
-    };
-
-    setCashRegister(updatedState);
-    cashRegisterRef.current = updatedState;
-    setIsGlobalRegisterOpen(false);
-    localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updatedState));
-
-    try {
-      playCloseRegisterSound();
-    } catch (soundErr) {
-      console.warn(soundErr);
-    }
-
-    const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
-    dbCloseGlobalCashRegister(currentUser?.owner_id || currentUser?.id || UNIFIED_EMPRESA_ID).catch(() => {});
-
-    if (currentUser && isSupabaseConfigured()) {
-      const companyId = currentUser.owner_id || currentUser.id;
-      dbSaveCashRegister(companyId, updatedState).catch((syncErr) => {
-        console.error("Error auto-syncing cash register:", syncErr);
-      });
-    }
-
-    addToast(`🔒 O caixa da empresa foi fechado com sucesso. Contabilidade realizada com Valor Líquido de R$ ${expectedInDrawer.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} em caixa.`, "success");
+    handleCloseRegister(expectedInDrawer, observations);
     setShowAutoClosePrompt(false);
   };
 
@@ -6292,7 +6222,7 @@ export default function App() {
                     preselectedClient={preselectedClient}
                     clearPreselectedClient={() => setPreselectedClient(null)}
                     cashRegister={cashRegister}
-                    isGlobalRegisterOpen={isGlobalRegisterOpen || (cashRegister.currentSession?.status === "aberto")}
+                    isGlobalRegisterOpen={isRegisterOpenForToday}
                     onRequestOpenRegister={() => {
                       setActiveTab("sale");
                       setShowCashRegisterModal(true);
