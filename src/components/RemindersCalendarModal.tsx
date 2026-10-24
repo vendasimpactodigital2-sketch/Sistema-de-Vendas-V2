@@ -12,7 +12,6 @@ import {
   AlertCircle,
   HelpCircle
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
 
 interface RemindersCalendarModalProps {
   isOpen: boolean;

@@ -2068,6 +2068,32 @@ ${JSON.stringify(sales, null, 2)}
         }
       }
 
+      // Gravação na tabela relacional de itens de vendas/pedidos (vendas_itens / itens_venda)
+      if (Array.isArray(sale.items) && sale.items.length > 0) {
+        try {
+          const relationalItems = sale.items.map((it: any, idx: number) => ({
+            id: it.id || `${sale.id}_item_${idx}`,
+            venda_id: sale.id,
+            sale_id: sale.id,
+            user_id: canonicalOwnerId,
+            descricao: it.description || "",
+            description: it.description || "",
+            quantidade: Number(it.quantity) || 1,
+            quantity: Number(it.quantity) || 1,
+            preco_unitario: Number(it.unitValue) || 0,
+            unit_value: Number(it.unitValue) || 0,
+            preco_custo: Number(it.unitCost) || 0,
+            unit_cost: Number(it.unitCost) || 0,
+            valor_total: Number(it.totalValue) || 0,
+            total_value: Number(it.totalValue) || 0
+          }));
+          try { await supabase.from("vendas_itens").upsert(relationalItems); } catch {}
+          try { await supabase.from("itens_venda").upsert(relationalItems); } catch {}
+        } catch (itemErr) {
+          console.warn("[Server Relational Items Warning]:", itemErr);
+        }
+      }
+
       // Instant broadcast to all terminals
       broadcastSyncEvent(canonicalOwnerId, "sales_updated", { saleId: sale.id });
       broadcastSyncEvent(userId, "sales_updated", { saleId: sale.id });
@@ -3567,27 +3593,6 @@ ${JSON.stringify(sales, null, 2)}
               }
             } catch (hErr) {}
 
-            const openDate = (openSess.data_abertura || "").substring(0, 10);
-            const todayDate = new Date().toISOString().substring(0, 10);
-
-            if (openDate < todayDate) {
-              // Sessão de dia anterior deixada aberta: fechar formalmente no banco
-              supabase.from("sessoes_caixa").update({
-                status: "fechado",
-                data_fechamento: new Date(openSess.data_abertura).toISOString()
-              }).eq("id", openSess.id).then(() => {});
-
-              const closedPast = {
-                id: openSess.id,
-                status: "fechado",
-                valorAbertura: Number(openSess.valor_abertura ?? openSess.valor_inicial ?? 0) || 0,
-                dataAbertura: openSess.data_abertura,
-                dataFechamento: new Date(openSess.data_abertura).toISOString(),
-                operador: openSess.operador || "Operador"
-              };
-              return res.json({ success: true, data: { currentSession: null, history: [closedPast, ...histItems] }, date: new Date().toISOString() });
-            }
-
             const reconstructedState = {
               currentSession: {
                 id: openSess.id || openSess.session_id || `session_${Date.now()}`,
@@ -3627,9 +3632,7 @@ ${JSON.stringify(sales, null, 2)}
         const candState = latestCandidate.state;
         const candSession = candState.currentSession;
         if (candSession && (candSession.status === "aberto" || candSession.status === "open" || candSession.status === "ativo")) {
-          const sessDate = (candSession.dataAbertura || "").substring(0, 10);
-          const todayDate = new Date().toISOString().substring(0, 10);
-          if (!candSession.dataFechamento && (sessDate === todayDate || !sessDate)) {
+          if (!candSession.dataFechamento) {
             return res.json({
               success: true,
               data: {

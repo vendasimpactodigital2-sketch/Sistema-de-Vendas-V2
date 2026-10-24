@@ -113,26 +113,22 @@ export function CashRegisterModal({
       .then(({ data }) => {
         if (data) {
           const st = String(data.status || "").toLowerCase().trim();
-          const isOpen = st === "aberto" && !data.data_fechamento;
-          if (isOpen) {
-            const openDate = getLocalDateFromISO(data.data_abertura);
-            const todayDate = getLocalDateFromISO(new Date().toISOString());
-            if (openDate === todayDate) {
-              setCaixaDbStatus("ABERTO");
-            } else {
-              setCaixaDbStatus("FECHADO");
-            }
+          const isDbOpen = st === "aberto" && !data.data_fechamento;
+          const isLocalOpen = localStorage.getItem("cash_register_status") === "open" || localStorage.getItem("NUCLEO_CASH_REGISTER_ACTIVE") === "true";
+          if (isDbOpen || isLocalOpen) {
+            setCaixaDbStatus("ABERTO");
           } else {
             const cur = cashRegister.currentSession;
-            if (cur && cur.status === "aberto" && getLocalDateFromISO(cur.dataAbertura) === getLocalDateFromISO(new Date().toISOString())) {
+            if (cur && cur.status === "aberto") {
               setCaixaDbStatus("ABERTO");
             } else {
               setCaixaDbStatus("FECHADO");
             }
           }
         } else {
+          const isLocalOpen = localStorage.getItem("cash_register_status") === "open" || localStorage.getItem("NUCLEO_CASH_REGISTER_ACTIVE") === "true";
           const cur = cashRegister.currentSession;
-          if (cur && cur.status === "aberto" && getLocalDateFromISO(cur.dataAbertura) === getLocalDateFromISO(new Date().toISOString())) {
+          if ((cur && cur.status === "aberto") || isLocalOpen) {
             setCaixaDbStatus("ABERTO");
           } else {
             setCaixaDbStatus("FECHADO");
@@ -199,22 +195,16 @@ export function CashRegisterModal({
     };
   }, [currentUser, onRefreshRegister, cashRegister.currentSession]);
 
-  // Active session resolution: handles multi-terminal sync and strictly enforces daily order
+  // Active session resolution: handles multi-terminal sync and preserves session until explicit operator close
   const activeSession: CashRegisterSession | null = useMemo(() => {
+    const isLocalOpen = localStorage.getItem("cash_register_status") === "open" || localStorage.getItem("NUCLEO_CASH_REGISTER_ACTIVE") === "true";
     const current = cashRegister.currentSession;
     if (current && current.status === "aberto") {
-      const openDate = getLocalDateFromISO(current.dataAbertura);
-      const todayDate = getLocalDateFromISO(new Date().toISOString());
-      if (openDate === todayDate) {
-        return current;
-      }
+      return current;
     }
 
-    if (caixaDbStatus === "FECHADO" && (!current || current.status !== "aberto")) {
-      return null;
-    }
-
-    if (caixaDbStatus === "ABERTO" && isCashRegisterOpen) {
+    if (isCashRegisterOpen || isLocalOpen || caixaDbStatus === "ABERTO") {
+      if (current) return current;
       return {
         id: "session_active_" + Date.now(),
         status: "aberto",
@@ -565,6 +555,10 @@ export function CashRegisterModal({
         }
       })();
     }
+    try {
+      localStorage.setItem("cash_register_status", "open");
+      localStorage.setItem("NUCLEO_CASH_REGISTER_ACTIVE", "true");
+    } catch (e) {}
     setCaixaDbStatus("ABERTO");
 
     onOpenRegister(val, op);
@@ -661,6 +655,7 @@ export function CashRegisterModal({
 
       // 4. Limpar imediatamente chaves de sessão de caixa ativa do localStorage
       try {
+        localStorage.setItem("cash_register_status", "closed");
         localStorage.removeItem("NUCLEO_CASH_REGISTER_ACTIVE");
         localStorage.removeItem("NUCLEO_LAST_CASH_REGISTER_SYNCED_DATE");
         const saved = localStorage.getItem("NUCLEO_CASH_REGISTER");

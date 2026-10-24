@@ -35,7 +35,8 @@ import {
 import React, { useState, useEffect, useRef } from "react";
 import { ProductSaleItem, Sale, CompanyProfile, CostItem, CatalogProduct, User, CashRegisterState, SaleAuditEntry } from "../types";
 import { jsPDF } from "jspdf";
-import { dbUploadImages, parseClientImages, isSupabaseConfigured, getSupabase, dbGetQuickSales, dbSaveQuickSale, dbDeleteQuickSale } from "../supabase";
+import { dbUploadImages, parseClientImages, isSupabaseConfigured, getSupabase, dbGetQuickSales, dbSaveQuickSale, dbDeleteQuickSale, dbSaveSale } from "../supabase";
+import { formatFullCompanyAddress } from "../utils/company";
 
 const formatCurrency = (val: number) => {
   return `R$ ${val.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`;
@@ -123,11 +124,12 @@ export function SaleForm({
   );
   const isPricingLocked = Boolean(isAttendant && !adminUnlocked);
 
-  // Strict Cash Register status check for SaleForm: prevents adding anything when register is closed
+  // Cash Register status check honoring Mantra do Caixa (localStorage prioritized)
   const isRegisterOpen = Boolean(
-    isGlobalRegisterOpen !== undefined
-      ? isGlobalRegisterOpen
-      : (cashRegister?.currentSession && cashRegister.currentSession.status === "aberto")
+    localStorage.getItem("cash_register_status") === "open" ||
+    localStorage.getItem("NUCLEO_CASH_REGISTER_ACTIVE") === "true" ||
+    (isGlobalRegisterOpen !== undefined ? isGlobalRegisterOpen : false) ||
+    (cashRegister?.currentSession && cashRegister.currentSession.status === "aberto")
   );
 
   const checkRegisterBeforeAction = (actionDesc = "lançar informações na venda"): boolean => {
@@ -1189,13 +1191,15 @@ export function SaleForm({
 
     const finalClientName = isQuickSale ? "Venda Rápida" : clientName.trim();
     if (!finalClientName) {
-      alert("Por favor, preencha o nome do cliente.");
+      alert("⚠️ Por favor, preencha o Nome do Cliente para finalizar a venda.");
+      const clientInput = document.getElementById("client-name-input");
+      if (clientInput) clientInput.focus();
       return;
     }
     
     const validItems = items.filter(item => item.description.trim() !== "");
     if (validItems.length === 0) {
-      alert("Por favor, adicione pelo menos um item com descrição.");
+      alert("⚠️ Por favor, adicione pelo menos um item com descrição aos 'Itens e Serviços Adicionados' para finalizar a venda.");
       return;
     }
 
@@ -1302,16 +1306,22 @@ export function SaleForm({
     onSaleSaved(savedSale);
     setSavedSaleSummary(savedSale);
     
+    // Direct fallback save to Supabase
+    if (isSupabaseConfigured() && currentUser) {
+      const companyOwnerId = currentUser.owner_id || currentUser.id;
+      dbSaveSale(companyOwnerId, savedSale).catch((err) => console.error("Error direct syncing sale to Supabase:", err));
+    }
+
     setSuccessMessage(
       activeEditingSale 
         ? "Venda atualizada com sucesso!" 
-        : "Venda salva no histórico com sucesso!"
+        : "Venda registrada com sucesso! 💵"
     );
     
-    // Clear success message after 3 seconds
+    // Clear success message after 4 seconds
     setTimeout(() => {
       setSuccessMessage(null);
-    }, 3000);
+    }, 4000);
 
     // Reset if we were not editing or if we finished
     handleResetForm();
@@ -1674,14 +1684,7 @@ export function SaleForm({
       doc.text(`Fone/Contato: ${company?.phone || "Não informado"}`, startTextX, lineY);
       lineY += 3.5;
       
-      const formattedAddress = [
-        company?.address, 
-        company?.number ? `${company.number}` : "", 
-        company?.neighborhood ? `${company.neighborhood}` : "",
-        company?.city ? `${company.city}` : "",
-        company?.cep ? `CEP ${company.cep}` : ""
-      ].filter(Boolean).join(" - ");
-      
+      const formattedAddress = formatFullCompanyAddress(company);
       if (formattedAddress.trim()) {
         const truncatedAddress = formattedAddress.length > 60 ? formattedAddress.substring(0, 57) + "..." : formattedAddress;
         doc.text(truncatedAddress, startTextX, lineY);
@@ -3568,49 +3571,75 @@ export function SaleForm({
                       </div>
 
                       <button
+                        id="btn-finalizar-venda"
                         type="button"
-                        disabled={isUploading || !isRegisterOpen}
-                        onClick={() => handleSaveSale(false)}
-                        className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-bold text-white bg-gradient-to-r from-brand-magenta to-pink-600 hover:from-pink-600 hover:to-brand-magenta shadow-lg shadow-pink-900/30 transition-all cursor-pointer transform hover:-translate-y-0.5 disabled:opacity-50 disabled:pointer-events-none"
+                        disabled={isUploading}
+                        onClick={() => {
+                          if (!isRegisterOpen) {
+                            alert("⚠️ CAIXA FECHADO!\n\nVocê precisa abrir o caixa antes de atualizar vendas. Clique em 'Abrir Caixa Agora' para iniciar seu turno.");
+                            onRequestOpenRegister?.();
+                            return;
+                          }
+                          handleSaveSale(false);
+                        }}
+                        className="w-full flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl font-black text-white bg-gradient-to-r from-brand-magenta via-pink-600 to-rose-600 hover:from-pink-600 hover:to-brand-magenta shadow-xl shadow-brand-magenta/30 transition-all cursor-pointer transform hover:-translate-y-0.5 text-sm uppercase tracking-wide disabled:opacity-50"
                       >
                         {isUploading ? (
-                          <RefreshCw className="h-4 w-4 animate-spin" />
+                          <RefreshCw className="h-5 w-5 animate-spin" />
                         ) : (
-                          <Plus className="h-4 w-4" />
+                          <Check className="h-5 w-5" />
                         )}
-                        <span>{isUploading ? "Atualizando..." : "Atualizar Histórico de Venda"}</span>
+                        <span>{isUploading ? "Atualizando Venda..." : "Finalizar Venda / Atualizar Pedido"}</span>
                       </button>
                     </div>
                   )
                 ) : (
                   /* Standard creation mode - Can choose to Save as definitive Sale or Orçamento */
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <button
+                      id="btn-finalizar-venda"
                       type="button"
-                      disabled={isUploading || !isRegisterOpen}
-                      onClick={() => handleSaveSale(false)}
-                      className="flex-1 flex items-center justify-center gap-1.5 py-3 px-2 rounded-xl font-bold text-white bg-gradient-to-r from-brand-magenta to-pink-600 hover:from-pink-600 hover:to-brand-magenta shadow-lg shadow-pink-900/30 transition-all cursor-pointer transform hover:-translate-y-0.5 text-xs sm:text-sm disabled:opacity-50 disabled:pointer-events-none"
+                      disabled={isUploading}
+                      onClick={() => {
+                        if (!isRegisterOpen) {
+                          alert("⚠️ CAIXA FECHADO!\n\nVocê precisa abrir o caixa antes de finalizar a venda. Clique em 'Abrir Caixa Agora' para iniciar seu turno.");
+                          onRequestOpenRegister?.();
+                          return;
+                        }
+                        handleSaveSale(false);
+                      }}
+                      className="flex-1 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl font-black text-white bg-gradient-to-r from-brand-magenta via-pink-600 to-rose-600 hover:from-pink-600 hover:to-brand-magenta shadow-xl shadow-brand-magenta/30 transition-all cursor-pointer transform hover:-translate-y-0.5 text-sm uppercase tracking-wide disabled:opacity-50"
+                      title="Gravar a venda no banco de dados e atualizar o caixa imediatamente"
                     >
                       {isUploading ? (
-                        <RefreshCw className="h-4 w-4 shrink-0 animate-spin" />
+                        <RefreshCw className="h-5 w-5 shrink-0 animate-spin" />
                       ) : (
-                        <Plus className="h-4 w-4 shrink-0" />
+                        <Check className="h-5 w-5 shrink-0" />
                       )}
-                      <span>{isUploading ? "Salvando..." : "Salvar no Sistema"}</span>
+                      <span>{isUploading ? "Gravando Venda..." : "Finalizar Venda / Registrar Pedido"}</span>
                     </button>
 
                     <button
+                      id="btn-salvar-orcamento"
                       type="button"
-                      disabled={isUploading || !isRegisterOpen}
-                      onClick={handleSaveBudget}
-                      className="flex-1 flex items-center justify-center gap-1.5 py-3 px-2 rounded-xl font-bold text-slate-950 bg-gradient-to-r from-brand-cyan to-cyan-500 shadow-lg shadow-brand-cyan/20 cursor-pointer transform hover:-translate-y-0.5 transition-all text-xs sm:text-sm disabled:opacity-50 disabled:pointer-events-none"
+                      disabled={isUploading}
+                      onClick={() => {
+                        if (!isRegisterOpen) {
+                          alert("⚠️ CAIXA FECHADO!\n\nVocê precisa abrir o caixa antes de gerar orçamentos.");
+                          onRequestOpenRegister?.();
+                          return;
+                        }
+                        handleSaveBudget();
+                      }}
+                      className="flex-1 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl font-bold text-slate-950 bg-gradient-to-r from-brand-cyan to-cyan-500 hover:from-cyan-400 hover:to-brand-cyan shadow-lg shadow-brand-cyan/20 cursor-pointer transform hover:-translate-y-0.5 transition-all text-sm uppercase tracking-wide disabled:opacity-50"
+                      title="Salvar apenas como orçamento / estimativa"
                     >
                       {isUploading ? (
-                        <RefreshCw className="h-4 w-4 shrink-0 animate-spin" />
+                        <RefreshCw className="h-5 w-5 shrink-0 animate-spin" />
                       ) : (
-                        <FileText className="h-4 w-4 shrink-0" />
+                        <FileText className="h-5 w-5 shrink-0" />
                       )}
-                      <span>{isUploading ? "Trabalhando..." : "Orçamento"}</span>
+                      <span>{isUploading ? "Trabalhando..." : "Salvar como Orçamento"}</span>
                     </button>
                   </div>
                 )}
@@ -3795,14 +3824,27 @@ export function SaleForm({
       */}
       <div id="thermal-receipt-print" className="hidden print:block bg-white text-black p-2 max-w-[80mm] font-mono text-[11px] leading-tight">
         <div className="text-center mb-2">
+          {company?.logo && (
+            <img src={company.logo} alt="Logo" className="max-h-12 max-w-full mx-auto mb-1.5 object-contain" />
+          )}
           <div className="font-bold text-sm uppercase tracking-wide">
             {company?.tradingName || "NEXVOLT GESTÃO"}
           </div>
           {company?.cnpjCpf && <div className="text-[10px]">CNPJ/CPF: {company.cnpjCpf}</div>}
-          {company?.phone && <div className="text-[10px]">Fone: {company.phone}</div>}
-          {company?.address && (
-            <div className="text-[9px]">
-              {[company.address, company.number, company.neighborhood, company.city].filter(Boolean).join(", ")}
+          {company?.phone && <div className="text-[10px]">Fone/WhatsApp: {company.phone}</div>}
+          {formatFullCompanyAddress(company) && (
+            <div className="text-[9px] leading-tight mt-0.5">
+              {formatFullCompanyAddress(company)}
+            </div>
+          )}
+          {(company?.openingTime || company?.closingTime) && (
+            <div className="text-[9px] text-gray-700 mt-0.5">
+              Horário: {company?.openingTime || "08:00"} às {company?.closingTime || "18:00"}
+            </div>
+          )}
+          {company?.pixKey && (
+            <div className="text-[9px] font-semibold mt-0.5">
+              Chave PIX: {company.pixKey}
             </div>
           )}
           <div className="my-1.5 border-b border-dashed border-black" />

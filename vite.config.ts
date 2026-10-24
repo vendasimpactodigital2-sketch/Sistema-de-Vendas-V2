@@ -45,9 +45,19 @@ export default defineConfig(() => {
       alias: {
         '@': path.resolve(__dirname, '.'),
       },
+      dedupe: ['react', 'react-dom'],
     },
     optimizeDeps: {
-      include: ['html2canvas', 'jspdf'],
+      include: [
+        'react',
+        'react-dom',
+        'react/jsx-runtime',
+        'react/jsx-dev-runtime',
+        'html2canvas',
+        'jspdf',
+        'canvas-confetti',
+        'lucide-react',
+      ],
     },
     define: {
       'import.meta.env.NEXT_PUBLIC_SUPABASE_URL': JSON.stringify(process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || ''),

@@ -1328,6 +1328,30 @@ export async function dbSaveSale(userId: string, sale: Sale): Promise<boolean> {
         return false;
       }
     }
+    // Gravar na tabela relacional de itens (vendas_itens / itens_venda)
+    if (Array.isArray(sale.items) && sale.items.length > 0) {
+      try {
+        const relationalItems = sale.items.map((it: any, idx: number) => ({
+          id: it.id || `${sale.id}_item_${idx}`,
+          venda_id: sale.id,
+          sale_id: sale.id,
+          user_id: userId,
+          descricao: it.description || "",
+          description: it.description || "",
+          quantidade: Number(it.quantity) || 1,
+          quantity: Number(it.quantity) || 1,
+          preco_unitario: Number(it.unitValue) || 0,
+          unit_value: Number(it.unitValue) || 0,
+          preco_custo: Number(it.unitCost) || 0,
+          unit_cost: Number(it.unitCost) || 0,
+          valor_total: Number(it.totalValue) || 0,
+          total_value: Number(it.totalValue) || 0
+        }));
+        try { await supabase.from("vendas_itens").upsert(relationalItems); } catch {}
+        try { await supabase.from("itens_venda").upsert(relationalItems); } catch {}
+      } catch (e) {}
+    }
+
     notifyRealtimeSync(userId, "sales_updated", { saleId: sale.id });
     notifyRealtimeSync("global", "sales_updated", { saleId: sale.id });
     return true;

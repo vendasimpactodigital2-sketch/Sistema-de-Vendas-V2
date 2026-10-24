@@ -38,7 +38,8 @@ import {
   Moon
 } from "lucide-react";
 import { CompanyProfile, User, CustomReminder, CashRegisterState, CashRegisterSession, BusinessHours } from "../types";
-import { dbExportAllData, dbImportAllData, dbGetCompanyProfile, isSupabaseConfigured, getAdminDomain, normalizeUserString, notifyRealtimeSync, getSupabase } from "../supabase";
+import { dbExportAllData, dbImportAllData, dbGetCompanyProfile, dbSaveCompanyProfile, isSupabaseConfigured, getAdminDomain, normalizeUserString, notifyRealtimeSync, getSupabase } from "../supabase";
+import { mergeCompanyProfiles, formatFullCompanyAddress, saveCompanyProfileLocally, getStoredCompanyProfile } from "../utils/company";
 
 const WEEKDAYS = [
   { key: "monday", label: "Segunda-feira" },
@@ -120,30 +121,60 @@ export function CompanySettings({
   onCloseRegister,
   onNavigateToAtendentes
 }: CompanySettingsProps) {
-  const [tradingName, setTradingName] = useState(company.tradingName);
-  const [phone, setPhone] = useState(company.phone);
-  const [cep, setCep] = useState(company.cep);
-  const [address, setAddress] = useState(company.address);
-  const [number, setNumber] = useState(company.number);
-  const [neighborhood, setNeighborhood] = useState(company.neighborhood);
-  const [city, setCity] = useState(company.city);
-  const [state, setState] = useState(company.state);
-  const [cnpjCpf, setCnpjCpf] = useState(company.cnpjCpf);
-  const [logo, setLogo] = useState<string | null>(company.logo);
-  const [pixKey, setPixKey] = useState(company.pixKey || "");
+  const getInitialProfile = (): CompanyProfile => {
+    let base: CompanyProfile = { ...company };
+    try {
+      const saved = localStorage.getItem("NUCLEO_COMPANY_PROFILE");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === "object") {
+          base = {
+            ...base,
+            ...parsed,
+            tradingName: parsed.tradingName || base.tradingName || "",
+            phone: parsed.phone || base.phone || "",
+            cep: parsed.cep || base.cep || "",
+            address: parsed.address || base.address || "",
+            number: parsed.number || base.number || "",
+            neighborhood: parsed.neighborhood || base.neighborhood || "",
+            city: parsed.city || base.city || "",
+            state: parsed.state || base.state || "",
+            cnpjCpf: parsed.cnpjCpf || base.cnpjCpf || "",
+            logo: parsed.logo !== undefined ? parsed.logo : base.logo,
+            pixKey: parsed.pixKey || base.pixKey || "",
+          };
+        }
+      }
+    } catch (e) {}
+    return base;
+  };
+
+  const initialProfile = getInitialProfile();
+
+  const [tradingName, setTradingName] = useState(initialProfile.tradingName || "");
+  const [phone, setPhone] = useState(initialProfile.phone || "");
+  const [cep, setCep] = useState(initialProfile.cep || "");
+  const [address, setAddress] = useState(initialProfile.address || "");
+  const [number, setNumber] = useState(initialProfile.number || "");
+  const [neighborhood, setNeighborhood] = useState(initialProfile.neighborhood || "");
+  const [city, setCity] = useState(initialProfile.city || "");
+  const [state, setState] = useState(initialProfile.state || "");
+  const [cnpjCpf, setCnpjCpf] = useState(initialProfile.cnpjCpf || "");
+  const [logo, setLogo] = useState<string | null>(initialProfile.logo || null);
+  const [pixKey, setPixKey] = useState(initialProfile.pixKey || "");
   const [uploadingLogo, setUploadingLogo] = useState(false);
-  const [openingTime, setOpeningTime] = useState(company.openingTime || "08:00");
-  const [closingTime, setClosingTime] = useState(company.closingTime || "18:00");
-  const [autoCloseRegisterEnabled, setAutoCloseRegisterEnabled] = useState(company.autoCloseRegisterEnabled ?? false);
-  const [autoBackupDownloadEnabled, setAutoBackupDownloadEnabled] = useState(company.autoBackupDownloadEnabled ?? true);
-  const [cashClosingReminderEnabled, setCashClosingReminderEnabled] = useState<boolean>(company.cashClosingReminderEnabled ?? true);
-  const [cashClosingReminderTime, setCashClosingReminderTime] = useState<string>(company.cashClosingReminderTime || "");
+  const [openingTime, setOpeningTime] = useState(initialProfile.openingTime || "08:00");
+  const [closingTime, setClosingTime] = useState(initialProfile.closingTime || "18:00");
+  const [autoCloseRegisterEnabled, setAutoCloseRegisterEnabled] = useState(initialProfile.autoCloseRegisterEnabled ?? false);
+  const [autoBackupDownloadEnabled, setAutoBackupDownloadEnabled] = useState(initialProfile.autoBackupDownloadEnabled ?? true);
+  const [cashClosingReminderEnabled, setCashClosingReminderEnabled] = useState<boolean>(initialProfile.cashClosingReminderEnabled ?? true);
+  const [cashClosingReminderTime, setCashClosingReminderTime] = useState<string>(initialProfile.cashClosingReminderTime || "");
   const [cashClosingReminderMessage, setCashClosingReminderMessage] = useState<string>(
-    company.cashClosingReminderMessage || "Excelente dia de trabalho! O horário de encerramento do expediente foi atingido. Deseja realizar o fechamento do caixa e salvar seus relatórios antes de fechar o programa?"
+    initialProfile.cashClosingReminderMessage || "Excelente dia de trabalho! O horário de encerramento do expediente foi atingido. Deseja realizar o fechamento do caixa e salvar seus relatórios antes de fechar o programa?"
   );
   
   const [businessHours, setBusinessHours] = useState<BusinessHours>(() => {
-    return company.businessHours || defaultBusinessHours;
+    return initialProfile.businessHours || defaultBusinessHours;
   });
 
   const lastLoadedUserRef = useRef<string | null>(null);
@@ -1381,43 +1412,46 @@ export function CompanySettings({
       
       setLoadingProfile(true);
       try {
-        const remoteProfile = await dbGetCompanyProfile(currentUser.id);
+        const ownerId = currentUser.owner_id || currentUser.id;
+        const remoteProfile = await dbGetCompanyProfile(ownerId);
         if (remoteProfile) {
-          setTradingName(remoteProfile.tradingName || "");
-          setPhone(remoteProfile.phone || "");
-          setCep(remoteProfile.cep || "");
-          setAddress(remoteProfile.address || "");
-          setNumber(remoteProfile.number || "");
-          setNeighborhood(remoteProfile.neighborhood || "");
-          setCity(remoteProfile.city || "");
-          setState(remoteProfile.state || "");
-          setCnpjCpf(remoteProfile.cnpjCpf || "");
-          setLogo(remoteProfile.logo || null);
-          setPixKey(remoteProfile.pixKey || "");
-          setGoalsReminderEnabled(remoteProfile.goalsReminderEnabled ?? false);
-          setGoalsReminderTime(remoteProfile.goalsReminderTime || "09:00");
-          setOpeningTime(remoteProfile.openingTime || "08:00");
-          setClosingTime(remoteProfile.closingTime || "18:00");
-          setAutoCloseRegisterEnabled(remoteProfile.autoCloseRegisterEnabled ?? false);
-          setAutoBackupDownloadEnabled(remoteProfile.autoBackupDownloadEnabled ?? true);
-          setCashClosingReminderEnabled(remoteProfile.cashClosingReminderEnabled ?? true);
-          setCashClosingReminderTime(remoteProfile.cashClosingReminderTime || "");
-          setCashClosingReminderMessage(remoteProfile.cashClosingReminderMessage || "Excelente dia de trabalho! O horário de encerramento do expediente foi atingido. Deseja realizar o fechamento do caixa e salvar seus relatórios antes de fechar o programa?");
+          // Smart merge: only overwrite local fields if remote value is non-empty!
+          if (remoteProfile.tradingName?.trim()) setTradingName(remoteProfile.tradingName.trim());
+          if (remoteProfile.phone?.trim()) setPhone(remoteProfile.phone.trim());
+          if (remoteProfile.cep?.trim()) setCep(remoteProfile.cep.trim());
+          if (remoteProfile.address?.trim()) setAddress(remoteProfile.address.trim());
+          if (remoteProfile.number?.trim()) setNumber(remoteProfile.number.trim());
+          if (remoteProfile.neighborhood?.trim()) setNeighborhood(remoteProfile.neighborhood.trim());
+          if (remoteProfile.city?.trim()) setCity(remoteProfile.city.trim());
+          if (remoteProfile.state?.trim()) setState(remoteProfile.state.trim());
+          if (remoteProfile.cnpjCpf?.trim()) setCnpjCpf(remoteProfile.cnpjCpf.trim());
+          if (remoteProfile.logo) setLogo(remoteProfile.logo);
+          if (remoteProfile.pixKey?.trim()) setPixKey(remoteProfile.pixKey.trim());
+          if (remoteProfile.goalsReminderEnabled !== undefined) setGoalsReminderEnabled(remoteProfile.goalsReminderEnabled);
+          if (remoteProfile.goalsReminderTime) setGoalsReminderTime(remoteProfile.goalsReminderTime);
+          if (remoteProfile.openingTime) setOpeningTime(remoteProfile.openingTime);
+          if (remoteProfile.closingTime) setClosingTime(remoteProfile.closingTime);
+          if (remoteProfile.autoCloseRegisterEnabled !== undefined) setAutoCloseRegisterEnabled(remoteProfile.autoCloseRegisterEnabled);
+          if (remoteProfile.autoBackupDownloadEnabled !== undefined) setAutoBackupDownloadEnabled(remoteProfile.autoBackupDownloadEnabled);
+          if (remoteProfile.cashClosingReminderEnabled !== undefined) setCashClosingReminderEnabled(remoteProfile.cashClosingReminderEnabled);
+          if (remoteProfile.cashClosingReminderTime) setCashClosingReminderTime(remoteProfile.cashClosingReminderTime);
+          if (remoteProfile.cashClosingReminderMessage) setCashClosingReminderMessage(remoteProfile.cashClosingReminderMessage);
           
           if (remoteProfile.businessHours) {
             setBusinessHours(remoteProfile.businessHours);
-          } else {
-            setBusinessHours(defaultBusinessHours);
           }
           
-          // Sync with state reference of parents ONLY if a real profile exists
-          onSaveCompany(remoteProfile);
+          // Never call onSaveCompany with raw empty remote profile!
+          // Only update parent company state with merged data!
+          const currentLocal = getStoredCompanyProfile() || company;
+          const merged = mergeCompanyProfiles(currentLocal, remoteProfile);
+          saveCompanyProfileLocally(merged);
+          onSaveCompany(merged);
         }
 
         // Direct fetch from empresa_config table for logo and name
         const supabase = getSupabase();
         if (supabase) {
-          const ownerId = currentUser.owner_id || currentUser.id;
           const { data: configData } = await supabase
             .from("empresa_config")
             .select("*")
@@ -1425,36 +1459,15 @@ export function CompanySettings({
             .maybeSingle();
 
           if (configData) {
-            if (configData.nome || configData.trading_name) {
-              setTradingName(configData.nome || configData.trading_name);
+            if (configData.nome && configData.nome.trim()) {
+              setTradingName((prev) => prev.trim() ? prev : configData.nome.trim());
+            } else if (configData.trading_name && configData.trading_name.trim()) {
+              setTradingName((prev) => prev.trim() ? prev : configData.trading_name.trim());
             }
-            if (configData.logo !== undefined) {
-              setLogo(configData.logo);
+            if (configData.logo) {
+              setLogo((prev) => prev || configData.logo);
             }
           }
-        } else {
-          // If the profile does not exist in the database yet, guarantee that the fields are 100% empty and clean
-          setTradingName("");
-          setPhone("");
-          setCep("");
-          setAddress("");
-          setNumber("");
-          setNeighborhood("");
-          setCity("");
-          setState("");
-          setCnpjCpf("");
-          setLogo(null);
-          setPixKey("");
-          setGoalsReminderEnabled(false);
-          setGoalsReminderTime("09:00");
-          setOpeningTime("08:00");
-          setClosingTime("18:00");
-          setAutoCloseRegisterEnabled(false);
-          setAutoBackupDownloadEnabled(true);
-          setCashClosingReminderEnabled(true);
-          setCashClosingReminderTime("");
-          setCashClosingReminderMessage("Excelente dia de trabalho! O horário de encerramento do expediente foi atingido. Deseja realizar o fechamento do caixa e salvar seus relatórios antes de fechar o programa?");
-          setBusinessHours(defaultBusinessHours);
         }
       } catch (err) {
         console.error("Failed to load user-specific company profile on mount:", err);
@@ -1464,7 +1477,7 @@ export function CompanySettings({
     };
     
     fetchProfileForUser();
-  }, [currentUser?.id]);
+  }, [currentUser?.id, currentUser?.owner_id]);
 
   // Realtime channel for empresa_config so name/logo changes sync across windows immediately
   useEffect(() => {
@@ -1485,10 +1498,11 @@ export function CompanySettings({
         },
         (payload: any) => {
           if (payload.new) {
-            if (payload.new.nome || payload.new.trading_name) {
-              setTradingName(payload.new.nome || payload.new.trading_name);
+            const newName = payload.new.nome || payload.new.trading_name;
+            if (newName && newName.trim()) {
+              setTradingName(newName.trim());
             }
-            if (payload.new.logo !== undefined) {
+            if (payload.new.logo) {
               setLogo(payload.new.logo);
             }
           }
@@ -1508,31 +1522,30 @@ export function CompanySettings({
     
     if (lastLoadedUserRef.current !== currentUser.id) {
       lastLoadedUserRef.current = currentUser.id;
-      setTradingName(company.tradingName || "");
-      setPhone(company.phone || "");
-      setCep(company.cep || "");
-      setAddress(company.address || "");
-      setNumber(company.number || "");
-      setNeighborhood(company.neighborhood || "");
-      setCity(company.city || "");
-      setState(company.state || "");
-      setCnpjCpf(company.cnpjCpf || "");
-      setLogo(company.logo || null);
-      setPixKey(company.pixKey || "");
-      setGoalsReminderEnabled(company.goalsReminderEnabled ?? false);
-      setGoalsReminderTime(company.goalsReminderTime || "09:00");
-      setOpeningTime(company.openingTime || "08:00");
-      setClosingTime(company.closingTime || "18:00");
-      setAutoCloseRegisterEnabled(company.autoCloseRegisterEnabled ?? false);
-      setAutoBackupDownloadEnabled(company.autoBackupDownloadEnabled ?? true);
-      setCashClosingReminderEnabled(company.cashClosingReminderEnabled ?? true);
-      setCashClosingReminderTime(company.cashClosingReminderTime || "");
-      setCashClosingReminderMessage(company.cashClosingReminderMessage || "Excelente dia de trabalho! O horário de encerramento do expediente foi atingido. Deseja realizar o fechamento do caixa e salvar seus relatórios antes de fechar o programa?");
+      const profileToUse = mergeCompanyProfiles(company, getStoredCompanyProfile());
+      if (profileToUse.tradingName?.trim()) setTradingName(profileToUse.tradingName.trim());
+      if (profileToUse.phone?.trim()) setPhone(profileToUse.phone.trim());
+      if (profileToUse.cep?.trim()) setCep(profileToUse.cep.trim());
+      if (profileToUse.address?.trim()) setAddress(profileToUse.address.trim());
+      if (profileToUse.number?.trim()) setNumber(profileToUse.number.trim());
+      if (profileToUse.neighborhood?.trim()) setNeighborhood(profileToUse.neighborhood.trim());
+      if (profileToUse.city?.trim()) setCity(profileToUse.city.trim());
+      if (profileToUse.state?.trim()) setState(profileToUse.state.trim());
+      if (profileToUse.cnpjCpf?.trim()) setCnpjCpf(profileToUse.cnpjCpf.trim());
+      if (profileToUse.logo) setLogo(profileToUse.logo);
+      if (profileToUse.pixKey?.trim()) setPixKey(profileToUse.pixKey.trim());
+      if (profileToUse.goalsReminderEnabled !== undefined) setGoalsReminderEnabled(profileToUse.goalsReminderEnabled);
+      if (profileToUse.goalsReminderTime) setGoalsReminderTime(profileToUse.goalsReminderTime);
+      if (profileToUse.openingTime) setOpeningTime(profileToUse.openingTime);
+      if (profileToUse.closingTime) setClosingTime(profileToUse.closingTime);
+      if (profileToUse.autoCloseRegisterEnabled !== undefined) setAutoCloseRegisterEnabled(profileToUse.autoCloseRegisterEnabled);
+      if (profileToUse.autoBackupDownloadEnabled !== undefined) setAutoBackupDownloadEnabled(profileToUse.autoBackupDownloadEnabled);
+      if (profileToUse.cashClosingReminderEnabled !== undefined) setCashClosingReminderEnabled(profileToUse.cashClosingReminderEnabled);
+      if (profileToUse.cashClosingReminderTime) setCashClosingReminderTime(profileToUse.cashClosingReminderTime);
+      if (profileToUse.cashClosingReminderMessage) setCashClosingReminderMessage(profileToUse.cashClosingReminderMessage);
       
-      if (company.businessHours) {
-        setBusinessHours(company.businessHours);
-      } else {
-        setBusinessHours(defaultBusinessHours);
+      if (profileToUse.businessHours) {
+        setBusinessHours(profileToUse.businessHours);
       }
     }
   }, [company, currentUser?.id, loadingProfile]);
@@ -1769,27 +1782,39 @@ export function CompanySettings({
       cashClosingReminderMessage: cashClosingReminderMessage,
     };
 
+    // 1. Gravação local resiliente imediata (localStorage + IndexedDB para logotipo)
+    saveCompanyProfileLocally(updated);
+
+    // 2. Notifica o componente raiz
     onSaveCompany(updated);
 
-    // Direct upsert to empresa_config table for logo and name
+    // 3. Dispara evento local para atualização reativa instantânea de todas as telas (PDV, Notinhas, etc.)
+    window.dispatchEvent(new CustomEvent("company_profile_updated", { detail: { profile: updated } }));
+
+    // 4. Salva no Supabase (tanto na tabela empresa_config quanto em company_profile)
     const supabase = getSupabase();
-    if (supabase && currentUser) {
+    if (currentUser) {
       const ownerId = currentUser.owner_id || currentUser.id;
-      (async () => {
-        try {
-          await supabase
-            .from("empresa_config")
-            .upsert({
-              user_id: ownerId,
-              nome: tradingName.trim(),
-              trading_name: tradingName.trim(),
-              logo: logo,
-              updated_at: new Date().toISOString()
-            });
-        } catch (err) {
-          console.warn("Erro ao salvar empresa_config:", err);
-        }
-      })();
+      if (supabase) {
+        supabase
+          .from("empresa_config")
+          .upsert({
+            user_id: ownerId,
+            nome: tradingName.trim(),
+            trading_name: tradingName.trim(),
+            logo: logo,
+            updated_at: new Date().toISOString()
+          })
+          .then(
+            () => {},
+            (err) => console.warn("Erro ao salvar empresa_config:", err)
+          );
+      }
+      if (isSupabaseConfigured()) {
+        dbSaveCompanyProfile(ownerId, updated).catch((err) =>
+          console.warn("Erro ao salvar company_profile:", err)
+        );
+      }
     }
 
     setStatusMessage("Configurações da empresa salvas com sucesso!");
@@ -1812,7 +1837,7 @@ export function CompanySettings({
   };
 
   return (
-    <div className="bg-brand-card border border-slate-800 rounded-2xl p-6 space-y-6 relative">
+    <div className="w-full bg-brand-card border border-slate-800 rounded-2xl p-4 sm:p-6 lg:p-7 space-y-8 relative">
       {/* 🛡️ BANNER RÁPIDO: ATENDENTES & AUDITORIA DE EXCLUSÕES */}
       <div className="bg-gradient-to-r from-cyan-950/40 via-slate-900/60 to-blue-950/40 border border-cyan-500/30 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-lg shadow-cyan-950/20">
         <div className="flex items-center gap-3">
@@ -1984,11 +2009,14 @@ export function CompanySettings({
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Fill values inputs */}
-        <div className="lg:col-span-2 space-y-4">
+      {/* =========================================================================
+          1. DADOS CADASTRAIS DA EMPRESA & LOGOTIPO (GRID LARGURA TOTAL)
+         ========================================================================= */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 w-full items-start">
+        {/* Formulário de Dados e Endereço */}
+        <div className="lg:col-span-8 xl:col-span-9 space-y-4">
+          {/* Linha 1: Nome Fantasia e CNPJ/CPF */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {/* Nome Fantasia */}
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
                 Nome Fantasia <span className="text-brand-magenta">*</span>
@@ -2002,7 +2030,6 @@ export function CompanySettings({
               />
             </div>
 
-            {/* CNPJ / CPF */}
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
                 CNPJ ou CPF <span className="text-slate-500">(Opcional)</span>
@@ -2015,8 +2042,10 @@ export function CompanySettings({
                 className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-brand-magenta transition-all"
               />
             </div>
+          </div>
 
-            {/* Telefone */}
+          {/* Linha 2: Telefone e CEP com Busca */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
                 Telefone de Contato
@@ -2030,7 +2059,6 @@ export function CompanySettings({
               />
             </div>
 
-            {/* CEP */}
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
                 CEP (Busca Automática)
@@ -2058,319 +2086,9 @@ export function CompanySettings({
                 </button>
               </div>
             </div>
-
-            {/* Chave PIX */}
-            <div className="space-y-1.5 sm:col-span-2">
-              <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                Chave PIX da Empresa para Recebimentos
-              </label>
-              <input
-                type="text"
-                placeholder="Ex: CNPJ, E-mail, Celular ou Chave Aleatória (usada para gerar o QR Code de cobrança)"
-                value={pixKey}
-                onChange={(e) => setPixKey(e.target.value)}
-                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-brand-magenta transition-all"
-              />
-            </div>
-
-            {/* Horário de Funcionamento e Fechamento Automático */}
-            <div className="space-y-4 sm:col-span-2 p-5 bg-slate-950/40 rounded-xl border border-slate-800/80 mt-2">
-              <div className="flex items-center gap-2">
-                <Clock className="h-4.5 w-4.5 text-brand-magenta shrink-0" />
-                <h3 className="text-sm font-bold text-white uppercase tracking-wider">Horário de Funcionamento Flexível</h3>
-              </div>
-              
-              {/* Opções rápidas/padrão em botões */}
-              <div className="space-y-2">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Preenchimento Rápido (Selecione um Padrão):</span>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => applyBusinessHoursPreset("preset1")}
-                    className="py-1.5 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-200 text-[11px] font-medium rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer shadow"
-                  >
-                    Seg a Sex: 09h às 18h / Sáb: 06h às 14h
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => applyBusinessHoursPreset("preset2")}
-                    className="py-1.5 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-200 text-[11px] font-medium rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer shadow"
-                  >
-                    Seg a Sex: 08h às 18h / Sáb: 08h às 12h
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => applyBusinessHoursPreset("preset3")}
-                    className="py-1.5 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-200 text-[11px] font-medium rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer shadow"
-                  >
-                    Seg a Sáb: 09h às 18h / Dom: Fechado
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => applyBusinessHoursPreset("preset4")}
-                    className="py-1.5 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-200 text-[11px] font-medium rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer shadow"
-                  >
-                    Todos os dias: 08h às 22h
-                  </button>
-                </div>
-              </div>
-
-              {/* Lista seletora dia a dia para personalização detalhada */}
-              <div className="space-y-2 pt-2">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Personalização Detalhada por Dia:</span>
-                <div className="space-y-2 bg-slate-950/60 p-3 rounded-xl border border-slate-900/60">
-                  {WEEKDAYS.map((day) => {
-                    const hoursForDay = businessHours[day.key] || { isOpen: false, openTime: "09:00", closeTime: "18:00" };
-                    return (
-                      <div key={day.key} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-2 bg-slate-950/40 rounded-lg border border-slate-900/40 hover:bg-slate-900/20 transition-all">
-                        <div className="flex items-center gap-2 min-w-[120px]">
-                          <input
-                            type="checkbox"
-                            id={`day-${day.key}`}
-                            checked={hoursForDay.isOpen}
-                            onChange={() => handleDayToggle(day.key)}
-                            className="h-4 w-4 rounded border-slate-800 bg-slate-950 text-brand-magenta focus:ring-brand-magenta focus:ring-offset-slate-950 cursor-pointer"
-                          />
-                          <label htmlFor={`day-${day.key}`} className="text-xs font-semibold text-slate-200 cursor-pointer select-none">
-                            {day.label}
-                          </label>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          {hoursForDay.isOpen ? (
-                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                              Aberto
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-slate-500/10 text-slate-400 border border-slate-500/10">
-                              Fechado
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-2 shrink-0">
-                          <div className="flex items-center gap-1">
-                            <span className="text-[10px] text-slate-500">Abertura:</span>
-                            <input
-                              type="time"
-                              value={hoursForDay.openTime}
-                              disabled={!hoursForDay.isOpen}
-                              onChange={(e) => handleTimeChange(day.key, "openTime", e.target.value)}
-                              className="bg-slate-900 border border-slate-800 disabled:opacity-40 rounded-md py-1 px-2 text-xs text-slate-200 focus:outline-none focus:border-brand-magenta transition-all font-mono"
-                            />
-                          </div>
-                          <div className="flex items-center gap-1">
-                            <span className="text-[10px] text-slate-500">Fechamento:</span>
-                            <input
-                              type="time"
-                              value={hoursForDay.closeTime}
-                              disabled={!hoursForDay.isOpen}
-                              onChange={(e) => handleTimeChange(day.key, "closeTime", e.target.value)}
-                              className="bg-slate-900 border border-slate-800 disabled:opacity-40 rounded-md py-1 px-2 text-xs text-slate-200 focus:outline-none focus:border-brand-magenta transition-all font-mono"
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Compatibilidade retroativa para recursos legados/fechamento auto */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 border-t border-slate-900 pt-3">
-                <div className="space-y-1">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Horário Limite Geral para Alertas:</span>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <span className="text-[9px] text-slate-500 block">Início:</span>
-                      <input
-                        type="time"
-                        value={openingTime}
-                        onChange={(e) => setOpeningTime(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-850 rounded-lg py-1 px-2 text-xs text-slate-200 focus:outline-none focus:border-brand-magenta font-mono"
-                      />
-                    </div>
-                    <div>
-                      <span className="text-[9px] text-slate-500 block">Término:</span>
-                      <input
-                        type="time"
-                        value={closingTime}
-                        onChange={(e) => setClosingTime(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-850 rounded-lg py-1 px-2 text-xs text-slate-200 focus:outline-none focus:border-brand-magenta font-mono"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex flex-col justify-end">
-                  <div className="flex items-center gap-3">
-                    <label className="relative inline-flex items-center cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={autoCloseRegisterEnabled}
-                        onChange={(e) => setAutoCloseRegisterEnabled(e.target.checked)}
-                        className="sr-only peer"
-                      />
-                      <div className="w-9 h-5 bg-slate-900 border border-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-brand-magenta/80 peer-checked:after:bg-white"></div>
-                      <div className="ml-3 text-xs font-medium text-slate-300">
-                        Fechar caixa automaticamente
-                      </div>
-                    </label>
-                  </div>
-                  <p className="text-[9px] text-slate-500 leading-relaxed mt-1">
-                    Ativando esta opção, o sistema fará a contabilidade sozinho e fechará o caixa de forma totalmente autônoma se os operadores esquecerem o caixa aberto no final do dia.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {/* 🌅 LEMBRETE AGRADÁVEL DE FECHAMENTO DE CAIXA AO FIM DO EXPEDIENTE */}
-            <div className="space-y-4 sm:col-span-2 p-5 bg-gradient-to-br from-slate-950/90 via-slate-900/70 to-amber-950/20 rounded-xl border border-amber-500/30 shadow-lg shadow-amber-950/10">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate-850">
-                <div className="flex items-center gap-3">
-                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-400 shrink-0">
-                    <Sunset className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
-                      Lembrete Agradável de Fechamento de Caixa
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                        Fim de Expediente
-                      </span>
-                    </h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Ao passar do horário de funcionamento, o sistema exibe uma notificação acolhedora na tela convidando a fechar o caixa e salvar os dados antes de fechar o programa.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={handleTestCashClosingReminder}
-                    className="px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 text-xs font-bold border border-amber-500/30 hover:border-amber-500/50 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95"
-                    title="Simular e visualizar como a notificação agradável aparecerá na tela"
-                  >
-                    <BellRing className="h-3.5 w-3.5" />
-                    <span>Testar Notificação</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Toggle switch */}
-              <div className="flex items-center justify-between p-3.5 bg-slate-950/60 rounded-xl border border-slate-850">
-                <div className="space-y-0.5 pr-4">
-                  <span className="text-xs font-semibold text-slate-200 block">
-                    Ativar Lembrete de Fechamento de Caixa
-                  </span>
-                  <p className="text-[11px] text-slate-400">
-                    Exibe um diálogo caloroso e amigável quando o horário limite for atingido, com opções para conferir e fechar o caixa agora, adiar por 15 minutos ou manter aberto.
-                  </p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer select-none shrink-0">
-                  <input
-                    type="checkbox"
-                    checked={cashClosingReminderEnabled}
-                    onChange={(e) => setCashClosingReminderEnabled(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-slate-900 border border-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-amber-500 peer-checked:to-orange-500 peer-checked:after:bg-white"></div>
-                </label>
-              </div>
-
-              {cashClosingReminderEnabled && (
-                <div className="space-y-4 pt-1">
-                  {/* Horário do lembrete */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
-                        <span>Horário do Lembrete de Fechamento</span>
-                        <span className="text-[10px] text-slate-500 font-normal">
-                          {cashClosingReminderTime ? "Horário específico" : "Usando horário da empresa"}
-                        </span>
-                      </label>
-                      <div className="flex gap-2">
-                        <input
-                          type="time"
-                          value={cashClosingReminderTime || closingTime}
-                          onChange={(e) => setCashClosingReminderTime(e.target.value)}
-                          className="w-full bg-slate-950/90 border border-slate-800 rounded-xl py-2 px-3 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500 transition-all"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setCashClosingReminderTime(closingTime)}
-                          className="px-3 py-2 bg-slate-900 hover:bg-slate-850 text-slate-300 rounded-xl border border-slate-800 text-[11px] font-medium whitespace-nowrap cursor-pointer transition-colors"
-                          title="Sincronizar com horário de término geral"
-                        >
-                          Usar {closingTime}
-                        </button>
-                      </div>
-                      <p className="text-[10px] text-slate-500">
-                        Quando atingir este horário, o aviso acolhedor é exibido se o caixa ainda estiver aberto.
-                      </p>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-semibold text-slate-300 block">
-                        Modelos Rápidos de Mensagem Agradável
-                      </label>
-                      <div className="flex flex-wrap gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setCashClosingReminderMessage(
-                              "Excelente dia de trabalho! O horário de encerramento do expediente foi atingido. Deseja realizar o fechamento do caixa e salvar seus relatórios antes de fechar o programa?"
-                            )
-                          }
-                          className="py-1 px-2.5 bg-slate-900/80 hover:bg-slate-800 text-amber-300 text-[11px] rounded-lg border border-amber-500/20 transition-all cursor-pointer"
-                        >
-                          🌅 Acolhedor & Motivador
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setCashClosingReminderMessage(
-                              "Atenção: Horário de encerramento do expediente atingido. Por gentileza, realize a conferência dos valores e encerre a sessão do caixa para fechar o programa."
-                            )
-                          }
-                          className="py-1 px-2.5 bg-slate-900/80 hover:bg-slate-800 text-slate-300 text-[11px] rounded-lg border border-slate-800 transition-all cursor-pointer"
-                        >
-                          💼 Profissional & Direto
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setCashClosingReminderMessage(
-                              "Fim do expediente concluído com sucesso! Lembre-se de realizar o fechamento do caixa antes de desligar o sistema. Bom descanso e até amanhã! 🌙"
-                            )
-                          }
-                          className="py-1 px-2.5 bg-slate-900/80 hover:bg-slate-800 text-teal-300 text-[11px] rounded-lg border border-teal-500/20 transition-all cursor-pointer"
-                        >
-                          🌙 Bom Descanso
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Mensagem personalizada */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-slate-300 block">
-                      Mensagem Agradável Exibida na Notificação
-                    </label>
-                    <textarea
-                      rows={3}
-                      value={cashClosingReminderMessage}
-                      onChange={(e) => setCashClosingReminderMessage(e.target.value)}
-                      placeholder="Digite a mensagem carinhosa e agradável que aparecerá para os operadores quando o expediente terminar..."
-                      className="w-full bg-slate-950/90 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-amber-500 transition-all resize-none leading-relaxed"
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
           </div>
 
-          {/* Endereço Line details */}
+          {/* Linha 3: Endereço Detalhado - Logradouro / Rua e Número */}
           <div className="grid grid-cols-1 sm:grid-cols-12 gap-4">
             <div className="sm:col-span-8 space-y-1.5">
               <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Logradouro / Rua</label>
@@ -2379,7 +2097,7 @@ export function CompanySettings({
                 placeholder="Rua, Avenida, etc."
                 value={address}
                 onChange={(e) => setAddress(e.target.value)}
-                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none"
+                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-brand-magenta transition-all"
               />
             </div>
 
@@ -2390,11 +2108,12 @@ export function CompanySettings({
                 placeholder="Número ou S/N"
                 value={number}
                 onChange={(e) => setNumber(e.target.value)}
-                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none"
+                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-brand-magenta transition-all"
               />
             </div>
           </div>
 
+          {/* Linha 4: Bairro, Cidade e Estado */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Bairro</label>
@@ -2403,7 +2122,7 @@ export function CompanySettings({
                 placeholder="Bairro"
                 value={neighborhood}
                 onChange={(e) => setNeighborhood(e.target.value)}
-                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none"
+                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-brand-magenta transition-all"
               />
             </div>
 
@@ -2414,7 +2133,7 @@ export function CompanySettings({
                 placeholder="Cidade"
                 value={city}
                 onChange={(e) => setCity(e.target.value)}
-                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none"
+                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-brand-magenta transition-all"
               />
             </div>
 
@@ -2425,14 +2144,28 @@ export function CompanySettings({
                 placeholder="Estado"
                 value={state}
                 onChange={(e) => setState(e.target.value)}
-                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none"
+                className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-brand-magenta transition-all"
               />
             </div>
           </div>
+
+          {/* Linha 5: Chave PIX da Empresa */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+              Chave PIX da Empresa para Recebimentos
+            </label>
+            <input
+              type="text"
+              placeholder="Ex: CNPJ, E-mail, Celular ou Chave Aleatória (usada para gerar o QR Code de cobrança)"
+              value={pixKey}
+              onChange={(e) => setPixKey(e.target.value)}
+              className="w-full bg-slate-950/80 border border-slate-800 rounded-xl py-2.5 px-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-brand-magenta transition-all"
+            />
+          </div>
         </div>
 
-        {/* Logo file uploader */}
-        <div className="space-y-4">
+        {/* Logotipo da Empresa */}
+        <div className="lg:col-span-4 xl:col-span-3 space-y-2">
           <label className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1">
             Logotipo da Empresa
           </label>
@@ -2467,7 +2200,7 @@ export function CompanySettings({
               </div>
             ) : logo ? (
               <div className="space-y-3">
-                <div className="max-w-[150px] mx-auto bg-slate-900 border border-slate-800 p-2 rounded-lg">
+                <div className="max-w-[160px] mx-auto bg-slate-900 border border-slate-800 p-2.5 rounded-lg">
                   <img
                     src={logo}
                     alt="Logo Empresa"
@@ -2475,179 +2208,521 @@ export function CompanySettings({
                     className="max-h-24 object-contain w-full mx-auto"
                   />
                 </div>
-                <div className="flex justify-center items-center gap-1 text-[10px] text-slate-400 hover:text-red-400" onClick={(e) => { e.stopPropagation(); setLogo(null); }}>
+                <div
+                  className="flex justify-center items-center gap-1 text-[10px] text-slate-400 hover:text-red-400 font-semibold transition-colors"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setLogo(null);
+                  }}
+                >
                   <X className="h-3 w-3" /> Remover Logotipo
                 </div>
               </div>
             ) : (
-              <div className="py-6 space-y-2 text-slate-500">
-                <Upload className="h-8 w-8 mx-auto text-slate-600 strike-[1.5]" />
+              <div className="py-7 space-y-2 text-slate-500">
+                <Upload className="h-8 w-8 mx-auto text-slate-600 stroke-[1.5]" />
                 <p className="text-xs font-bold text-slate-350">Arraste ou Selecione o Logo</p>
                 <p className="text-[10px] text-slate-500">Recomendado: Imagem PNG com fundo transparente</p>
               </div>
             )}
           </div>
+          <p className="text-[10px] text-slate-500 leading-tight">
+            Este logotipo será inserido automaticamente no cabeçalho das ordens de serviço, recibos e orçamentos.
+          </p>
+        </div>
+      </div>
 
-          {/* Central de Segurança - Versão Ultra Compacta Integrada */}
-          <div className="border border-slate-800 bg-slate-950/50 rounded-xl p-3.5 space-y-3">
-            <div className="space-y-0.5">
-              <h4 className="text-[11px] font-black text-rose-100 uppercase tracking-wider flex items-center gap-1">
-                🛡️ Central de Segurança e Backup
-              </h4>
-              <p className="text-[9px] text-slate-400 leading-relaxed">
-                Proteja suas informações de vendas, produtos, gastos e configurações exportando ou carregando backups.
+      {/* =========================================================================
+          2. HORÁRIO DE FUNCIONAMENTO FLEXÍVEL (LARGURA TOTAL EXPANDIDA)
+         ========================================================================= */}
+      <div className="w-full space-y-5 p-5 sm:p-6 bg-slate-950/40 rounded-xl border border-slate-800/80">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-900 pb-3">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 rounded-lg bg-brand-magenta/10 text-brand-magenta">
+              <Clock className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-white uppercase tracking-wider">Horário de Funcionamento Flexível</h3>
+              <p className="text-xs text-slate-400">Configure os horários em que sua empresa opera para controle de expediente e avisos.</p>
+            </div>
+          </div>
+        </div>
+        
+        {/* Opções rápidas/padrão em botões */}
+        <div className="space-y-2">
+          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Preenchimento Rápido (Selecione um Padrão):</span>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => applyBusinessHoursPreset("preset1")}
+              className="py-1.5 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-200 text-[11px] font-medium rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer shadow"
+            >
+              Seg a Sex: 09h às 18h / Sáb: 06h às 14h
+            </button>
+            <button
+              type="button"
+              onClick={() => applyBusinessHoursPreset("preset2")}
+              className="py-1.5 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-200 text-[11px] font-medium rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer shadow"
+            >
+              Seg a Sex: 08h às 18h / Sáb: 08h às 12h
+            </button>
+            <button
+              type="button"
+              onClick={() => applyBusinessHoursPreset("preset3")}
+              className="py-1.5 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-200 text-[11px] font-medium rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer shadow"
+            >
+              Seg a Sáb: 09h às 18h / Dom: Fechado
+            </button>
+            <button
+              type="button"
+              onClick={() => applyBusinessHoursPreset("preset4")}
+              className="py-1.5 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-200 text-[11px] font-medium rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer shadow"
+            >
+              Todos os dias: 08h às 22h
+            </button>
+          </div>
+        </div>
+
+        {/* Lista seletora dia a dia para personalização detalhada em grid multi-colunas full-width */}
+        <div className="space-y-2 pt-1">
+          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Personalização Detalhada por Dia da Semana:</span>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 w-full">
+            {WEEKDAYS.map((day) => {
+              const hoursForDay = businessHours[day.key] || { isOpen: false, openTime: "09:00", closeTime: "18:00" };
+              return (
+                <div key={day.key} className="flex items-center justify-between gap-3 p-3 bg-slate-950/60 rounded-xl border border-slate-900/80 hover:bg-slate-900/30 transition-all">
+                  <div className="flex items-center gap-2 min-w-[110px]">
+                    <input
+                      type="checkbox"
+                      id={`day-${day.key}`}
+                      checked={hoursForDay.isOpen}
+                      onChange={() => handleDayToggle(day.key)}
+                      className="h-4 w-4 rounded border-slate-800 bg-slate-950 text-brand-magenta focus:ring-brand-magenta focus:ring-offset-slate-950 cursor-pointer"
+                    />
+                    <label htmlFor={`day-${day.key}`} className="text-xs font-semibold text-slate-200 cursor-pointer select-none">
+                      {day.label}
+                    </label>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {hoursForDay.isOpen ? (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        Aberto
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-slate-500/10 text-slate-400 border border-slate-500/10">
+                        Fechado
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <input
+                      type="time"
+                      value={hoursForDay.openTime}
+                      disabled={!hoursForDay.isOpen}
+                      onChange={(e) => handleTimeChange(day.key, "openTime", e.target.value)}
+                      className="bg-slate-900 border border-slate-800 disabled:opacity-40 rounded-md py-1 px-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-magenta transition-all font-mono"
+                      title="Horário de abertura"
+                    />
+                    <span className="text-[10px] text-slate-600">às</span>
+                    <input
+                      type="time"
+                      value={hoursForDay.closeTime}
+                      disabled={!hoursForDay.isOpen}
+                      onChange={(e) => handleTimeChange(day.key, "closeTime", e.target.value)}
+                      className="bg-slate-900 border border-slate-800 disabled:opacity-40 rounded-md py-1 px-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-magenta transition-all font-mono"
+                      title="Horário de fechamento"
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Compatibilidade retroativa para recursos legados/fechamento auto */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 border-t border-slate-900 pt-4">
+          <div className="space-y-1.5">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Horário Limite Geral para Alertas:</span>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <span className="text-[9px] text-slate-500 block mb-1">Início do expediente:</span>
+                <input
+                  type="time"
+                  value={openingTime}
+                  onChange={(e) => setOpeningTime(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-850 rounded-xl py-2 px-3 text-xs text-slate-200 focus:outline-none focus:border-brand-magenta font-mono"
+                />
+              </div>
+              <div>
+                <span className="text-[9px] text-slate-500 block mb-1">Término do expediente:</span>
+                <input
+                  type="time"
+                  value={closingTime}
+                  onChange={(e) => setClosingTime(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-850 rounded-xl py-2 px-3 text-xs text-slate-200 focus:outline-none focus:border-brand-magenta font-mono"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col justify-center space-y-1.5 bg-slate-950/60 p-4 rounded-xl border border-slate-900">
+            <div className="flex items-center gap-3">
+              <label className="relative inline-flex items-center cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={autoCloseRegisterEnabled}
+                  onChange={(e) => setAutoCloseRegisterEnabled(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-10 h-5 bg-slate-900 border border-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-brand-magenta/80 peer-checked:after:bg-white"></div>
+                <div className="ml-3 text-xs font-bold text-slate-200">
+                  Fechar caixa automaticamente ao término
+                </div>
+              </label>
+            </div>
+            <p className="text-[10px] text-slate-500 leading-relaxed">
+              Ativando esta opção, o sistema fará a contabilidade sozinho e fechará o caixa de forma autônoma se os operadores esquecerem aberto no fim do dia.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* =========================================================================
+          3. LEMBRETE AGRADÁVEL DE FECHAMENTO DE CAIXA (LARGURA TOTAL EXPANDIDA)
+         ========================================================================= */}
+      <div className="w-full space-y-5 p-5 sm:p-6 bg-gradient-to-br from-slate-950/90 via-slate-900/70 to-amber-950/20 rounded-xl border border-amber-500/30 shadow-lg shadow-amber-950/10">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate-850">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-400 shrink-0">
+              <Sunset className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                Lembrete Agradável de Fechamento de Caixa
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                  Fim de Expediente
+                </span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Ao passar do horário de funcionamento, o sistema exibe uma notificação acolhedora na tela convidando a fechar o caixa e salvar os dados antes de fechar o programa.
               </p>
             </div>
+          </div>
 
-            {/* Input Oculto para Backup Nuvem */}
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleTestCashClosingReminder}
+              className="px-3.5 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 text-xs font-bold border border-amber-500/30 hover:border-amber-500/50 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95"
+              title="Simular e visualizar como a notificação agradável aparecerá na tela"
+            >
+              <BellRing className="h-3.5 w-3.5" />
+              <span>Testar Notificação</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Toggle switch */}
+        <div className="flex items-center justify-between p-4 bg-slate-950/60 rounded-xl border border-slate-850">
+          <div className="space-y-0.5 pr-4">
+            <span className="text-xs font-semibold text-slate-200 block">
+              Ativar Lembrete de Fechamento de Caixa
+            </span>
+            <p className="text-[11px] text-slate-400">
+              Exibe um diálogo caloroso e amigável quando o horário limite for atingido, com opções para conferir e fechar o caixa agora, adiar por 15 minutos ou manter aberto.
+            </p>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer select-none shrink-0">
             <input
-              ref={backupFileInputRef}
-              type="file"
-              accept=".json"
-              onChange={handleImportFileChange}
-              className="hidden"
+              type="checkbox"
+              checked={cashClosingReminderEnabled}
+              onChange={(e) => setCashClosingReminderEnabled(e.target.checked)}
+              className="sr-only peer"
             />
+            <div className="w-11 h-6 bg-slate-900 border border-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-amber-500 peer-checked:to-orange-500 peer-checked:after:bg-white"></div>
+          </label>
+        </div>
 
-            {/* Input Oculto para Backup Local (LocalStorage) */}
-            <input
-              ref={localBackupFileInputRef}
-              type="file"
-              accept=".json"
-              onChange={handleLocalBackupFileChange}
-              className="hidden"
-            />
-
-            {/* Mensagens de Feedback */}
-            {backupSuccessMsg && (
-              <div className="bg-emerald-950/50 border border-emerald-500/30 rounded-lg p-2 text-emerald-400 font-sans text-[10px]">
-                <p className="font-bold flex items-center gap-1">✓ Operação concluída com sucesso!</p>
-                <p className="text-[9px] text-emerald-500 mt-0.5 whitespace-pre-line">{backupSuccessMsg}</p>
+        {cashClosingReminderEnabled && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 pt-1">
+            {/* Coluna Esquerda: Horário e Modelos Rápidos */}
+            <div className="lg:col-span-5 space-y-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
+                  <span>Horário do Lembrete de Fechamento</span>
+                  <span className="text-[10px] text-slate-500 font-normal">
+                    {cashClosingReminderTime ? "Horário específico" : "Usando horário da empresa"}
+                  </span>
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="time"
+                    value={cashClosingReminderTime || closingTime}
+                    onChange={(e) => setCashClosingReminderTime(e.target.value)}
+                    className="w-full bg-slate-950/90 border border-slate-800 rounded-xl py-2 px-3 text-sm text-slate-100 font-mono focus:outline-none focus:border-amber-500 transition-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setCashClosingReminderTime(closingTime)}
+                    className="px-3 py-2 bg-slate-900 hover:bg-slate-850 text-slate-300 rounded-xl border border-slate-800 text-[11px] font-medium whitespace-nowrap cursor-pointer transition-colors"
+                    title="Sincronizar com horário de término geral"
+                  >
+                    Usar {closingTime}
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  Quando atingir este horário, o aviso acolhedor é exibido se o caixa ainda estiver aberto.
+                </p>
               </div>
-            )}
 
-            {backupError && (
-              <div className="bg-red-950/50 border border-red-500/30 rounded-lg p-2 text-red-400 font-sans text-[10px]">
-                <p className="font-bold">❌ Aviso: {backupError}</p>
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-300 block">
+                  Modelos Rápidos de Mensagem Agradável
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCashClosingReminderMessage(
+                        "Excelente dia de trabalho! O horário de encerramento do expediente foi atingido. Deseja realizar o fechamento do caixa e salvar seus relatórios antes de fechar o programa?"
+                      )
+                    }
+                    className="py-1 px-2.5 bg-slate-900/80 hover:bg-slate-800 text-amber-300 text-[11px] rounded-lg border border-amber-500/20 transition-all cursor-pointer"
+                  >
+                    🌅 Acolhedor & Motivador
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCashClosingReminderMessage(
+                        "Atenção: Horário de encerramento do expediente atingido. Por gentileza, realize a conferência dos valores e encerre a sessão do caixa para fechar o programa."
+                      )
+                    }
+                    className="py-1 px-2.5 bg-slate-900/80 hover:bg-slate-800 text-slate-300 text-[11px] rounded-lg border border-slate-800 transition-all cursor-pointer"
+                  >
+                    💼 Profissional & Direto
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCashClosingReminderMessage(
+                        "Fim do expediente concluído com sucesso! Lembre-se de realizar o fechamento do caixa antes de desligar o sistema. Bom descanso e até amanhã! 🌙"
+                      )
+                    }
+                    className="py-1 px-2.5 bg-slate-900/80 hover:bg-slate-800 text-teal-300 text-[11px] rounded-lg border border-teal-500/20 transition-all cursor-pointer"
+                  >
+                    🌙 Bom Descanso
+                  </button>
+                </div>
               </div>
-            )}
+            </div>
 
-            {/* Arquivo selecionado no backup */}
-            {backupFile ? (
-              <div className="p-1.5 rounded bg-slate-900 border border-slate-800 flex items-center justify-between text-slate-350 text-[9px] font-mono">
-                <span className="truncate max-w-[140px]">{backupFile.name} ({backupPreview?.type === "local" ? "Formato: Local" : "Formato: Nuvem"})</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBackupFile(null);
-                    setBackupPreview(null);
-                  }}
-                  className="text-red-400 hover:text-red-200 text-[8px] font-bold uppercase shrink-0"
-                >
-                  Excluir
-                </button>
-              </div>
-            ) : null}
+            {/* Coluna Direita: Mensagem Personalizada */}
+            <div className="lg:col-span-7 space-y-1.5">
+              <label className="text-xs font-semibold text-slate-300 block">
+                Mensagem Agradável Exibida na Notificação
+              </label>
+              <textarea
+                rows={4}
+                value={cashClosingReminderMessage}
+                onChange={(e) => setCashClosingReminderMessage(e.target.value)}
+                placeholder="Digite a mensagem carinhosa e agradável que aparecerá para os operadores quando o expediente terminar..."
+                className="w-full bg-slate-950/90 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-amber-500 transition-all resize-none leading-relaxed min-h-[110px]"
+              />
+              <p className="text-[10px] text-slate-500">
+                Você pode personalizar as palavras para combinar com o espírito e a cultura da sua equipe.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
 
-            {/* --- SEÇÃO CLOUD BACKUP --- */}
-            <div className="space-y-2 bg-slate-950/40 p-2.5 rounded-lg border border-slate-900/40">
+      {/* =========================================================================
+          4. CONTROLE DE BACKUP DO SISTEMA (CENTRAL DE SEGURANÇA EXPANDIDA EM LARGURA TOTAL)
+         ========================================================================= */}
+      <div className="w-full border border-slate-800 bg-slate-950/50 rounded-xl p-5 sm:p-6 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-900 pb-3">
+          <div className="space-y-0.5">
+            <h4 className="text-sm font-black text-rose-100 uppercase tracking-wider flex items-center gap-1.5">
+              🛡️ Controle de Backup do Sistema (Central de Segurança)
+            </h4>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Proteja suas informações de vendas, clientes, despesas, faturas fixas e dados cadastrais exportando ou restaurando cópias consolidadas.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowSqlScriptModal(!showSqlScriptModal)}
+              className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 font-mono transition-colors font-bold px-2.5 py-1 rounded-lg bg-cyan-950/40 border border-cyan-800/40 cursor-pointer"
+              title="Exibir comando SQL para criar a tabela meus_dados no Supabase"
+            >
+              <FileText className="h-3 w-3" />
+              <span>{showSqlScriptModal ? "Ocultar SQL" : "Script SQL Nuvem"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={fetchCloudBackups}
+              className="text-[10px] text-slate-300 hover:text-brand-magenta flex items-center gap-1.5 font-mono transition-colors px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 cursor-pointer"
+              title="Atualizar lista de backups"
+            >
+              <RefreshCw className={`h-3 w-3 ${loadingCloudBackups ? "animate-spin" : ""}`} />
+              <span>Sincronizar</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Input Oculto para Backup Nuvem */}
+        <input
+          ref={backupFileInputRef}
+          type="file"
+          accept=".json"
+          onChange={handleImportFileChange}
+          className="hidden"
+        />
+
+        {/* Input Oculto para Backup Local (LocalStorage) */}
+        <input
+          ref={localBackupFileInputRef}
+          type="file"
+          accept=".json"
+          onChange={handleLocalBackupFileChange}
+          className="hidden"
+        />
+
+        {/* Input oculto para upload direto para a nuvem */}
+        <input
+          ref={uploadCloudBackupInputRef}
+          type="file"
+          accept=".json"
+          onChange={handleUploadBackupToCloud}
+          className="hidden"
+        />
+
+        {/* Mensagens de Feedback */}
+        {backupSuccessMsg && (
+          <div className="bg-emerald-950/50 border border-emerald-500/30 rounded-lg p-3 text-emerald-400 font-sans text-xs animate-fadeIn">
+            <p className="font-bold flex items-center gap-1.5">✓ Operação concluída com sucesso!</p>
+            <p className="text-[11px] text-emerald-500 mt-1 whitespace-pre-line">{backupSuccessMsg}</p>
+          </div>
+        )}
+
+        {backupError && (
+          <div className="bg-red-950/50 border border-red-500/30 rounded-lg p-3 text-red-400 font-sans text-xs animate-fadeIn">
+            <p className="font-bold">❌ Aviso: {backupError}</p>
+          </div>
+        )}
+
+        {/* Arquivo selecionado no backup */}
+        {backupFile ? (
+          <div className="p-2 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between text-slate-350 text-xs font-mono">
+            <span className="truncate max-w-md">{backupFile.name} ({backupPreview?.type === "local" ? "Formato: Local" : "Formato: Nuvem"})</span>
+            <button
+              type="button"
+              onClick={() => {
+                setBackupFile(null);
+                setBackupPreview(null);
+              }}
+              className="text-red-400 hover:text-red-200 text-[10px] font-bold uppercase shrink-0 cursor-pointer"
+            >
+              Limpar Seleção
+            </button>
+          </div>
+        ) : null}
+
+        {/* BANNER INFORMATIVO SE A TABELA MEUS_DADOS NÃO EXISTE */}
+        {isTableMissing && (
+          <div className="bg-amber-950/40 border border-amber-500/30 rounded-xl p-3.5 text-xs space-y-2 animate-fadeIn">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-bold flex items-center gap-1.5 text-amber-300">
+                <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
+                Tabela 'meus_dados' ausente no Supabase
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowSqlScriptModal(!showSqlScriptModal)}
+                className="px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 font-bold uppercase text-[9px] cursor-pointer shrink-0"
+              >
+                {showSqlScriptModal ? "Fechar SQL" : "Ver Comando SQL"}
+              </button>
+            </div>
+            <p className="text-slate-350 text-[11px] leading-relaxed">
+              O erro <em>"Could not find the table 'public.meus_dados'"</em> indica que a tabela de sincronização ainda não foi criada no seu banco.
+              Seus <strong>Backups Locais continuam 100% disponíveis</strong> na coluna ao lado! Para ativar também a nuvem, basta rodar o comando SQL no SQL Editor do seu Supabase.
+            </p>
+          </div>
+        )}
+
+        {/* MODAL / VISUALIZADOR DO SCRIPT SQL DO SUPABASE */}
+        {showSqlScriptModal && (
+          <div className="bg-slate-900/90 border border-cyan-500/40 rounded-xl p-3.5 space-y-2.5 animate-fadeIn">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
+                <Database className="h-4 w-4 text-cyan-400" />
+                Script SQL para Criar Tabela 'meus_dados' no Supabase:
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(MEUS_DADOS_SQL_SCRIPT);
+                  setCopiedSql(true);
+                  setTimeout(() => setCopiedSql(false), 3000);
+                }}
+                className="flex items-center gap-1.5 px-3 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-[10px] uppercase transition-colors cursor-pointer"
+              >
+                {copiedSql ? (
+                  <>
+                    <Check className="h-3 w-3 text-white" />
+                    <span>Copiado!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3 w-3" />
+                    <span>Copiar SQL</span>
+                  </>
+                )}
+              </button>
+            </div>
+            <p className="text-[10px] text-slate-400">
+              Passo a passo: 1) Abra seu painel do <strong>Supabase</strong> &rarr; 2) Acesse <strong>SQL Editor</strong> no menu lateral &rarr; 3) Cole o script abaixo e clique em <strong>Run</strong>.
+            </p>
+            <pre className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-[10px] text-emerald-400 font-mono overflow-x-auto max-h-40 leading-relaxed select-all custom-scrollbar">
+              {MEUS_DADOS_SQL_SCRIPT}
+            </pre>
+          </div>
+        )}
+
+        {/* GRID LADO A LADO: NUVEM E LOCAL (EXPANDIDO HORIZONTALMENTE) */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full pt-1">
+          {/* --- COLUNA 1: CLOUD BACKUP --- */}
+          <div className="space-y-3 bg-slate-950/60 p-4 rounded-xl border border-slate-900 flex flex-col justify-between">
+            <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-[9px] font-black text-brand-magenta uppercase tracking-wider block">1. Backup Remoto (Nuvem Supabase)</span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowSqlScriptModal(!showSqlScriptModal)}
-                    className="text-[8px] text-cyan-400 hover:text-cyan-300 flex items-center gap-0.5 font-mono transition-colors font-bold"
-                    title="Exibir comando SQL para criar a tabela meus_dados no Supabase"
-                  >
-                    <FileText className="h-2.5 w-2.5" />
-                    <span>{showSqlScriptModal ? "Ocultar SQL" : "Script SQL Nuvem"}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={fetchCloudBackups}
-                    className="text-[8px] text-slate-400 hover:text-brand-magenta flex items-center gap-1 font-mono transition-colors"
-                    title="Atualizar lista de backups"
-                  >
-                    <RefreshCw className={`h-2.5 w-2.5 ${loadingCloudBackups ? "animate-spin" : ""}`} />
-                    <span>Sincronizar</span>
-                  </button>
-                </div>
+                <span className="text-xs font-black text-brand-magenta uppercase tracking-wider block">1. Backup Remoto (Nuvem Supabase)</span>
+                <span className="text-[9px] text-emerald-400 font-mono font-bold flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
+                  Realtime Ativo
+                </span>
               </div>
+              <p className="text-[11px] text-slate-400 leading-tight">
+                Salva o backup consolidado na nuvem para compartilhar e restaurar entre todos os computadores da empresa.
+              </p>
 
-              {/* BANNER INFORMATIVO SE A TABELA MEUS_DADOS NÃO EXISTE */}
-              {isTableMissing && (
-                <div className="bg-amber-950/40 border border-amber-500/30 rounded-lg p-2.5 text-[9px] space-y-1.5 animate-fadeIn">
-                  <div className="flex items-center justify-between gap-1">
-                    <span className="font-bold flex items-center gap-1 text-amber-300">
-                      <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0" />
-                      Tabela 'meus_dados' ausente no Supabase
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setShowSqlScriptModal(!showSqlScriptModal)}
-                      className="px-1.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 font-bold uppercase text-[8px] cursor-pointer shrink-0"
-                    >
-                      {showSqlScriptModal ? "Fechar SQL" : "Ver Comando SQL"}
-                    </button>
-                  </div>
-                  <p className="text-slate-350 text-[8.5px] leading-relaxed">
-                    O erro <em>"Could not find the table 'public.meus_dados'"</em> indica que a tabela de sincronização ainda não foi criada no seu banco.
-                    Seus <strong>Backups Locais funcionam perfeitamente</strong> logo abaixo! Para ativar também a nuvem, basta rodar o comando SQL no painel do Supabase.
-                  </p>
-                </div>
-              )}
-
-              {/* MODAL / VISUALIZADOR DO SCRIPT SQL DO SUPABASE */}
-              {showSqlScriptModal && (
-                <div className="bg-slate-900/90 border border-cyan-500/40 rounded-lg p-2.5 space-y-2 animate-fadeIn">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[9px] font-bold text-cyan-300 flex items-center gap-1">
-                      <Database className="h-3 w-3 text-cyan-400" />
-                      Script SQL para Criar Tabela 'meus_dados' no Supabase:
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(MEUS_DADOS_SQL_SCRIPT);
-                        setCopiedSql(true);
-                        setTimeout(() => setCopiedSql(false), 3000);
-                      }}
-                      className="flex items-center gap-1 px-2 py-0.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-[8px] uppercase transition-colors cursor-pointer"
-                    >
-                      {copiedSql ? (
-                        <>
-                          <Check className="h-2.5 w-2.5 text-white" />
-                          <span>Copiado!</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-2.5 w-2.5" />
-                          <span>Copiar SQL</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                  <p className="text-[8px] text-slate-400">
-                    Passo a passo: 1) Abra seu painel do <strong>Supabase</strong> &rarr; 2) Acesse <strong>SQL Editor</strong> no menu lateral &rarr; 3) Cole o script abaixo e clique em <strong>Run</strong>.
-                  </p>
-                  <pre className="bg-slate-950 p-2 rounded border border-slate-800 text-[8px] text-emerald-400 font-mono overflow-x-auto max-h-36 leading-relaxed select-all custom-scrollbar">
-                    {MEUS_DADOS_SQL_SCRIPT}
-                  </pre>
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-2 pt-1">
+              <div className="grid grid-cols-2 gap-3 pt-1">
                 <button
                   type="button"
                   onClick={handleExportBackup}
                   disabled={exporting}
-                  className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-gradient-to-r from-brand-magenta/80 to-pink-650/80 text-white hover:brightness-110 active:scale-95 transition-all text-[9px] font-extrabold uppercase shadow-sm shadow-pink-900/10 cursor-pointer disabled:opacity-50 h-[30px]"
+                  className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-gradient-to-r from-brand-magenta/80 to-pink-650/80 text-white hover:brightness-110 active:scale-95 transition-all text-[10px] font-extrabold uppercase shadow-sm shadow-pink-900/10 cursor-pointer disabled:opacity-50 h-[36px]"
                   title="Exportar Todas as Informações da Nuvem e Salvar na Tabela"
                 >
                   {exporting ? (
-                    <RefreshCw className="h-3 w-3 animate-spin shrink-0" />
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
                   ) : (
-                    <Database className="h-3.5 w-3.5 shrink-0 text-white" />
+                    <Database className="h-4 w-4 shrink-0 text-white" />
                   )}
                   <span>Exportar Nuvem</span>
                 </button>
@@ -2658,125 +2733,115 @@ export function CompanySettings({
                     uploadCloudBackupInputRef.current?.click();
                   }}
                   disabled={uploadingCloud}
-                  className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-gradient-to-r from-blue-600 to-cyan-500 text-white hover:brightness-110 active:scale-95 transition-all text-[9px] font-extrabold uppercase shadow-sm shadow-cyan-500/10 cursor-pointer disabled:opacity-50 h-[30px]"
+                  className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white hover:brightness-110 active:scale-95 transition-all text-[10px] font-extrabold uppercase shadow-sm shadow-cyan-500/10 cursor-pointer disabled:opacity-50 h-[36px]"
                   title="Enviar Arquivo de Backup (.JSON) para a Nuvem e Compartilhar com Todas as Máquinas"
                 >
                   {uploadingCloud ? (
-                    <RefreshCw className="h-3 w-3 animate-spin shrink-0" />
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
                   ) : (
-                    <Upload className="h-3.5 w-3.5 shrink-0 text-white" />
+                    <Upload className="h-4 w-4 shrink-0 text-white" />
                   )}
                   <span>
                     {uploadingCloud ? "Enviando..." : "Upload Nuvem"}
                   </span>
                 </button>
               </div>
-
-              {/* Input oculto para upload direto para a nuvem */}
-              <input
-                ref={uploadCloudBackupInputRef}
-                type="file"
-                accept=".json"
-                onChange={handleUploadBackupToCloud}
-                className="hidden"
-              />
-
-              {/* LISTA DE BACKUPS SINCRONIZADOS EM TEMPO REAL */}
-              <div className="pt-2 border-t border-slate-900/60 space-y-1.5">
-                <div className="flex items-center justify-between text-[8px] font-bold text-slate-400 uppercase tracking-wider">
-                  <span>Arquivos na Nuvem ({cloudBackups.length})</span>
-                  <span className="text-emerald-400 flex items-center gap-1">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
-                    Realtime Ativo
-                  </span>
-                </div>
-
-                {loadingCloudBackups && cloudBackups.length === 0 ? (
-                  <div className="p-2 text-center text-[9px] text-slate-500 font-mono flex items-center justify-center gap-1.5">
-                    <RefreshCw className="h-3 w-3 animate-spin text-brand-magenta" />
-                    Carregando backups da nuvem...
-                  </div>
-                ) : cloudBackups.length === 0 ? (
-                  <div className="p-2 rounded bg-slate-900/40 border border-slate-900 text-center text-[9px] text-slate-500 font-mono">
-                    {isTableMissing ? "Tabela 'meus_dados' ainda não criada no Supabase." : "Nenhum backup em nuvem encontrado."}
-                  </div>
-                ) : (
-                  <div className="max-h-40 overflow-y-auto space-y-1 pr-0.5 custom-scrollbar">
-                    {cloudBackups.map((bkp) => (
-                      <div
-                        key={bkp.id}
-                        className="p-1.5 rounded-lg bg-slate-900/70 border border-slate-800 hover:border-slate-700 flex items-center justify-between gap-2 transition-all"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <Database className="h-3 w-3 text-brand-magenta shrink-0" />
-                            <span className="text-[9px] font-bold text-slate-200 truncate block font-mono">
-                              {bkp.titulo}
-                            </span>
-                          </div>
-                          <span className="text-[8px] text-slate-400 block font-mono mt-0.5">
-                            {new Date(bkp.created_at).toLocaleString("pt-BR", {
-                              day: "2-digit",
-                              month: "2-digit",
-                              year: "numeric",
-                              hour: "2-digit",
-                              minute: "2-digit"
-                            })}
-                            {bkp.valor ? ` • ${(Number(bkp.valor) / 1024).toFixed(1)} KB` : ""}
-                          </span>
-                        </div>
-
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => handleRestoreCloudBackup(bkp)}
-                            disabled={importing}
-                            className="px-1.5 py-0.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 rounded text-[8px] font-bold uppercase transition-colors cursor-pointer"
-                            title="Restaurar este backup nesta máquina"
-                          >
-                            Restaurar
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDownloadCloudBackup(bkp)}
-                            className="p-1 text-slate-400 hover:text-brand-cyan transition-colors cursor-pointer"
-                            title="Baixar arquivo .json"
-                          >
-                            <Download className="h-3 w-3" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteCloudBackup(bkp.id)}
-                            className="p-1 text-slate-500 hover:text-red-400 transition-colors cursor-pointer"
-                            title="Excluir da nuvem"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
             </div>
 
-            {/* --- SEÇÃO LOCALSTORAGE BACKUP --- */}
-            <div className="space-y-1 bg-slate-950/40 p-2.5 rounded-lg border border-slate-900/40">
-              <div className="flex items-center justify-between">
-                <span className="text-[9px] font-black text-brand-cyan uppercase tracking-wider block">2. Backup Local (LocalStorage do Navegador)</span>
-                <span className="text-[8px] text-emerald-400 font-mono font-bold">100% Offline / Imediato</span>
+            {/* LISTA DE BACKUPS SINCRONIZADOS EM TEMPO REAL */}
+            <div className="pt-3 border-t border-slate-900 space-y-2 mt-2">
+              <div className="flex items-center justify-between text-[9px] font-bold text-slate-400 uppercase tracking-wider">
+                <span>Arquivos Salvos na Nuvem ({cloudBackups.length})</span>
               </div>
-              <p className="text-[8.5px] text-slate-400 leading-tight">
+
+              {loadingCloudBackups && cloudBackups.length === 0 ? (
+                <div className="p-3 text-center text-xs text-slate-500 font-mono flex items-center justify-center gap-2">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-brand-magenta" />
+                  Carregando backups da nuvem...
+                </div>
+              ) : cloudBackups.length === 0 ? (
+                <div className="p-3 rounded-lg bg-slate-900/40 border border-slate-900 text-center text-xs text-slate-500 font-mono">
+                  {isTableMissing ? "Tabela 'meus_dados' ainda não criada no Supabase." : "Nenhum backup em nuvem encontrado."}
+                </div>
+              ) : (
+                <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
+                  {cloudBackups.map((bkp) => (
+                    <div
+                      key={bkp.id}
+                      className="p-2 rounded-lg bg-slate-900/70 border border-slate-800 hover:border-slate-700 flex items-center justify-between gap-2 transition-all"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <Database className="h-3 w-3 text-brand-magenta shrink-0" />
+                          <span className="text-[10px] font-bold text-slate-200 truncate block font-mono">
+                            {bkp.titulo}
+                          </span>
+                        </div>
+                        <span className="text-[9px] text-slate-400 block font-mono mt-0.5">
+                          {new Date(bkp.created_at).toLocaleString("pt-BR", {
+                            day: "2-digit",
+                            month: "2-digit",
+                            year: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit"
+                          })}
+                          {bkp.valor ? ` • ${(Number(bkp.valor) / 1024).toFixed(1)} KB` : ""}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleRestoreCloudBackup(bkp)}
+                          disabled={importing}
+                          className="px-2 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 rounded text-[9px] font-bold uppercase transition-colors cursor-pointer"
+                          title="Restaurar este backup nesta máquina"
+                        >
+                          Restaurar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadCloudBackup(bkp)}
+                          className="p-1 text-slate-400 hover:text-brand-cyan transition-colors cursor-pointer"
+                          title="Baixar arquivo .json"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteCloudBackup(bkp.id)}
+                          className="p-1 text-slate-500 hover:text-red-400 transition-colors cursor-pointer"
+                          title="Excluir da nuvem"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* --- COLUNA 2: LOCALSTORAGE BACKUP --- */}
+          <div className="space-y-3 bg-slate-950/60 p-4 rounded-xl border border-slate-900 flex flex-col justify-between">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-black text-brand-cyan uppercase tracking-wider block">2. Backup Local (LocalStorage do Navegador)</span>
+                <span className="text-[9px] text-emerald-400 font-mono font-bold">100% Offline / Imediato</span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-tight">
                 Carregue ou salve backups diretamente no navegador, sem depender de banco de dados ou da tabela 'meus_dados'.
               </p>
-              <div className="grid grid-cols-2 gap-2 pt-1">
+
+              <div className="grid grid-cols-2 gap-3 pt-1">
                 <button
                   type="button"
                   onClick={handleExportLocalStorageBackup}
-                  className="flex items-center justify-center gap-1 py-1 px-2 rounded-lg bg-slate-905 border border-slate-800 hover:bg-slate-800 hover:text-white text-slate-350 active:scale-95 transition-all text-[9px] font-extrabold uppercase cursor-pointer h-[30px]"
+                  className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-slate-900 border border-slate-800 hover:bg-slate-800 hover:text-white text-slate-300 active:scale-95 transition-all text-[10px] font-extrabold uppercase cursor-pointer h-[36px]"
                   title="Fazer download imediato dos dados do navegador (LocalStorage) em formato JSON"
                 >
-                  <Download className="h-3.5 w-3.5 shrink-0 text-brand-cyan" />
+                  <Download className="h-4 w-4 shrink-0 text-brand-cyan" />
                   <span>Exportar Local</span>
                 </button>
 
@@ -2786,13 +2851,13 @@ export function CompanySettings({
                     localBackupFileInputRef.current?.click();
                   }}
                   disabled={importing}
-                  className="flex items-center justify-center gap-1 py-1 px-2 rounded-lg bg-slate-905 border border-slate-800 hover:bg-slate-800 hover:text-white text-slate-350 active:scale-95 transition-all text-[9px] font-extrabold uppercase cursor-pointer h-[30px]"
+                  className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-slate-900 border border-slate-800 hover:bg-slate-800 hover:text-white text-slate-300 active:scale-95 transition-all text-[10px] font-extrabold uppercase cursor-pointer h-[36px]"
                   title="Restaurar dados do LocalStorage a partir do arquivo JSON selecionado (carrega na mesma hora)"
                 >
                   {importing ? (
-                    <RefreshCw className="h-3 w-3 animate-spin shrink-0" />
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
                   ) : (
-                    <Upload className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                    <Upload className="h-4 w-4 shrink-0 text-amber-500" />
                   )}
                   <span>
                     {importing ? "Restaurando..." : "Restaurar Local"}
@@ -2802,26 +2867,23 @@ export function CompanySettings({
             </div>
 
             {/* --- AUTO DOWNLOAD SETTINGS --- */}
-            <div className="pt-1.5 border-t border-slate-900/50">
-              <div className="flex items-start gap-2 pt-1">
-                <label className="relative inline-flex items-center cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={autoBackupDownloadEnabled}
-                    onChange={(e) => setAutoBackupDownloadEnabled(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-8 h-4 bg-slate-900 border border-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-500 after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-brand-magenta/80 peer-checked:after:bg-white shrink-0"></div>
-                  <div className="ml-2 text-[9px] font-bold text-slate-350 uppercase tracking-widest leading-none">
-                    Download de Backup Local Automático ao Salvar Ajustes
-                  </div>
-                </label>
-              </div>
-              <p className="text-[9px] text-slate-500 mt-1 lines-relaxed">
+            <div className="pt-3 border-t border-slate-900 space-y-2 mt-2 bg-slate-950/40 p-3 rounded-lg border border-slate-900/60">
+              <label className="relative inline-flex items-center cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={autoBackupDownloadEnabled}
+                  onChange={(e) => setAutoBackupDownloadEnabled(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-8 h-4 bg-slate-900 border border-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-500 after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-brand-magenta/80 peer-checked:after:bg-white shrink-0"></div>
+                <div className="ml-2 text-[10px] font-bold text-slate-300 uppercase tracking-widest leading-none">
+                  Download Automático ao Salvar Ajustes
+                </div>
+              </label>
+              <p className="text-[10px] text-slate-500 leading-relaxed">
                 Recomendado: Sempre que salvar as configurações da empresa, uma cópia de segurança completa do seu LocalStorage será exportada de forma automática para evitar perdas acidentais.
               </p>
             </div>
-
           </div>
         </div>
       </div>
@@ -3161,11 +3223,14 @@ export function CompanySettings({
         </div>
       </div>
 
-      <div className="pt-6 border-t border-slate-850 flex justify-end">
+      <div className="pt-6 border-t border-slate-850 flex flex-col sm:flex-row items-center justify-between gap-4 w-full">
+        <p className="text-xs text-slate-400">
+          💡 Clique no botão para gravar todas as alterações cadastrais, horários e preferências da empresa.
+        </p>
         <button
           type="button"
           onClick={handleSave}
-          className="flex items-center gap-1.5 py-2.5 px-6 rounded-xl font-bold text-white bg-gradient-to-r from-brand-magenta to-brand-magenta/80 shadow-md shadow-brand-magenta/15 cursor-pointer hover:opacity-90 transform hover:-translate-y-0.5 transition-all text-xs font-sans"
+          className="flex items-center gap-2 py-3 px-8 rounded-xl font-bold text-white bg-gradient-to-r from-brand-magenta to-brand-magenta/80 shadow-lg shadow-brand-magenta/20 cursor-pointer hover:opacity-95 transform hover:-translate-y-0.5 active:scale-95 transition-all text-xs font-sans shrink-0"
         >
           <Sparkles className="h-4 w-4" />
           <span>Salvar Registro de Empresa</span>

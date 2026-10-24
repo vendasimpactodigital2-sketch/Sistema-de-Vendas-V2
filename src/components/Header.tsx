@@ -823,10 +823,12 @@ export function Header({
               </div>
             </div>
 
-            <RemindersCalendarModal
-              isOpen={isCalendarOpen}
-              onClose={() => setIsCalendarOpen(false)}
-            />
+            {isCalendarOpen && (
+              <RemindersCalendarModal
+                isOpen={isCalendarOpen}
+                onClose={() => setIsCalendarOpen(false)}
+              />
+            )}
           </div>
 
           {/* Real-time "Falta para Meta" Square Card directly below the clock */}
