@@ -803,6 +803,11 @@ export function Header({
                       <p className="text-xs font-bold text-slate-200 break-words leading-tight">
                         {rem.title}
                       </p>
+                      {rem.message && (
+                        <p className="text-[10px] text-pink-300/90 italic truncate">
+                          💬 {rem.message}
+                        </p>
+                      )}
                       <div className="flex items-center gap-1.5 text-[8px] font-mono text-slate-450">
                         <span className="text-brand-magenta font-semibold">{formatReminderSchedule(rem)}</span>
                       </div>

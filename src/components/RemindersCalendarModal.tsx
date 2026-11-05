@@ -478,7 +478,11 @@ export function RemindersCalendarModal({ isOpen, onClose }: RemindersCalendarMod
                               <p className={`text-xs font-bold text-slate-200 break-words ${rem.completed ? "line-through text-slate-500 font-medium" : ""}`}>
                                 {rem.title}
                               </p>
-                              
+                              {rem.message && (
+                                <p className="text-[10px] text-pink-300 italic break-words">
+                                  💬 {rem.message}
+                                </p>
+                              )}
                               <div className="flex items-center gap-1.5 flex-wrap text-[8.5px] font-mono text-slate-450">
                                 <span className="bg-slate-900 px-1 rounded-sm border border-slate-850">{formattedTimeText}</span>
                                 <span>•</span>

@@ -4312,6 +4312,30 @@ export default function App() {
     return () => clearInterval(interval);
   }, [ringingReminders, soundEnabled]);
 
+  // Listen for test reminder events dispatched from Settings to preview audio and ringing modal
+  useEffect(() => {
+    const handleTestReminderEvent = (e: any) => {
+      if (e && e.detail) {
+        const testRem: CustomReminder = e.detail;
+        if (soundEnabled) {
+          playReminderSound();
+        }
+        addToast(
+          testRem.message
+            ? `🔔 TESTE DE ALERTA: ${testRem.title} — "${testRem.message}"`
+            : `🔔 TESTE DE ALERTA: ${testRem.title}`,
+          "reminder"
+        );
+        setRingingReminders((prev) => {
+          if (prev.some((r) => r.id === testRem.id)) return prev;
+          return [...prev, testRem];
+        });
+      }
+    };
+    window.addEventListener("TEST_CUSTOM_REMINDER", handleTestReminderEvent);
+    return () => window.removeEventListener("TEST_CUSTOM_REMINDER", handleTestReminderEvent);
+  }, [soundEnabled]);
+
   const handleAcceptRingingReminder = (reminderId: string) => {
     setRingingReminders((prev) => prev.filter((r) => r.id !== reminderId));
 
@@ -4447,7 +4471,12 @@ export default function App() {
 
             if (matches) {
               // Trigger!
-              addToast(`⏰ LEMBRETE ATIVO: ${rem.title} 🔔`, "reminder");
+              addToast(
+                rem.message
+                  ? `⏰ ${rem.title}: ${rem.message}`
+                  : `⏰ LEMBRETE ATIVO: ${rem.title} 🔔`,
+                "reminder"
+              );
               
               // Push to active alarm ringing list to open persistent overlay & sound loop
               setRingingReminders((prev) => {
@@ -7592,13 +7621,32 @@ export default function App() {
                         <div className="p-2.5 bg-brand-magenta/15 border border-brand-magenta/30 rounded-lg text-brand-magenta shrink-0 animate-pulse">
                           <Clock className="w-5 h-5 text-brand-magenta" />
                         </div>
-                        <div className="min-w-0">
+                        <div className="min-w-0 flex-1">
                           <span className="text-base sm:text-lg font-black text-white uppercase tracking-wide block leading-snug">
                             {rem.title}
                           </span>
-                          <span className="text-[11px] font-mono text-slate-400 block mt-1">
-                            {rem.isAllDay ? "🌅 Lembrete para o Dia Todo" : `⏰ Horário Agendado: ${rem.time}`}
-                          </span>
+                          {rem.message && (
+                            <div className="mt-2 p-2.5 rounded-xl bg-pink-950/50 border border-pink-500/30 text-pink-200 text-xs font-medium leading-relaxed">
+                              <span className="font-bold text-pink-400 block text-[10px] uppercase tracking-wider mb-0.5">💬 Mensagem do Alerta:</span>
+                              {rem.message}
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 mt-1.5 flex-wrap text-[11px] font-mono text-slate-400">
+                            {rem.priority && (
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                rem.priority === "urgent"
+                                  ? "bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse"
+                                  : rem.priority === "important"
+                                  ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                                  : "bg-blue-500/20 text-blue-300 border border-blue-500/40"
+                              }`}>
+                                Prioridade: {rem.priority}
+                              </span>
+                            )}
+                            <span className="text-brand-cyan">
+                              {rem.isAllDay ? "🌅 Lembrete para o Dia Todo" : `⏰ Horário Agendado: ${rem.time}`}
+                            </span>
+                          </div>
                         </div>
                       </div>
                       <button

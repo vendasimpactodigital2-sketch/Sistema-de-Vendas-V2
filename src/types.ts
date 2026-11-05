@@ -192,13 +192,16 @@ export const getSaleOperationCost = (sale: Sale): number => {
 export interface CustomReminder {
   id: string;
   title: string;
+  message?: string; // Mensagem própria detalhada do alerta
   type: "date" | "weekly";
   date?: string; // YYYY-MM-DD
-  dayOfWeek?: number; // 0-6
+  dayOfWeek?: number; // 0-6 (0=Domingo, 1=Segunda, etc.)
   time: string; // HH:MM
   isAllDay?: boolean;
   completed?: boolean;
   notified?: boolean;
+  priority?: "normal" | "important" | "urgent";
+  createdAt?: string;
 }
 
 export interface CashRegisterSession {

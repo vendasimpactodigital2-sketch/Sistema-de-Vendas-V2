@@ -35,7 +35,13 @@ import {
   UserCheck,
   Sunset,
   BellRing,
-  Moon
+  Moon,
+  MessageSquare,
+  Filter,
+  Tag,
+  Play,
+  RotateCcw,
+  AlertCircle
 } from "lucide-react";
 import { CompanyProfile, User, CustomReminder, CashRegisterState, CashRegisterSession, BusinessHours } from "../types";
 import { dbExportAllData, dbImportAllData, dbGetCompanyProfile, dbSaveCompanyProfile, isSupabaseConfigured, getAdminDomain, normalizeUserString, notifyRealtimeSync, getSupabase } from "../supabase";
@@ -440,11 +446,17 @@ export function CompanySettings({
 
   // Inputs for adding custom reminders
   const [newReminderTitle, setNewReminderTitle] = useState("");
-  const [newReminderType, setNewReminderType] = useState<"date" | "weekly">("date");
+  const [newReminderMessage, setNewReminderMessage] = useState("");
+  const [newReminderType, setNewReminderType] = useState<"date" | "weekly">("weekly");
   const [newReminderDate, setNewReminderDate] = useState("");
-  const [newReminderDayOfWeek, setNewReminderDayOfWeek] = useState<number>(1); // Monday default
+  const [newReminderDayOfWeek, setNewReminderDayOfWeek] = useState<number>(1); // Monday default (1)
   const [newReminderTime, setNewReminderTime] = useState("09:00");
   const [newReminderIsAllDay, setNewReminderIsAllDay] = useState(false);
+  const [newReminderPriority, setNewReminderPriority] = useState<"normal" | "important" | "urgent">("important");
+
+  // Filtering and search states for the dedicated reminders panel
+  const [reminderSearchTerm, setReminderSearchTerm] = useState("");
+  const [reminderFilterTab, setReminderFilterTab] = useState<"all" | "active" | "weekly" | "date" | "completed">("all");
 
   useEffect(() => {
     const currentLocal = localStorage.getItem("NUCLEO_CUSTOM_REMINDERS");
@@ -452,6 +464,7 @@ export function CompanySettings({
     if (currentLocal !== serialized) {
       localStorage.setItem("NUCLEO_CUSTOM_REMINDERS", serialized);
       window.dispatchEvent(new Event("storage"));
+      window.dispatchEvent(new CustomEvent("reminders_updated"));
     }
   }, [reminders]);
 
@@ -470,12 +483,16 @@ export function CompanySettings({
       }
     };
     window.addEventListener("storage", handleStorageChange);
-    return () => window.removeEventListener("storage", handleStorageChange);
+    window.addEventListener("reminders_updated", handleStorageChange);
+    return () => {
+      window.removeEventListener("storage", handleStorageChange);
+      window.removeEventListener("reminders_updated", handleStorageChange);
+    };
   }, [reminders]);
 
   const handleAddReminder = () => {
     if (!newReminderTitle.trim()) {
-      alert("Por favor, preencha o assunto do seu lembrete.");
+      alert("Por favor, preencha o assunto ou título do seu lembrete.");
       return;
     }
     
@@ -490,19 +507,23 @@ export function CompanySettings({
     }
 
     const newRem: CustomReminder = {
-      id: Math.random().toString(36).substring(2, 9),
+      id: "rem_" + Date.now().toString(36) + "_" + Math.random().toString(36).substring(2, 7),
       title: newReminderTitle.trim(),
+      message: newReminderMessage.trim() || undefined,
       type: newReminderType,
       date: newReminderType === "date" ? selectedDate : undefined,
       dayOfWeek: newReminderType === "weekly" ? newReminderDayOfWeek : undefined,
       time: newReminderIsAllDay ? "00:00" : newReminderTime,
       isAllDay: newReminderIsAllDay,
+      priority: newReminderPriority,
       completed: false,
-      notified: false
+      notified: false,
+      createdAt: new Date().toISOString()
     };
 
-    setReminders((prev) => [...prev, newRem]);
+    setReminders((prev) => [newRem, ...prev]);
     setNewReminderTitle("");
+    setNewReminderMessage("");
     setNewReminderIsAllDay(false);
   };
 
@@ -512,16 +533,18 @@ export function CompanySettings({
   const handleStartEdit = (rem: CustomReminder) => {
     setEditingReminderId(rem.id);
     setNewReminderTitle(rem.title);
+    setNewReminderMessage(rem.message || "");
     setNewReminderType(rem.type);
     setNewReminderDate(rem.date || "");
-    setNewReminderDayOfWeek(rem.dayOfWeek || 1);
+    setNewReminderDayOfWeek(rem.dayOfWeek !== undefined ? rem.dayOfWeek : 1);
     setNewReminderTime(rem.time || "09:00");
     setNewReminderIsAllDay(rem.isAllDay ?? false);
+    setNewReminderPriority(rem.priority || "normal");
   };
 
   const handleSaveEdit = () => {
     if (!newReminderTitle.trim()) {
-      alert("Por favor, preencha o assunto do seu lembrete.");
+      alert("Por favor, preencha o assunto ou título do seu lembrete.");
       return;
     }
 
@@ -531,11 +554,13 @@ export function CompanySettings({
           ? {
               ...r,
               title: newReminderTitle.trim(),
+              message: newReminderMessage.trim() || undefined,
               type: newReminderType,
               date: newReminderType === "date" ? newReminderDate : undefined,
               dayOfWeek: newReminderType === "weekly" ? newReminderDayOfWeek : undefined,
               time: newReminderIsAllDay ? "00:00" : newReminderTime,
               isAllDay: newReminderIsAllDay,
+              priority: newReminderPriority,
               notified: false, // reset notification status so it can trigger again on edit
             }
           : r
@@ -548,11 +573,13 @@ export function CompanySettings({
   const handleCancelEdit = () => {
     setEditingReminderId(null);
     setNewReminderTitle("");
-    setNewReminderType("date");
+    setNewReminderMessage("");
+    setNewReminderType("weekly");
     setNewReminderDate("");
     setNewReminderDayOfWeek(1);
     setNewReminderTime("09:00");
     setNewReminderIsAllDay(false);
+    setNewReminderPriority("important");
   };
 
   const handleToggleReminderCompleted = (id: string) => {
@@ -566,6 +593,15 @@ export function CompanySettings({
       handleCancelEdit();
     }
     setReminders((prev) => prev.filter((r) => r.id !== id));
+  };
+
+  // Immediate sound and visual test for a reminder
+  const handleTestReminder = (rem: CustomReminder) => {
+    window.dispatchEvent(
+      new CustomEvent("TEST_CUSTOM_REMINDER", {
+        detail: rem
+      })
+    );
   };
 
   // Backup integration states
@@ -2947,40 +2983,76 @@ export function CompanySettings({
         </div>
       </div>
 
-      {/* 🔔 PREFERÊNCIAS DE NOTIFICAÇÃO E CENTRAL DE LEMBRETES */}
-      <div className="mt-6 pt-5 border-t border-slate-850 space-y-6">
+      {/* 🔔 1. PREFERÊNCIAS DE NOTIFICAÇÃO E ÁUDIO */}
+      <div className="mt-6 pt-5 border-t border-slate-850 space-y-4">
         <div>
           <h4 className="text-xs font-bold text-slate-250 uppercase tracking-widest flex items-center gap-1.5">
-            🔔 Preferências de Notificação e Central de Lembretes
+            🔔 Preferências de Notificação e Alertas Sonoros
           </h4>
-          <p className="text-[10px] text-slate-500 font-sans mt-1">
-            Ative alertas automáticos de metas e gerencie seus lembretes personalizados do dia a dia.
+          <p className="text-[10px] text-slate-500 font-sans mt-0.5">
+            Controle os efeitos sonoros da caixa registradora e o lembrete diário de acompanhamento de metas.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {/* PAINEL DE AUDIO E METAS DIÁRIAS */}
-          <div className="space-y-4">
-            {/* Sons Alert Box */}
-            <div className="bg-slate-950/60 border border-slate-850 rounded-xl p-4 flex items-center justify-between gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Sons Alert Box */}
+          <div className="bg-slate-950/70 border border-slate-850 rounded-2xl p-4 flex items-center justify-between gap-4">
+            <div className="text-left font-sans space-y-1">
+              <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                <Volume2 className="h-4 w-4 text-emerald-400" />
+                Sons de Alerta e Caixa Registradora
+              </span>
+              <span className="text-[10px] text-slate-500 block leading-relaxed">
+                Toque de sino para novas vendas registradas e comemoração de metas batidas.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => onToggleSound?.(!soundEnabled)}
+              className={`py-2 px-3.5 rounded-xl border font-bold text-[10px] uppercase transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
+                soundEnabled
+                  ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/25 shadow-sm shadow-emerald-500/20"
+                  : "bg-slate-900 border-slate-800 text-slate-450 hover:bg-slate-850"
+              }`}
+            >
+              {soundEnabled ? (
+                <>
+                  <Volume2 className="h-3.5 w-3.5" />
+                  <span>ATIVADO</span>
+                </>
+              ) : (
+                <>
+                  <VolumeX className="h-3.5 w-3.5" />
+                  <span>DESATIVADO</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Lembrete Diário de Metas Box */}
+          <div className="bg-slate-950/70 border border-slate-850 rounded-2xl p-4 space-y-3">
+            <div className="flex items-center justify-between gap-4">
               <div className="text-left font-sans space-y-1">
-                <span className="text-xs font-bold text-white block">Sons de Alerta e Caixa Registradora</span>
+                <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <Bell className="h-4 w-4 text-brand-cyan" />
+                  Lembrete Diário de Metas
+                </span>
                 <span className="text-[10px] text-slate-500 block leading-relaxed">
-                  Toque de sino para novas vendas e conquistas de metas.
+                  Exibe um alerta sobre o andamento e progresso da meta diária de lucros do caixa.
                 </span>
               </div>
               <button
                 type="button"
-                onClick={() => onToggleSound?.(!soundEnabled)}
-                className={`py-2 px-3.5 rounded-lg border font-bold text-[10px] uppercase transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
-                  soundEnabled
-                    ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/15"
+                onClick={() => setGoalsReminderEnabled(!goalsReminderEnabled)}
+                className={`py-2 px-3.5 rounded-xl border font-bold text-[10px] uppercase transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
+                  goalsReminderEnabled
+                    ? "bg-brand-cyan/20 border-brand-cyan/40 text-brand-cyan hover:bg-brand-cyan/25 shadow-sm shadow-brand-cyan/20"
                     : "bg-slate-900 border-slate-800 text-slate-450 hover:bg-slate-850"
                 }`}
               >
-                {soundEnabled ? (
+                {goalsReminderEnabled ? (
                   <>
-                    <Volume2 className="h-3.5 w-3.5" />
+                    <Bell className="h-3.5 w-3.5" />
                     <span>ATIVADO</span>
                   </>
                 ) : (
@@ -2992,293 +3064,597 @@ export function CompanySettings({
               </button>
             </div>
 
-            {/* Lembrete Diário de Metas Box */}
-            <div className="bg-slate-950/60 border border-slate-850 rounded-xl p-4 space-y-4">
-              <div className="flex items-center justify-between gap-4">
-                <div className="text-left font-sans space-y-1">
-                  <span className="text-xs font-bold text-white block">Lembrete Diário de Metas</span>
-                  <span className="text-[10px] text-slate-500 block leading-relaxed">
-                    Exibe um alerta sobre o andamento e progresso da meta diária de lucros do caixa.
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setGoalsReminderEnabled(!goalsReminderEnabled)}
-                  className={`py-2 px-3.5 rounded-lg border font-bold text-[10px] uppercase transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
-                    goalsReminderEnabled
-                      ? "bg-brand-cyan/20 border-brand-cyan/40 text-brand-cyan hover:bg-brand-cyan/25"
-                      : "bg-slate-900 border-slate-800 text-slate-450 hover:bg-slate-850"
-                  }`}
-                >
-                  {goalsReminderEnabled ? (
-                    <>
-                      <Bell className="h-3.5 w-3.5" />
-                      <span>ATIVADO</span>
-                    </>
-                  ) : (
-                    <>
-                      <VolumeX className="h-3.5 w-3.5" />
-                      <span>DESATIVADO</span>
-                    </>
-                  )}
-                </button>
+            {goalsReminderEnabled && (
+              <div className="pt-2.5 border-t border-slate-900 flex items-center gap-3 animate-fade-in">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1 shrink-0">
+                  <Clock className="w-3.5 h-3.5 text-brand-cyan" /> Horário preferencial:
+                </span>
+                <input
+                  type="time"
+                  value={goalsReminderTime}
+                  onChange={(e) => setGoalsReminderTime(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-lg py-1 px-2.5 text-xs text-brand-cyan font-mono font-bold focus:outline-none focus:border-brand-cyan transition-all"
+                />
+                <span className="text-[9px] text-slate-500 italic">Notificação diária neste horário.</span>
               </div>
+            )}
+          </div>
+        </div>
+      </div>
 
-              {goalsReminderEnabled && (
-                <div className="pt-3 border-t border-slate-900/60 flex items-center gap-3 animate-fade-in">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1 shrink-0">
-                    <Clock className="w-3.5 h-3.5 text-brand-cyan" /> Horário preferencial:
-                  </span>
-                  <input
-                    type="time"
-                    value={goalsReminderTime}
-                    onChange={(e) => setGoalsReminderTime(e.target.value)}
-                    className="bg-slate-950 border border-slate-800 rounded-lg py-1 px-2.5 text-xs text-brand-cyan font-mono font-bold focus:outline-none focus:border-brand-cyan transition-all"
-                  />
-                  <span className="text-[9px] text-slate-505 italic">Notificação diária neste horário.</span>
-                </div>
-              )}
+      {/* 🔁 2. GERENCIADOR DE LEMBRETES RECORRENTES & ALERTAS PERSONALIZADOS (NOVA SEÇÃO DEDICADA) */}
+      <div className="mt-8 pt-6 border-t-2 border-slate-800/80 space-y-6">
+        {/* Header da Seção */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-2 border-b border-slate-850">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="p-1.5 rounded-xl bg-gradient-to-br from-brand-magenta to-pink-600 text-white shadow-md shadow-brand-magenta/30">
+                <BellRing className="h-4 w-4" />
+              </span>
+              <h4 className="text-sm font-black text-white uppercase tracking-wider">
+                Gerenciador de Lembretes Recorrentes & Alertas Personalizados
+              </h4>
+              <span className="bg-brand-magenta/15 text-brand-magenta text-[9px] font-black uppercase px-2 py-0.5 rounded-full border border-brand-magenta/30">
+                Recorrente & Fixo
+              </span>
             </div>
+            <p className="text-xs text-slate-400 font-sans mt-1">
+              Defina alertas fixos para dias da semana recorrentes ou datas específicas do calendário, com mensagens próprias que tocam avisos sonoros e pop-ups na tela.
+            </p>
           </div>
 
-          {/* DYNAMIC GENERAL CUSTOM REMINDERS SECTION */}
-          <div className="bg-slate-950/60 border border-slate-850 rounded-xl p-4 flex flex-col space-y-4">
-            <div className="border-b border-slate-900/60 pb-2 flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-200 uppercase tracking-widest flex items-center gap-1">
-                📅 Lembretes Personalizados
-              </span>
-              <span className="text-[9px] font-mono font-semibold bg-brand-magenta/15 text-brand-magenta px-2 py-0.5 rounded border border-brand-magenta/20">
-                {reminders.filter(r => !r.completed).length} Ativos
+          {/* Badges de Estatísticas dos Lembretes */}
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <span className="text-[10px] font-mono font-bold bg-slate-900 border border-slate-800 text-slate-300 px-2.5 py-1 rounded-lg">
+              Total: <strong className="text-white">{reminders.length}</strong>
+            </span>
+            <span className="text-[10px] font-mono font-bold bg-brand-cyan/15 border border-brand-cyan/30 text-brand-cyan px-2.5 py-1 rounded-lg">
+              Ativos: <strong className="text-brand-cyan">{reminders.filter(r => !r.completed).length}</strong>
+            </span>
+            <span className="text-[10px] font-mono font-bold bg-purple-500/15 border border-purple-500/30 text-purple-300 px-2.5 py-1 rounded-lg">
+              🔁 Semanais: <strong className="text-purple-200">{reminders.filter(r => r.type === "weekly").length}</strong>
+            </span>
+            <span className="text-[10px] font-mono font-bold bg-pink-500/15 border border-pink-500/30 text-pink-300 px-2.5 py-1 rounded-lg">
+              📅 Datas: <strong className="text-pink-200">{reminders.filter(r => r.type === "date").length}</strong>
+            </span>
+          </div>
+        </div>
+
+        {/* Form Container (Cadastro e Edição) */}
+        <div className="bg-gradient-to-b from-slate-900/90 to-slate-950 border border-slate-800 hover:border-slate-750 transition-all rounded-2xl p-5 shadow-xl space-y-5">
+          <div className="flex items-center justify-between border-b border-slate-850 pb-3">
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-brand-magenta animate-ping" />
+              <span className="text-xs font-black text-white uppercase tracking-wider">
+                {editingReminderId ? `📝 Editando Alerta: "${newReminderTitle || '...'}"` : "➕ Novo Alerta Recorrente ou Fixo"}
               </span>
             </div>
+            {editingReminderId && (
+              <button
+                type="button"
+                onClick={handleCancelEdit}
+                className="text-[10px] text-rose-400 hover:text-rose-300 uppercase font-black tracking-wider flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <X className="h-3 w-3" />
+                <span>Cancelar Edição</span>
+              </button>
+            )}
+          </div>
 
-            {/* Form for adding/editing a custom reminder */}
-            <div className="space-y-3 bg-slate-950 p-3 rounded-lg border border-slate-900">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block">
-                  {editingReminderId ? "📝 Editar Lembrete Selecionado" : "📅 Agendar Novo Lembrete"}
-                </span>
-                {editingReminderId && (
-                  <button
-                    type="button"
-                    onClick={handleCancelEdit}
-                    className="text-[9px] text-red-400 hover:underline uppercase font-bold"
-                  >
-                    Cancelar Edição
-                  </button>
-                )}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+            {/* Campo 1: Título / Assunto (md:col-span-6) */}
+            <div className="md:col-span-6 space-y-1.5">
+              <label className="text-[10px] font-black text-slate-350 uppercase tracking-wider flex items-center gap-1">
+                <FileText className="h-3 w-3 text-brand-cyan" />
+                Título / Assunto do Lembrete *
+              </label>
+              <input
+                type="text"
+                placeholder="Ex: Reunião Semanal de Alinhamento da Equipe"
+                value={newReminderTitle}
+                onChange={(e) => setNewReminderTitle(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 focus:border-brand-magenta rounded-xl py-2 px-3 text-xs text-white placeholder-slate-600 outline-none transition-all shadow-inner font-sans font-medium"
+              />
+            </div>
+
+            {/* Campo 2: Prioridade (md:col-span-6) */}
+            <div className="md:col-span-6 space-y-1.5">
+              <label className="text-[10px] font-black text-slate-350 uppercase tracking-wider flex items-center gap-1">
+                <Tag className="h-3 w-3 text-brand-magenta" />
+                Nível de Prioridade do Alerta
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setNewReminderPriority("normal")}
+                  className={`py-2 px-2.5 rounded-xl border text-[10px] font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                    newReminderPriority === "normal"
+                      ? "bg-blue-500/20 border-blue-500 text-blue-300 shadow-sm shadow-blue-500/20"
+                      : "bg-slate-950 border-slate-850 text-slate-400 hover:border-slate-750"
+                  }`}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-blue-400" />
+                  <span>Normal</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewReminderPriority("important")}
+                  className={`py-2 px-2.5 rounded-xl border text-[10px] font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                    newReminderPriority === "important"
+                      ? "bg-amber-500/20 border-amber-500 text-amber-300 shadow-sm shadow-amber-500/20"
+                      : "bg-slate-950 border-slate-850 text-slate-400 hover:border-slate-750"
+                  }`}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                  <span>Importante</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewReminderPriority("urgent")}
+                  className={`py-2 px-2.5 rounded-xl border text-[10px] font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                    newReminderPriority === "urgent"
+                      ? "bg-rose-500/20 border-rose-500 text-rose-300 shadow-sm shadow-rose-500/30"
+                      : "bg-slate-950 border-slate-850 text-slate-400 hover:border-slate-750"
+                  }`}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-ping" />
+                  <span>Urgente ⚠️</span>
+                </button>
               </div>
+            </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {/* Description */}
-                <div className="space-y-1 sm:col-span-2">
-                  <label className="text-[9px] font-bold text-slate-500 uppercase tracking-wider block">Descrição do Lembrete</label>
-                  <input
-                    type="text"
-                    placeholder="Descrição / Assunto do Lembrete (Ex: Revisar compressor de ar do Pedro)"
-                    value={newReminderTitle}
-                    onChange={(e) => setNewReminderTitle(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg py-1.5 px-3 text-xs text-slate-200 placeholder-slate-650 focus:outline-none focus:border-brand-magenta"
-                  />
+            {/* Campo 3: Mensagem Própria do Alerta (md:col-span-12) */}
+            <div className="md:col-span-12 space-y-1.5">
+              <label className="text-[10px] font-black text-slate-350 uppercase tracking-wider flex items-center justify-between">
+                <span className="flex items-center gap-1">
+                  <MessageSquare className="h-3 w-3 text-pink-400" />
+                  Mensagem Própria do Alerta (Instruções ou Detalhes)
+                </span>
+                <span className="text-[9px] text-slate-500 font-normal">
+                  Aparece em destaque na tela e no alarme sonoro
+                </span>
+              </label>
+              <textarea
+                rows={2}
+                placeholder="Ex: Lembrar de conferir o estoque dos insumos de acabamento, checar pedidos pendentes para entrega hoje e alertar operadores."
+                value={newReminderMessage}
+                onChange={(e) => setNewReminderMessage(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-850 focus:border-brand-magenta rounded-xl py-2 px-3 text-xs text-white placeholder-slate-600 outline-none transition-all shadow-inner font-sans font-medium resize-none"
+              />
+            </div>
+
+            {/* Campo 4: Seleção do Tipo de Frequência (md:col-span-6) */}
+            <div className="md:col-span-6 space-y-1.5">
+              <label className="text-[10px] font-black text-slate-350 uppercase tracking-wider block">
+                Tipo de Frequência do Alerta
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setNewReminderType("weekly")}
+                  className={`py-2 px-3 rounded-xl border text-[10px] font-black uppercase transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                    newReminderType === "weekly"
+                      ? "bg-purple-500/20 border-purple-500 text-purple-300 shadow-md shadow-purple-500/20"
+                      : "bg-slate-950 border-slate-850 text-slate-400 hover:border-slate-750"
+                  }`}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>Dia da Semana (Recorrente)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewReminderType("date")}
+                  className={`py-2 px-3 rounded-xl border text-[10px] font-black uppercase transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                    newReminderType === "date"
+                      ? "bg-brand-cyan/20 border-brand-cyan text-brand-cyan shadow-md shadow-brand-cyan/20"
+                      : "bg-slate-950 border-slate-850 text-slate-400 hover:border-slate-750"
+                  }`}
+                >
+                  <Calendar className="h-3.5 w-3.5" />
+                  <span>Data Específica Fixa</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Campo 5: Configuração de Data ou Dia da Semana (md:col-span-6) */}
+            <div className="md:col-span-6 space-y-1.5">
+              {newReminderType === "weekly" ? (
+                <div>
+                  <label className="text-[10px] font-black text-slate-350 uppercase tracking-wider block mb-1.5">
+                    Selecione o Dia da Semana Recorrente
+                  </label>
+                  <div className="grid grid-cols-7 gap-1">
+                    {[
+                      { val: 0, label: "Dom", full: "Domingo" },
+                      { val: 1, label: "Seg", full: "Segunda" },
+                      { val: 2, label: "Ter", full: "Terça" },
+                      { val: 3, label: "Qua", full: "Quarta" },
+                      { val: 4, label: "Qui", full: "Quinta" },
+                      { val: 5, label: "Sex", full: "Sexta" },
+                      { val: 6, label: "Sáb", full: "Sábado" }
+                    ].map((d) => (
+                      <button
+                        key={d.val}
+                        type="button"
+                        onClick={() => setNewReminderDayOfWeek(d.val)}
+                        title={`Toda ${d.full}`}
+                        className={`py-2 rounded-xl border text-[10px] font-black uppercase transition-all cursor-pointer ${
+                          newReminderDayOfWeek === d.val
+                            ? "bg-purple-600 border-purple-400 text-white shadow-md shadow-purple-600/30 scale-[1.02]"
+                            : "bg-slate-950 border-slate-850 text-slate-400 hover:border-purple-500/50 hover:text-slate-200"
+                        }`}
+                      >
+                        {d.label}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-[9px] text-purple-400 font-mono block mt-1.5">
+                    🔁 O alerta tocará automaticamente toda {[
+                      "Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"
+                    ][newReminderDayOfWeek]}.
+                  </span>
                 </div>
-
-                {/* Type Selection */}
-                <div className="space-y-1">
-                  <label className="text-[9px] font-bold text-slate-500 uppercase tracking-wider block">Escolha o Tipo de Frequência</label>
-                  <select
-                    value={newReminderType}
-                    onChange={(e) => setNewReminderType(e.target.value as "date" | "weekly")}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg py-1.5 px-2 text-xs text-slate-300 focus:outline-none focus:border-brand-magenta"
-                  >
-                    <option value="date">Data e Hora Específica</option>
-                    <option value="weekly">Dia de Semana Recorrente</option>
-                  </select>
-                </div>
-
-                {/* Day option selection */}
-                {newReminderType === "date" ? (
-                  <div className="space-y-1">
-                    <label className="text-[9px] font-bold text-slate-500 uppercase tracking-wider block">Selecione o Dia / Data</label>
+              ) : (
+                <div>
+                  <label className="text-[10px] font-black text-slate-350 uppercase tracking-wider block mb-1.5">
+                    Selecione a Data Fixa do Calendário
+                  </label>
+                  <div className="flex gap-2">
                     <input
                       type="date"
                       value={newReminderDate}
                       onChange={(e) => setNewReminderDate(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg py-1 px-2 text-xs text-slate-300 focus:outline-none font-mono"
+                      className="flex-1 bg-slate-950 border border-slate-800 focus:border-brand-cyan rounded-xl py-1.5 px-3 text-xs text-white font-mono outline-none"
                     />
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    <label className="text-[9px] font-bold text-slate-500 uppercase tracking-wider block">Selecione o Dia da Semana</label>
-                    <select
-                      value={newReminderDayOfWeek}
-                      onChange={(e) => setNewReminderDayOfWeek(Number(e.target.value))}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg py-1.5 px-2 text-xs text-slate-300 focus:outline-none font-sans"
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const now = new Date();
+                        const y = now.getFullYear();
+                        const m = String(now.getMonth() + 1).padStart(2, "0");
+                        const d = String(now.getDate()).padStart(2, "0");
+                        setNewReminderDate(`${y}-${m}-${d}`);
+                      }}
+                      className="px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 text-[9px] font-bold uppercase transition-colors cursor-pointer"
                     >
-                      <option value={1}>Segunda-feira</option>
-                      <option value={2}>Terça-feira</option>
-                      <option value={3}>Quarta-feira</option>
-                      <option value={4}>Quinta-feira</option>
-                      <option value={5}>Sexta-feira</option>
-                      <option value={6}>Sábado</option>
-                      <option value={0}>Domingo</option>
-                    </select>
+                      Hoje
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const t = new Date();
+                        t.setDate(t.getDate() + 1);
+                        const y = t.getFullYear();
+                        const m = String(t.getMonth() + 1).padStart(2, "0");
+                        const d = String(t.getDate()).padStart(2, "0");
+                        setNewReminderDate(`${y}-${m}-${d}`);
+                      }}
+                      className="px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 text-[9px] font-bold uppercase transition-colors cursor-pointer"
+                    >
+                      Amanhã
+                    </button>
+                  </div>
+                  <span className="text-[9px] text-brand-cyan font-mono block mt-1.5">
+                    📅 O alerta tocará nesta data específica selecionada.
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Campo 6: Horário e "O Dia Todo" (md:col-span-12) */}
+            <div className="md:col-span-12 pt-2 border-t border-slate-850/80 flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={newReminderIsAllDay}
+                    onChange={(e) => setNewReminderIsAllDay(e.target.checked)}
+                    className="rounded border-slate-800 bg-slate-950 text-brand-magenta focus:ring-brand-magenta h-4 w-4"
+                  />
+                  <span className="text-[10px] font-black text-slate-300 uppercase tracking-wider">
+                    🌅 O Dia Todo (Disparar logo na primeira abertura do sistema)
+                  </span>
+                </label>
+
+                {!newReminderIsAllDay && (
+                  <div className="flex items-center gap-2 animate-fade-in">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                      <Clock className="h-3.5 w-3.5 text-brand-cyan" />
+                      Horário do Alarme:
+                    </span>
+                    <input
+                      type="time"
+                      value={newReminderTime}
+                      onChange={(e) => setNewReminderTime(e.target.value)}
+                      className="bg-slate-950 border border-slate-800 focus:border-brand-cyan rounded-xl py-1.5 px-3 text-xs text-brand-cyan font-mono font-bold outline-none"
+                    />
                   </div>
                 )}
               </div>
 
-              {/* Time Selection and Button */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-900/60 mt-2">
-                <div className="flex flex-wrap items-center gap-4">
-                  {/* All Day Toggle Checkbox */}
-                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={newReminderIsAllDay}
-                      onChange={(e) => setNewReminderIsAllDay(e.target.checked)}
-                      className="rounded border-slate-800 bg-slate-950 text-brand-magenta focus:ring-brand-magenta h-4 w-4"
-                    />
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">🔔 O Dia Todo</span>
-                  </label>
-
-                  {!newReminderIsAllDay && (
-                    <div className="flex items-center gap-2 animate-fade-in">
-                      <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider shrink-0">Horário:</span>
-                      <input
-                        type="time"
-                        value={newReminderTime}
-                        onChange={(e) => setNewReminderTime(e.target.value)}
-                        className="bg-slate-950 border border-slate-800 rounded-lg py-1 px-2 text-xs text-slate-300 focus:outline-none font-mono"
-                      />
-                    </div>
-                  )}
-                </div>
+              {/* Botões de Ação do Formulário */}
+              <div className="flex flex-wrap items-center gap-2.5">
+                {/* Botão de Testar Alerta */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!newReminderTitle.trim()) {
+                      alert("Digite pelo menos um título para testar o alerta.");
+                      return;
+                    }
+                    handleTestReminder({
+                      id: "test_" + Date.now(),
+                      title: newReminderTitle.trim(),
+                      message: newReminderMessage.trim() || undefined,
+                      type: newReminderType,
+                      date: newReminderDate,
+                      dayOfWeek: newReminderDayOfWeek,
+                      time: newReminderIsAllDay ? "00:00" : newReminderTime,
+                      isAllDay: newReminderIsAllDay,
+                      priority: newReminderPriority
+                    });
+                  }}
+                  className="py-2.5 px-3.5 rounded-xl border border-pink-500/40 bg-pink-500/10 hover:bg-pink-500/20 text-pink-300 text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 cursor-pointer transition-all shadow-sm"
+                  title="Testar o alarme sonoro e o aviso na tela imediatamente"
+                >
+                  <Play className="h-3 w-3 fill-pink-300" />
+                  <span>Testar Alerta Agora</span>
+                </button>
 
                 {editingReminderId ? (
-                  <div className="flex gap-2">
+                  <>
                     <button
                       type="button"
                       onClick={handleCancelEdit}
-                      className="py-1.5 px-3 bg-slate-800 hover:bg-slate-755 text-slate-300 text-[10px] font-black uppercase rounded-lg cursor-pointer transition-colors"
+                      className="py-2.5 px-3 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-white text-[10px] font-black uppercase tracking-wider transition-colors cursor-pointer"
                     >
                       Cancelar
                     </button>
                     <button
                       type="button"
                       onClick={handleSaveEdit}
-                      className="py-1.5 px-4 bg-emerald-600 hover:bg-emerald-550 text-white text-[10px] font-black uppercase rounded-lg shadow-sm font-sans flex items-center gap-1 cursor-pointer transition-colors"
+                      className="py-2.5 px-5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 cursor-pointer transition-all shadow-lg shadow-emerald-600/25"
                     >
-                      <Check className="w-3.5 h-3.5" />
+                      <Check className="h-3.5 w-3.5 stroke-[3]" />
                       <span>Salvar Alterações</span>
                     </button>
-                  </div>
+                  </>
                 ) : (
                   <button
                     type="button"
                     onClick={handleAddReminder}
-                    className="py-1.5 px-4 bg-brand-magenta hover:bg-brand-magenta/95 text-white text-[10px] font-black uppercase rounded-lg shadow-sm font-sans flex items-center gap-1 cursor-pointer transition-colors animate-pulse"
+                    className="py-2.5 px-5 rounded-xl bg-gradient-to-r from-brand-magenta to-pink-600 hover:from-pink-600 hover:to-brand-magenta text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 cursor-pointer transition-all shadow-lg shadow-brand-magenta/30 hover:scale-[1.01]"
                   >
-                    <Plus className="w-3.5 h-3.5" />
+                    <Plus className="h-3.5 w-3.5 stroke-[3]" />
                     <span>Agendar Lembrete</span>
                   </button>
                 )}
               </div>
             </div>
-
-            {/* List of custom reminders */}
-            <div className="max-h-[175px] overflow-y-auto space-y-2 pr-1 custom-scrollbar">
-              {reminders.length === 0 ? (
-                <div className="py-8 text-center text-slate-600 text-[10px] font-mono border border-dashed border-slate-900 rounded-lg bg-slate-950/20">
-                  Nenhum lembrete cadastrado até o momento.
-                </div>
-              ) : (
-                reminders.map((rem) => {
-                  const dayNames = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
-                  const fullDayNames = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
-                  const dateFormatted = rem.type === "date" && rem.date
-                    ? rem.date.split("-").reverse().join("/")
-                    : rem.dayOfWeek !== undefined
-                    ? `${fullDayNames[rem.dayOfWeek]} (Semanal)`
-                    : "Todos os dias";
-
-                  const isEditedNow = editingReminderId === rem.id;
-
-                  return (
-                    <div
-                      key={rem.id}
-                      className={`p-2.5 rounded-lg border flex items-center justify-between gap-2.5 transition-all text-left ${
-                        isEditedNow
-                          ? "bg-brand-magenta/5 border-brand-magenta/50"
-                          : rem.completed
-                          ? "bg-slate-950/20 border-slate-910/30 opacity-55"
-                          : "bg-slate-950/80 border-slate-850 hover:border-slate-800"
-                      }`}
-                    >
-                      <div className="flex items-start gap-2.5 min-w-0">
-                        {/* Custom completed checkbox */}
-                        <button
-                          type="button"
-                          onClick={() => handleToggleReminderCompleted(rem.id)}
-                          className={`w-4 h-4 rounded mt-0.5 flex items-center justify-center border transition-all cursor-pointer outline-none ${
-                            rem.completed
-                              ? "bg-brand-cyan border-brand-cyan text-slate-950"
-                              : "border-slate-700 hover:border-slate-500 bg-slate-900"
-                          }`}
-                        >
-                          {rem.completed && <Check className="w-3.5 h-3.5 stroke-[4]" />}
-                        </button>
-
-                        <div className="min-w-0 font-sans leading-none">
-                          <span
-                            className={`text-xs font-bold text-slate-205 truncate block uppercase ${
-                              rem.completed ? "line-through text-slate-550" : ""
-                            }`}
-                            title={rem.title}
-                          >
-                            {rem.title}
-                          </span>
-                          <div className="flex items-center gap-2 mt-1 text-[9px] font-mono text-slate-500">
-                            <span className="flex items-center gap-0.5">
-                              {rem.type === "date" ? <Calendar className="w-3 h-3" /> : <Clock className="w-3 h-3" />}
-                              {dateFormatted}
-                            </span>
-                            <span>•</span>
-                            <span className="font-bold text-brand-cyan flex items-center gap-0.5">
-                              <Clock className="w-3 h-3 text-brand-cyan" />
-                              {rem.isAllDay ? "O Dia Todo 🌅" : rem.time}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleStartEdit(rem)}
-                          className={`p-1 rounded transition-all cursor-pointer ${
-                            isEditedNow
-                              ? "text-brand-magenta bg-brand-magenta/10"
-                              : "text-slate-450 hover:text-brand-cyan hover:bg-slate-900/60"
-                          }`}
-                          title="Editar Lembrete"
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteReminder(rem.id)}
-                          className="p-1 rounded text-slate-500 hover:text-red-400 hover:bg-slate-900/60 transition-all cursor-pointer"
-                          title="Excluir Lembrete"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
           </div>
+        </div>
+
+        {/* Barra de Filtros e Busca de Lembretes */}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2">
+          {/* Tabs de Filtro */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            {[
+              { key: "all", label: `Todos (${reminders.length})` },
+              { key: "active", label: `Ativos (${reminders.filter(r => !r.completed).length})` },
+              { key: "weekly", label: `🔁 Semanais (${reminders.filter(r => r.type === "weekly").length})` },
+              { key: "date", label: `📅 Datas (${reminders.filter(r => r.type === "date").length})` },
+              { key: "completed", label: `✅ Concluídos (${reminders.filter(r => r.completed).length})` }
+            ].map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setReminderFilterTab(tab.key as any)}
+                className={`py-1.5 px-3 rounded-lg border text-[10px] font-black uppercase transition-all cursor-pointer ${
+                  reminderFilterTab === tab.key
+                    ? "bg-brand-cyan/20 border-brand-cyan text-brand-cyan shadow-sm shadow-brand-cyan/20"
+                    : "bg-slate-950 border-slate-850 text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Input de Busca */}
+          <div className="relative w-full sm:w-64">
+            <Search className="h-3.5 w-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="Buscar por título ou mensagem..."
+              value={reminderSearchTerm}
+              onChange={(e) => setReminderSearchTerm(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-850 focus:border-brand-cyan rounded-xl py-1.5 pl-8 pr-3 text-xs text-white placeholder-slate-600 outline-none"
+            />
+            {reminderSearchTerm && (
+              <button
+                type="button"
+                onClick={() => setReminderSearchTerm("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Lista de Cards de Lembretes */}
+        <div className="space-y-3">
+          {(() => {
+            const filtered = reminders
+              .filter((r) => {
+                if (reminderFilterTab === "active") return !r.completed;
+                if (reminderFilterTab === "weekly") return r.type === "weekly";
+                if (reminderFilterTab === "date") return r.type === "date";
+                if (reminderFilterTab === "completed") return r.completed;
+                return true;
+              })
+              .filter((r) => {
+                if (!reminderSearchTerm.trim()) return true;
+                const q = reminderSearchTerm.toLowerCase();
+                const matchTitle = r.title.toLowerCase().includes(q);
+                const matchMsg = r.message ? r.message.toLowerCase().includes(q) : false;
+                return matchTitle || matchMsg;
+              });
+
+            if (filtered.length === 0) {
+              return (
+                <div className="py-12 text-center border-2 border-dashed border-slate-850/80 rounded-2xl bg-slate-950/40 space-y-2">
+                  <div className="p-3 bg-slate-900 rounded-2xl w-fit mx-auto text-slate-500">
+                    <Bell className="h-6 w-6" />
+                  </div>
+                  <h5 className="text-xs font-bold text-slate-350 uppercase tracking-wider">
+                    Nenhum lembrete encontrado
+                  </h5>
+                  <p className="text-[10px] text-slate-500 max-w-sm mx-auto">
+                    {reminderSearchTerm
+                      ? "Nenhum lembrete corresponde aos termos da pesquisa."
+                      : "Utilize o formulário acima para agendar alertas semanais fixos ou datas especiais com mensagens personalizadas."}
+                  </p>
+                </div>
+              );
+            }
+
+            const dayNamesFull = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
+
+            return filtered.map((rem) => {
+              const isEditedNow = editingReminderId === rem.id;
+              const dateFormatted =
+                rem.type === "date" && rem.date
+                  ? rem.date.split("-").reverse().join("/")
+                  : rem.dayOfWeek !== undefined
+                  ? `Toda ${dayNamesFull[rem.dayOfWeek]} (Recorrente)`
+                  : "Todos os dias";
+
+              return (
+                <div
+                  key={rem.id}
+                  className={`p-4 rounded-2xl border transition-all text-left flex flex-col md:flex-row items-start md:items-center justify-between gap-4 ${
+                    isEditedNow
+                      ? "bg-brand-magenta/10 border-brand-magenta shadow-lg shadow-brand-magenta/15"
+                      : rem.completed
+                      ? "bg-slate-950/40 border-slate-900 opacity-60"
+                      : "bg-slate-950/80 border-slate-850 hover:border-slate-800 shadow-md"
+                  }`}
+                >
+                  {/* Lado Esquerdo: Checkbox + Conteúdo */}
+                  <div className="flex items-start gap-3.5 min-w-0 flex-1">
+                    {/* Checkbox de Concluído */}
+                    <button
+                      type="button"
+                      onClick={() => handleToggleReminderCompleted(rem.id)}
+                      className={`w-5 h-5 rounded-lg mt-0.5 flex items-center justify-center border transition-all cursor-pointer outline-none shrink-0 ${
+                        rem.completed
+                          ? "bg-brand-cyan border-brand-cyan text-slate-950 font-black"
+                          : "border-slate-700 hover:border-slate-500 bg-slate-900"
+                      }`}
+                      title={rem.completed ? "Reabrir Lembrete" : "Marcar como Concluído"}
+                    >
+                      {rem.completed && <Check className="w-3.5 h-3.5 stroke-[4]" />}
+                    </button>
+
+                    <div className="space-y-1.5 min-w-0 flex-1">
+                      {/* Tags / Badges */}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {/* Tipo de Frequência */}
+                        <span className={`px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider flex items-center gap-1 ${
+                          rem.type === "weekly"
+                            ? "bg-purple-500/15 text-purple-300 border border-purple-500/30"
+                            : "bg-pink-500/15 text-pink-300 border border-pink-500/30"
+                        }`}>
+                          {rem.type === "weekly" ? <RefreshCw className="h-2.5 w-2.5" /> : <Calendar className="h-2.5 w-2.5" />}
+                          {dateFormatted}
+                        </span>
+
+                        {/* Horário */}
+                        <span className="px-2 py-0.5 rounded-md text-[9px] font-mono font-bold bg-slate-900 text-brand-cyan border border-slate-800 flex items-center gap-1">
+                          <Clock className="h-2.5 w-2.5" />
+                          {rem.isAllDay ? "🌅 O Dia Todo" : rem.time}
+                        </span>
+
+                        {/* Prioridade */}
+                        <span className={`px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider ${
+                          rem.priority === "urgent"
+                            ? "bg-rose-500/20 text-rose-300 border border-rose-500/30 animate-pulse"
+                            : rem.priority === "important"
+                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                            : "bg-blue-500/20 text-blue-300 border border-blue-500/30"
+                        }`}>
+                          {rem.priority || "normal"}
+                        </span>
+                      </div>
+
+                      {/* Título Principal */}
+                      <h5 className={`text-sm font-black text-white uppercase tracking-wide leading-snug break-words ${
+                        rem.completed ? "line-through text-slate-500" : ""
+                      }`}>
+                        {rem.title}
+                      </h5>
+
+                      {/* Mensagem Própria Personalizada */}
+                      {rem.message && (
+                        <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 text-xs text-slate-300 leading-relaxed font-sans space-y-0.5">
+                          <span className="text-[9px] font-bold text-pink-400 uppercase tracking-widest flex items-center gap-1">
+                            <MessageSquare className="h-3 w-3" />
+                            Mensagem Própria do Alerta:
+                          </span>
+                          <p className="text-slate-200 italic">"{rem.message}"</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Lado Direito: Ações */}
+                  <div className="flex items-center gap-2 shrink-0 self-end md:self-center">
+                    {/* Testar Alerta */}
+                    <button
+                      type="button"
+                      onClick={() => handleTestReminder(rem)}
+                      className="p-2 rounded-xl bg-slate-900 hover:bg-pink-950/40 text-slate-400 hover:text-pink-300 border border-slate-800 hover:border-pink-500/30 transition-all cursor-pointer flex items-center gap-1 text-[10px] font-bold uppercase"
+                      title="Testar alarme sonoro e aviso na tela deste lembrete"
+                    >
+                      <Play className="h-3 w-3 fill-current" />
+                      <span className="hidden sm:inline">Testar</span>
+                    </button>
+
+                    {/* Editar */}
+                    <button
+                      type="button"
+                      onClick={() => handleStartEdit(rem)}
+                      className={`p-2 rounded-xl border transition-all cursor-pointer flex items-center gap-1 text-[10px] font-bold uppercase ${
+                        isEditedNow
+                          ? "bg-brand-magenta text-white border-brand-magenta shadow-md shadow-brand-magenta/30"
+                          : "bg-slate-900 hover:bg-slate-850 text-slate-400 hover:text-brand-cyan border-slate-800"
+                      }`}
+                      title="Editar este lembrete"
+                    >
+                      <Edit2 className="h-3 w-3" />
+                      <span className="hidden sm:inline">Editar</span>
+                    </button>
+
+                    {/* Excluir */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm(`Deseja realmente remover o lembrete "${rem.title}"?`)) {
+                          handleDeleteReminder(rem.id);
+                        }
+                      }}
+                      className="p-2 rounded-xl bg-slate-900 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 border border-slate-800 hover:border-rose-900/40 transition-all cursor-pointer flex items-center gap-1 text-[10px] font-bold uppercase"
+                      title="Excluir este lembrete"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      <span className="hidden sm:inline">Excluir</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            });
+          })()}
         </div>
       </div>
 

@@ -42,6 +42,17 @@ export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
   const [showEmailConfirmNotice, setShowEmailConfirmNotice] = useState(false);
   const [registeredEmailNotice, setRegisteredEmailNotice] = useState<string>("");
   const [registeredUsernameNotice, setRegisteredUsernameNotice] = useState<string>("");
+
+  // Ensure fields always start completely empty without any autofill
+  React.useEffect(() => {
+    setUsername("");
+    setPassword("");
+    const timer = setTimeout(() => {
+      setUsername("");
+      setPassword("");
+    }, 120);
+    return () => clearTimeout(timer);
+  }, []);
   
   // Fetch existing users from localStorage or return default demo user
   const getRegisteredUsers = (): User[] => {
@@ -396,7 +407,7 @@ export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
                   </motion.div>
                 )}
 
-                <form onSubmit={handleLogin} className="space-y-4">
+                <form onSubmit={handleLogin} className="space-y-4" autoComplete="off">
                   <div className="space-y-1.5">
                     <label className="block text-[10px] uppercase font-mono font-bold tracking-wider text-slate-400">E-mail de Acesso</label>
                     <div className="relative">
@@ -405,9 +416,14 @@ export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
                       </span>
                       <input
                         type="text"
+                        name="auth_user_email_no_autofill"
+                        id="auth_user_email"
                         autoCapitalize="none"
-                        autoComplete="email"
-                        value={username}
+                        autoComplete="off"
+                        autoCorrect="off"
+                        spellCheck="false"
+                        data-lpignore="true"
+                        value={username || ""}
                         onChange={(e) => setUsername(e.target.value)}
                         placeholder="Ex: seuemail@provedor.com"
                         className="w-full bg-slate-950 font-medium text-slate-100 placeholder-slate-600 text-sm border border-slate-850 rounded-xl py-3 pl-10 pr-4 outline-none focus:border-brand-magenta transition-colors"
@@ -423,8 +439,13 @@ export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
                       </span>
                       <input
                         type={showPassword ? "text" : "password"}
-                        autoComplete="current-password"
-                        value={password}
+                        name="auth_user_secret_no_autofill"
+                        id="auth_user_secret"
+                        autoComplete="new-password"
+                        autoCorrect="off"
+                        spellCheck="false"
+                        data-lpignore="true"
+                        value={password || ""}
                         onChange={(e) => setPassword(e.target.value)}
                         placeholder="Insira sua senha"
                         className="w-full bg-slate-950 font-medium text-slate-100 placeholder-slate-600 text-sm border border-slate-850 rounded-xl py-3 pl-10 pr-12 outline-none focus:border-brand-magenta transition-colors"
