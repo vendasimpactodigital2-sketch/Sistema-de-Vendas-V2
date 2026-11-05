@@ -1189,6 +1189,40 @@ export default function App() {
     // 2. Consulta inicial da sessão de caixa ativa associada ao company_id
     const checkInitialSession = async () => {
       try {
+        // 1. Consulta prioritária na tabela caixa_status do Supabase (Fonte da Verdade)
+        const { data: statusRows, error: statusErr } = await supabase
+          .from("caixa_status")
+          .select("status, updated_at")
+          .eq("user_id", companyId)
+          .order("updated_at", { ascending: false })
+          .limit(1);
+
+        if (!statusErr && statusRows && statusRows.length > 0) {
+          const st = String(statusRows[0].status || "").toUpperCase();
+          if (st === "FECHADO") {
+            if (!isMounted) return;
+            setIsGlobalRegisterOpen(false);
+            setCashRegister((prev) => {
+              const updated = { ...prev, currentSession: null };
+              cashRegisterRef.current = updated;
+              try {
+                localStorage.setItem("cash_register_status", "closed");
+                localStorage.removeItem("NUCLEO_CASH_REGISTER_ACTIVE");
+                localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated));
+              } catch (e) {}
+              return updated;
+            });
+            return;
+          } else if (st === "ABERTO") {
+            if (!isMounted) return;
+            setIsGlobalRegisterOpen(true);
+            try {
+              localStorage.setItem("cash_register_status", "open");
+              localStorage.setItem("NUCLEO_CASH_REGISTER_ACTIVE", "true");
+            } catch (e) {}
+          }
+        }
+
         const { data } = await supabase
           .from("sessoes_caixa")
           .select("id, status, valor_abertura, data_abertura, data_fechamento, aberto_por_usuario_id, operador")
@@ -1202,7 +1236,6 @@ export default function App() {
         const isLatestClosed = !data || (data.status || "").trim().toLowerCase() === "fechado" || !!data.data_fechamento;
 
         if (data && (data.status || "").trim().toLowerCase() === "aberto" && !data.data_fechamento) {
-          // Sessão aberta: ativa globalmente e mantém aberta
           setIsGlobalRegisterOpen(true);
           const activeSession: CashRegisterSession = {
             id: data.id,
@@ -1227,18 +1260,7 @@ export default function App() {
           return;
         }
 
-        // MANTRA DO CAIXA: Se localmente está marcado como 'open', nunca forçar fechamento!
-        const isLocallyOpen = localStorage.getItem("cash_register_status") === "open" ||
-          localStorage.getItem("NUCLEO_CASH_REGISTER_ACTIVE") === "true" ||
-          cashRegisterRef.current?.currentSession?.status === "aberto";
-
-        if (isLocallyOpen) {
-          setIsGlobalRegisterOpen(true);
-          return;
-        }
-
-        // Se explicitamente não estiver aberto localmente e banco indica fechado:
-        if (isLatestClosed) {
+        if (isLatestClosed && (!statusRows || statusRows.length === 0 || String(statusRows[0].status).toUpperCase() !== "ABERTO")) {
           setIsGlobalRegisterOpen(false);
           setCashRegister((prev) => {
             if (prev.currentSession) {
@@ -1246,6 +1268,8 @@ export default function App() {
               cashRegisterRef.current = updated;
               try {
                 localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(updated));
+                localStorage.setItem("cash_register_status", "closed");
+                localStorage.removeItem("NUCLEO_CASH_REGISTER_ACTIVE");
               } catch (e) {}
               return updated;
             }
@@ -1253,7 +1277,7 @@ export default function App() {
           });
         }
       } catch (err) {
-        console.warn("Aviso ao carregar status inicial de sessoes_caixa:", err);
+        console.warn("Aviso ao carregar status inicial de caixa_status / sessoes_caixa:", err);
       }
     };
 
@@ -1461,27 +1485,10 @@ export default function App() {
     }
 
     const checkPromise = (async () => {
-      // MANTRA DO CAIXA: ler se o caixa está aberto localmente
-      const isLocallyOpen = localStorage.getItem('cash_register_status') === 'open' ||
-        localStorage.getItem('NUCLEO_CASH_REGISTER_ACTIVE') === 'true' ||
-        (!!cashRegisterRef.current?.currentSession && cashRegisterRef.current.currentSession.status === "aberto");
-
-      if (isLocallyOpen) {
-        setIsGlobalRegisterOpen(true);
-        setIsStandbyActive(false);
-        setShowCashRegisterModal(false);
-        return true;
-      }
-
-      if (localStorage.getItem('cash_register_status') === 'closed') {
-        setIsGlobalRegisterOpen(false);
-        return false;
-      }
-
       const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
       const companyOwnerId = currentUser?.owner_id || currentUser?.id || userIdToUse || UNIFIED_EMPRESA_ID;
 
-      // Direct check on caixa_status table in Supabase
+      // 1. Direct check on caixa_status table in Supabase (Source of Truth)
       const supabase = getSupabase();
       if (supabase) {
         try {
@@ -1507,12 +1514,30 @@ export default function App() {
               setIsGlobalRegisterOpen(false);
               setCashRegister((prev) => ({ ...prev, currentSession: null }));
               localStorage.setItem('cash_register_status', 'closed');
+              localStorage.removeItem("NUCLEO_CASH_REGISTER_ACTIVE");
               return false;
             }
           }
         } catch (e) {
           console.warn("Aviso ao checar caixa_status:", e);
         }
+      }
+
+      // 2. Fallback to local storage if offline
+      const isLocallyOpen = localStorage.getItem('cash_register_status') === 'open' ||
+        localStorage.getItem('NUCLEO_CASH_REGISTER_ACTIVE') === 'true' ||
+        (!!cashRegisterRef.current?.currentSession && cashRegisterRef.current.currentSession.status === "aberto");
+
+      if (isLocallyOpen) {
+        setIsGlobalRegisterOpen(true);
+        setIsStandbyActive(false);
+        setShowCashRegisterModal(false);
+        return true;
+      }
+
+      if (localStorage.getItem('cash_register_status') === 'closed') {
+        setIsGlobalRegisterOpen(false);
+        return false;
       }
 
       try {

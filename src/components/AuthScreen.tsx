@@ -26,8 +26,8 @@ interface AuthScreenProps {
 
 export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
   const [isRegister, setIsRegister] = useState(false);
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("120511");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
