@@ -1907,6 +1907,7 @@ export async function dbExportAllData(ownerId: string): Promise<{
   vendas_rapidas_itens: any[];
   cash_register: any | null;
   sessoes_caixa: any[];
+  caixa_status: any[];
   localStorageDump: Record<string, string>;
 } | null> {
   const supabase = getSupabase();
@@ -1938,7 +1939,8 @@ export async function dbExportAllData(ownerId: string): Promise<{
       companyProfileRemote,
       goalsRemote,
       sessoesCaixaRemote,
-      vendasRapidasRemote
+      vendasRapidasRemote,
+      caixaStatusRemote
     ] = await Promise.all([
       fetchTableSafe("produtos"),
       fetchTableSafe("sales"),
@@ -1948,7 +1950,8 @@ export async function dbExportAllData(ownerId: string): Promise<{
       fetchTableSafe("company_profile", true),
       fetchTableSafe("goals", true),
       fetchTableSafe("sessoes_caixa"),
-      fetchTableSafe("vendas_rapidas_itens")
+      fetchTableSafe("vendas_rapidas_itens"),
+      fetchTableSafe("caixa_status")
     ]);
 
     // 2. Extract and merge local storage data so offline or un-synced data is NEVER lost
@@ -2080,6 +2083,7 @@ export async function dbExportAllData(ownerId: string): Promise<{
       vendas_rapidas_itens: mergedQuickSales,
       cash_register: localCashRegister,
       sessoes_caixa: sessoesCaixaRemote || [],
+      caixa_status: caixaStatusRemote || [],
       localStorageDump
     };
   } catch (err) {
@@ -2102,6 +2106,7 @@ export async function dbImportAllData(
     goals?: any;
     cash_register?: any;
     sessoes_caixa?: any[];
+    caixa_status?: any[];
     localStorageDump?: Record<string, string>;
   }
 ): Promise<{
@@ -2621,6 +2626,21 @@ export async function dbImportAllData(
         }
       } catch (e) {
         console.warn("Aviso ao restaurar estado do caixa:", e);
+      }
+    }
+
+    // 8.2 Restore caixa_status table
+    if (Array.isArray(backupData.caixa_status) && backupData.caixa_status.length > 0) {
+      if (supabase) {
+        for (const st of backupData.caixa_status) {
+          try {
+            await supabase.from("caixa_status").upsert({
+              user_id: st.user_id || currentOwnerId,
+              status: st.status,
+              updated_at: st.updated_at || new Date().toISOString()
+            });
+          } catch (e) {}
+        }
       }
     }
 

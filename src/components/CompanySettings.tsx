@@ -2575,6 +2575,65 @@ export function CompanySettings({
           </div>
         </div>
 
+        {/* BOTÕES DE EXPORTAR E IMPORTAR BACKUP COMPLETO (.JSON) */}
+        <div className="bg-gradient-to-r from-brand-magenta/15 via-slate-900 to-brand-cyan/15 p-4 sm:p-5 rounded-2xl border border-brand-magenta/30 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <h4 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-brand-magenta animate-pulse" />
+              <span>Backup Completo do Sistema (1 Clique)</span>
+            </h4>
+            <p className="text-xs text-slate-300 leading-relaxed max-w-xl">
+              Exporte ou importe todos os cadastros (Clientes, Produtos, Vendas, Despesas, Status do Caixa), além das configurações da empresa (incluindo a imagem do logo e cabeçalho) em um arquivo único <strong>.json</strong>.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2.5 shrink-0 w-full sm:w-auto">
+            <button
+              type="button"
+              onClick={handleExportBackup}
+              disabled={exporting}
+              className="flex-1 sm:flex-none flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-black text-slate-950 bg-gradient-to-r from-brand-cyan to-cyan-400 hover:from-cyan-300 hover:to-brand-cyan shadow-lg shadow-brand-cyan/25 transition-all cursor-pointer text-xs uppercase tracking-wide disabled:opacity-50"
+              title="Exportar todos os dados, vendas, clientes, logo e status do caixa em arquivo único .json"
+            >
+              {exporting ? (
+                <RefreshCw className="h-4 w-4 animate-spin shrink-0" />
+              ) : (
+                <Download className="h-4 w-4 shrink-0" />
+              )}
+              <span>{exporting ? "Exportando..." : "Exportar Backup Completo"}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                const input = document.createElement("input");
+                input.type = "file";
+                input.accept = ".json";
+                input.onchange = async (ev: any) => {
+                  if (ev.target.files && ev.target.files[0]) {
+                    const file = ev.target.files[0];
+                    await executeDirectRestore(file, false);
+                    window.dispatchEvent(new CustomEvent("company_profile_updated"));
+                    window.dispatchEvent(new CustomEvent("backup_restored_sync"));
+                    alert("Backup completo importado e restaurado com sucesso! A interface e o logotipo foram atualizados.");
+                  }
+                };
+                input.click();
+              }}
+              disabled={importing}
+              className="flex-1 sm:flex-none flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-black text-white bg-gradient-to-r from-brand-magenta via-pink-600 to-rose-600 hover:from-pink-600 hover:to-brand-magenta shadow-lg shadow-brand-magenta/30 transition-all cursor-pointer text-xs uppercase tracking-wide disabled:opacity-50"
+              title="Importar arquivo .json e restaurar automaticamente no Supabase e localStorage"
+            >
+              {importing ? (
+                <RefreshCw className="h-4 w-4 animate-spin shrink-0" />
+              ) : (
+                <Upload className="h-4 w-4 shrink-0" />
+              )}
+              <span>{importing ? "Importando..." : "Importar Backup Completo"}</span>
+            </button>
+          </div>
+        </div>
+
         {/* Input Oculto para Backup Nuvem */}
         <input
           ref={backupFileInputRef}
