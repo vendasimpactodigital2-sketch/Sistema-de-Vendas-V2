@@ -47,11 +47,16 @@ export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
   React.useEffect(() => {
     setUsername("");
     setPassword("");
-    const timer = setTimeout(() => {
-      setUsername("");
-      setPassword("");
-    }, 120);
-    return () => clearTimeout(timer);
+    const t1 = setTimeout(() => { setUsername(""); setPassword(""); }, 40);
+    const t2 = setTimeout(() => { setUsername(""); setPassword(""); }, 120);
+    const t3 = setTimeout(() => { setUsername(""); setPassword(""); }, 300);
+    const t4 = setTimeout(() => { setUsername(""); setPassword(""); }, 600);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+      clearTimeout(t4);
+    };
   }, []);
   
   // Fetch existing users from localStorage or return default demo user
@@ -408,6 +413,12 @@ export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
                 )}
 
                 <form onSubmit={handleLogin} className="space-y-4" autoComplete="off">
+                  {/* Trap inputs to prevent browser credential autofill */}
+                  <div style={{ position: "absolute", opacity: 0, height: 0, width: 0, zIndex: -1, overflow: "hidden" }} aria-hidden="true">
+                    <input type="text" name="prevent_autofill_user" tabIndex={-1} autoComplete="off" defaultValue="" />
+                    <input type="password" name="prevent_autofill_pwd" tabIndex={-1} autoComplete="off" defaultValue="" />
+                  </div>
+
                   <div className="space-y-1.5">
                     <label className="block text-[10px] uppercase font-mono font-bold tracking-wider text-slate-400">E-mail de Acesso</label>
                     <div className="relative">
@@ -415,7 +426,7 @@ export function AuthScreen({ onLoginSuccess }: AuthScreenProps) {
                         <Mail className="h-4 w-4" />
                       </span>
                       <input
-                        type="text"
+                        type="email"
                         name="auth_user_email_no_autofill"
                         id="auth_user_email"
                         autoCapitalize="none"

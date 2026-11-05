@@ -67,12 +67,62 @@ const defaultBusinessHours: BusinessHours = {
   sunday: { isOpen: false, openTime: "09:00", closeTime: "18:00" },
 };
 
-export const MEUS_DADOS_SQL_SCRIPT = `-- =========================================================================
--- SCRIPT DE CRIAÇÃO DA TABELA DE BACKUPS NA NUVEM ('public.meus_dados')
--- Execute este script no SQL Editor do painel do seu Supabase
+export const BACKUPS_SISTEMA_SQL_SCRIPT = `-- =========================================================================
+-- TABELA UNIFICADA DE BACKUP COMPLETO DO SISTEMA ('public.backups_sistema')
+-- Execute este script no SQL Editor do seu Supabase para criar a nova tabela
+-- de backups 100% integrados (Vendas Rápidas, Vendas, Logo e Empresa)
 -- =========================================================================
 
--- 1. Criação da tabela meus_dados
+-- 1. Criação da tabela backups_sistema
+CREATE TABLE IF NOT EXISTS public.backups_sistema (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id TEXT NOT NULL,
+    titulo TEXT NOT NULL,
+    descricao TEXT,
+    tipo TEXT DEFAULT 'full_system_backup',
+    total_vendas INTEGER DEFAULT 0,
+    total_produtos INTEGER DEFAULT 0,
+    total_clientes INTEGER DEFAULT 0,
+    total_vendas_rapidas INTEGER DEFAULT 0,
+    empresa_nome TEXT,
+    tem_logo BOOLEAN DEFAULT false,
+    dados_completos JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 2. Índices para performance e consultas instantâneas
+CREATE INDEX IF NOT EXISTS idx_backups_sistema_user_id ON public.backups_sistema(user_id);
+CREATE INDEX IF NOT EXISTS idx_backups_sistema_created_at ON public.backups_sistema(created_at DESC);
+
+-- 3. Habilita Row Level Security (RLS)
+ALTER TABLE public.backups_sistema ENABLE ROW LEVEL SECURITY;
+
+-- 4. Criação de políticas de acesso completo
+DROP POLICY IF EXISTS "Permitir leitura de backups_sistema" ON public.backups_sistema;
+CREATE POLICY "Permitir leitura de backups_sistema" 
+ON public.backups_sistema 
+FOR SELECT 
+TO public, anon, authenticated, service_role 
+USING (true);
+
+DROP POLICY IF EXISTS "Permitir modificação em backups_sistema" ON public.backups_sistema;
+CREATE POLICY "Permitir modificação em backups_sistema" 
+ON public.backups_sistema 
+FOR ALL 
+TO public, anon, authenticated, service_role 
+USING (true) 
+WITH CHECK (true);
+
+-- 5. Garantir permissões de acesso às roles do Supabase
+GRANT ALL ON TABLE public.backups_sistema TO anon, authenticated, service_role;
+
+-- 6. Habilitar sincronização em tempo real (Supabase Realtime)
+ALTER PUBLICATION supabase_realtime ADD TABLE public.backups_sistema;
+
+-- =========================================================================
+-- (Opcional) TABELA LEGADA COMPATIBILIDADE ('public.meus_dados')
+-- =========================================================================
 CREATE TABLE IF NOT EXISTS public.meus_dados (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     titulo TEXT NOT NULL,
@@ -82,25 +132,12 @@ CREATE TABLE IF NOT EXISTS public.meus_dados (
     user_id TEXT,
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );
-
--- 2. Índices para performance e consultas rápidas
-CREATE INDEX IF NOT EXISTS idx_meus_dados_user_id ON public.meus_dados(user_id);
-CREATE INDEX IF NOT EXISTS idx_meus_dados_created_at ON public.meus_dados(created_at DESC);
-
--- 3. Habilita Row Level Security (RLS)
 ALTER TABLE public.meus_dados ENABLE ROW LEVEL SECURITY;
-
--- 4. Criação de política permissiva para leitura, gravação e exclusão
 DROP POLICY IF EXISTS "Permitir acesso completo a meus_dados" ON public.meus_dados;
-CREATE POLICY "Permitir acesso completo a meus_dados" 
-ON public.meus_dados 
-FOR ALL 
-TO public, anon, authenticated 
-USING (true) 
-WITH CHECK (true);
+CREATE POLICY "Permitir acesso completo a meus_dados" ON public.meus_dados FOR ALL TO public, anon, authenticated USING (true) WITH CHECK (true);
+GRANT ALL ON TABLE public.meus_dados TO anon, authenticated, service_role;`;
 
--- 5. Habilitar sincronização em tempo real (Supabase Realtime)
-ALTER PUBLICATION supabase_realtime ADD TABLE public.meus_dados;`;
+export const MEUS_DADOS_SQL_SCRIPT = BACKUPS_SISTEMA_SQL_SCRIPT;
 
 interface CompanySettingsProps {
   company: CompanyProfile;
@@ -623,6 +660,14 @@ export function CompanySettings({
     created_at: string;
     empresa_id?: string;
     user_id?: string;
+    tipo?: string;
+    total_vendas?: number;
+    total_produtos?: number;
+    total_clientes?: number;
+    total_vendas_rapidas?: number;
+    empresa_nome?: string;
+    tem_logo?: boolean;
+    dados_completos?: any;
   }
 
   const [cloudBackups, setCloudBackups] = useState<BackupCloudItem[]>([]);
@@ -635,11 +680,11 @@ export function CompanySettings({
 
   const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
 
-  // 1. SELECT na tabela meus_dados (com suporte a API server-side com service_role para garantir exibição em todas as máquinas)
+  // 1. SELECT na tabela backups_sistema (com fallback para meus_dados e API server-side com service_role)
   const fetchCloudBackups = async () => {
     setLoadingCloudBackups(true);
     try {
-      // 1.1 Tentar buscar via endpoint do servidor (service_role ignora restrições RLS e retorna todos os backups da empresa)
+      // 1.1 Tentar buscar via endpoint do servidor (service_role ignora restrições RLS e retorna todos os backups)
       try {
         const res = await fetch("/api/backups");
         if (res.ok) {
@@ -659,10 +704,30 @@ export function CompanySettings({
         console.warn("Fallback de API server-side de backups:", apiErr);
       }
 
-      // 1.2 Fallback cliente Supabase direto
+      // 1.2 Fallback cliente Supabase direto: Tenta backups_sistema primeiro
       const supabase = getSupabase();
       if (!supabase) return;
 
+      try {
+        const { data: sysData, error: sysErr } = await supabase
+          .from("backups_sistema")
+          .select("*")
+          .order("created_at", { ascending: false });
+
+        if (!sysErr && sysData) {
+          setIsTableMissing(false);
+          setCloudBackups(
+            sysData.map((b: any) => ({
+              ...b,
+              descricao: typeof b.dados_completos === "object" ? JSON.stringify(b.dados_completos) : (b.descricao || "")
+            }))
+          );
+          setLoadingCloudBackups(false);
+          return;
+        }
+      } catch (e) {}
+
+      // 1.3 Fallback cliente Supabase direto: Tenta tabela legada meus_dados
       const { data, error } = await supabase
         .from("meus_dados")
         .select("*")
@@ -671,6 +736,7 @@ export function CompanySettings({
       if (error) {
         if (
           error.message?.includes("meus_dados") ||
+          error.message?.includes("backups_sistema") ||
           error.message?.includes("schema cache") ||
           (error as any).code === "PGRST205" ||
           (error as any).code === "42P01"
@@ -684,11 +750,12 @@ export function CompanySettings({
     } catch (err: any) {
       if (
         err?.message?.includes("meus_dados") ||
+        err?.message?.includes("backups_sistema") ||
         err?.message?.includes("schema cache")
       ) {
         setIsTableMissing(true);
       }
-      console.warn("Aviso ao carregar backups da tabela meus_dados:", err);
+      console.warn("Aviso ao carregar backups:", err);
     } finally {
       setLoadingCloudBackups(false);
     }
@@ -711,7 +778,18 @@ export function CompanySettings({
     let channel: any = null;
     if (supabase) {
       channel = supabase
-        .channel("sync_meus_dados_backups_realtime")
+        .channel("sync_backups_sistema_realtime")
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "backups_sistema"
+          },
+          () => {
+            fetchCloudBackups();
+          }
+        )
         .on(
           "postgres_changes",
           {
@@ -939,7 +1017,10 @@ export function CompanySettings({
 
     const supabase = getSupabase();
     if (supabase) {
-      await supabase.from("meus_dados").delete().eq("id", id);
+      await Promise.allSettled([
+        supabase.from("backups_sistema").delete().eq("id", id),
+        supabase.from("meus_dados").delete().eq("id", id)
+      ]);
     }
     setCloudBackups((prev) => prev.filter((b) => b.id !== id));
   };
@@ -969,15 +1050,15 @@ export function CompanySettings({
       const sanitizedName = (tradingName || "empresa").toLowerCase().replace(/[^a-z0-9]/g, "_");
       const dateStr = new Date().toISOString().split("T")[0];
       link.href = downloadUrl;
-      link.download = `nexvolt_backup_${sanitizedName}_${dateStr}.json`;
+      link.download = `backup_completo_sistema_${sanitizedName}_${dateStr}.json`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(downloadUrl);
 
-      // Gravar na nuvem (tabela meus_dados) para sincronizar entre todos os computadores
+      // Gravar na nuvem (tabela backups_sistema ou meus_dados) para sincronizar entre todos os computadores
       const jsonString = JSON.stringify(data);
-      const fileName = `nexvolt_backup_${sanitizedName}_${dateStr}.json`;
+      const fileName = `backup_completo_sistema_${sanitizedName}_${dateStr}.json`;
       const supabase = getSupabase();
       let activeUserId = currentUser?.id || UNIFIED_EMPRESA_ID;
 
@@ -1015,6 +1096,7 @@ export function CompanySettings({
           setIsTableMissing(false);
         } else if (
           json.tableMissing ||
+          json.error?.includes("backups_sistema") ||
           json.error?.includes("meus_dados") ||
           json.error?.includes("schema cache")
         ) {
@@ -1027,28 +1109,54 @@ export function CompanySettings({
 
       if (!savedViaServer && !cloudTableMissing && supabase) {
         try {
-          const payloadRecord: any = {
-            titulo: fileName,
-            descricao: jsonString,
-            valor: jsonString.length,
-            user_id: activeUserId
-          };
-          const { error: insErr } = await supabase.from("meus_dados").insert(payloadRecord);
-          if (insErr) {
-            if (
-              insErr.message?.includes("meus_dados") ||
-              insErr.message?.includes("schema cache") ||
-              (insErr as any).code === "PGRST205" ||
-              (insErr as any).code === "42P01"
-            ) {
-              cloudTableMissing = true;
-              setIsTableMissing(true);
+          let directSuccess = false;
+          // Try inserting into backups_sistema first
+          try {
+            const { error: sysInsErr } = await supabase.from("backups_sistema").insert({
+              titulo: fileName,
+              descricao: jsonString,
+              tipo: "full_system_backup",
+              total_vendas: data.sales?.length || 0,
+              total_produtos: data.produtos?.length || 0,
+              total_clientes: data.clientes?.length || 0,
+              total_vendas_rapidas: data.vendas_rapidas_itens?.length || 0,
+              empresa_nome: tradingName || "Empresa",
+              tem_logo: !!(data.company_profile?.logo),
+              dados_completos: data,
+              user_id: activeUserId
+            });
+            if (!sysInsErr) {
+              directSuccess = true;
+              setIsTableMissing(false);
             }
-          } else {
-            setIsTableMissing(false);
+          } catch (e) {}
+
+          // Fallback to meus_dados
+          if (!directSuccess) {
+            const payloadRecord: any = {
+              titulo: fileName,
+              descricao: jsonString,
+              valor: jsonString.length,
+              user_id: activeUserId
+            };
+            const { error: insErr } = await supabase.from("meus_dados").insert(payloadRecord);
+            if (insErr) {
+              if (
+                insErr.message?.includes("meus_dados") ||
+                insErr.message?.includes("backups_sistema") ||
+                insErr.message?.includes("schema cache") ||
+                (insErr as any).code === "PGRST205" ||
+                (insErr as any).code === "42P01"
+              ) {
+                cloudTableMissing = true;
+                setIsTableMissing(true);
+              }
+            } else {
+              setIsTableMissing(false);
+            }
           }
         } catch (dbErr) {
-          console.warn("Aviso ao salvar backup na tabela meus_dados:", dbErr);
+          console.warn("Aviso ao salvar backup na nuvem:", dbErr);
         }
       }
 
@@ -1060,11 +1168,20 @@ export function CompanySettings({
       fetchCloudBackups();
       if (cloudTableMissing) {
         setBackupSuccessMsg(
-          `Cópia de segurança "${fileName}" exportada e baixada com sucesso no seu dispositivo! ` +
-          `(Nota: A tabela 'meus_dados' ainda não foi criada no seu Supabase para backup na nuvem. Use o comando SQL fornecido se desejar ativá-la).`
+          `Cópia de segurança "${fileName}" exportada e baixada com sucesso no seu dispositivo!\n` +
+          `• Vendas: ${data.sales?.length || 0}\n` +
+          `• Vendas Rápidas: ${data.vendas_rapidas_itens?.length || 0}\n` +
+          `• Logotipo e Dados da Empresa inclusos!\n` +
+          `(Nota: Para salvar também na nuvem do Supabase, crie a tabela executando o script SQL fornecido).`
         );
       } else {
-        setBackupSuccessMsg("Cópia de segurança exportada com sucesso! O arquivo .json foi salvo na sua pasta de Downloads e sincronizado na Nuvem para todos os computadores.");
+        setBackupSuccessMsg(
+          `Backup Completo do Sistema exportado com sucesso! 🎉\n` +
+          `• Vendas e Orçamentos: ${data.sales?.length || 0}\n` +
+          `• Vendas Rápidas: ${data.vendas_rapidas_itens?.length || 0} botões\n` +
+          `• Logotipo e Cabeçalho: 100% integrados\n` +
+          `O arquivo .json foi baixado e salvo na Nuvem para todas as máquinas.`
+        );
       }
       setTimeout(() => setBackupSuccessMsg(null), 8000);
     } catch (err: any) {
@@ -1233,6 +1350,8 @@ export function CompanySettings({
         budgets = sales.filter((s: any) => s && (s.isBudget || s.is_budget));
       }
 
+      const ownerId = currentUser ? (currentUser.owner_id || currentUser.id) : "";
+
       // Immediately write primary entity keys to localStorage for offline readiness & speed
       if (sales.length > 0) localStorage.setItem("NUCLEO_SALES", JSON.stringify(sales));
       if (budgets.length > 0) localStorage.setItem("NUCLEO_BUDGETS", JSON.stringify(budgets));
@@ -1243,9 +1362,20 @@ export function CompanySettings({
         localStorage.setItem("NUCLEO_RECURRING_EXPENSES", JSON.stringify(gastos_mensais));
       }
       if (clientes.length > 0) localStorage.setItem("NUCLEO_CLIENTS", JSON.stringify(clientes));
-      if (vendas_rapidas_itens.length > 0) localStorage.setItem("NUCLEO_QUICK_SALES", JSON.stringify(vendas_rapidas_itens));
+      if (vendas_rapidas_itens.length > 0) {
+        localStorage.setItem("NUCLEO_QUICK_SALES", JSON.stringify(vendas_rapidas_itens));
+        if (ownerId) {
+          localStorage.setItem(`NUCLEO_QUICK_SALES_${ownerId}`, JSON.stringify(vendas_rapidas_itens));
+        }
+      }
       if (company_profile) {
         localStorage.setItem("NUCLEO_COMPANY_PROFILE", JSON.stringify(company_profile));
+        if (company_profile.logo) {
+          try {
+            const { setIndexedDbItem } = await import("../utils/indexedDb");
+            await setIndexedDbItem("NUCLEO_COMPANY_LOGO", company_profile.logo);
+          } catch (e) {}
+        }
         if (onSaveCompany) {
           try { onSaveCompany(company_profile); } catch (e) {}
         }
@@ -1257,8 +1387,6 @@ export function CompanySettings({
       }
       if (cash_register_state) localStorage.setItem("NUCLEO_CASH_REGISTER", JSON.stringify(cash_register_state));
       if (custom_reminders.length > 0) localStorage.setItem("NUCLEO_CUSTOM_REMINDERS", JSON.stringify(custom_reminders));
-
-      const ownerId = currentUser ? (currentUser.owner_id || currentUser.id) : "";
 
       // Import to remote Supabase database only if not strictly local and configured
       if (!isLocalOnly && ownerId && isSupabaseConfigured()) {
@@ -1280,29 +1408,29 @@ export function CompanySettings({
 
           if (res.success) {
             setBackupSuccessMsg(
-              `Backup restaurado com sucesso no sistema e em todos os terminais! 🎉\n` +
+              `Backup completo restaurado com sucesso no sistema e em todos os terminais! 🎉\n` +
               `• Vendas: ${res.counts.sales || sales.length}\n` +
+              `• Vendas Rápidas: ${res.counts.vendas_rapidas_itens || vendas_rapidas_itens.length} botões\n` +
               `• Produtos: ${res.counts.produtos || produtos.length}\n` +
               `• Despesas: ${res.counts.expenses || expenses.length}\n` +
               `• Clientes: ${res.counts.clientes || clientes.length}\n` +
-              `• Faturas fixas: ${res.counts.gastos_mensais || gastos_mensais.length}`
+              `• Empresa e Logo: Restaurados com sucesso!`
             );
           } else {
-            setBackupSuccessMsg(`Dados restaurados localmente (${sales.length} vendas, ${produtos.length} produtos, ${expenses.length} despesas). Aviso: ${res.error}`);
+            setBackupSuccessMsg(`Dados restaurados localmente (${sales.length} vendas, ${vendas_rapidas_itens.length} vendas rápidas, ${produtos.length} produtos). Aviso: ${res.error}`);
           }
         } catch (dbErr: any) {
           console.warn("Aviso ao importar no banco:", dbErr);
-          setBackupSuccessMsg(`Backup restaurado localmente com ${sales.length} vendas, ${produtos.length} produtos e ${expenses.length} despesas.`);
+          setBackupSuccessMsg(`Backup restaurado localmente com ${sales.length} vendas, ${vendas_rapidas_itens.length} vendas rápidas e ${produtos.length} produtos.`);
         }
       } else {
         setBackupSuccessMsg(
           `Backup local "${file.name}" restaurado com sucesso! 🎉\n` +
           `• Vendas: ${sales.length}\n` +
-          `• Orçamentos: ${budgets.length}\n` +
+          `• Vendas Rápidas: ${vendas_rapidas_itens.length} botões\n` +
           `• Produtos: ${produtos.length}\n` +
           `• Despesas: ${expenses.length}\n` +
-          `• Clientes: ${clientes.length}\n` +
-          `• Faturas fixas: ${gastos_mensais.length}`
+          `• Clientes: ${clientes.length}`
         );
       }
 
@@ -1316,6 +1444,9 @@ export function CompanySettings({
       window.dispatchEvent(new CustomEvent("local_storage_restored", { detail: { sales, budgets, produtos, expenses, clientes, gastos_mensais, company_profile } }));
       window.dispatchEvent(new CustomEvent("sales_remote_sync", { detail: { count: sales.length } }));
       window.dispatchEvent(new CustomEvent("app_remote_sync", { detail: { event: "backup_restored" } }));
+      window.dispatchEvent(new CustomEvent("company_profile_updated"));
+      window.dispatchEvent(new CustomEvent("logo_updated"));
+      window.dispatchEvent(new CustomEvent("quick_sales_config_update"));
 
       // Refresh global app data silently
       if (onRefreshData) {
@@ -2594,10 +2725,10 @@ export function CompanySettings({
               type="button"
               onClick={() => setShowSqlScriptModal(!showSqlScriptModal)}
               className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 font-mono transition-colors font-bold px-2.5 py-1 rounded-lg bg-cyan-950/40 border border-cyan-800/40 cursor-pointer"
-              title="Exibir comando SQL para criar a tabela meus_dados no Supabase"
+              title="Exibir script SQL para criar a tabela backups_sistema no Supabase"
             >
               <FileText className="h-3 w-3" />
-              <span>{showSqlScriptModal ? "Ocultar SQL" : "Script SQL Nuvem"}</span>
+              <span>{showSqlScriptModal ? "Ocultar SQL" : "Script SQL Tabela"}</span>
             </button>
             <button
               type="button"
@@ -2612,31 +2743,39 @@ export function CompanySettings({
         </div>
 
         {/* BOTÕES DE EXPORTAR E IMPORTAR BACKUP COMPLETO (.JSON) */}
-        <div className="bg-gradient-to-r from-brand-magenta/15 via-slate-900 to-brand-cyan/15 p-4 sm:p-5 rounded-2xl border border-brand-magenta/30 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <h4 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider flex items-center gap-2">
+        <div className="bg-gradient-to-r from-brand-magenta/20 via-slate-900 to-brand-cyan/20 p-5 sm:p-6 rounded-2xl border-2 border-brand-magenta/40 shadow-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5">
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded-full bg-brand-magenta/30 text-brand-magenta font-mono text-[10px] font-black uppercase tracking-wider border border-brand-magenta/40">
+                100% Integrado & Completo
+              </span>
+              <span className="px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-mono text-[10px] font-bold border border-cyan-500/30">
+                Vendas Rápidas + Vendas + Logo + Empresa
+              </span>
+            </div>
+            <h4 className="text-sm sm:text-base font-black text-white uppercase tracking-wider flex items-center gap-2">
               <Sparkles className="h-4 w-4 text-brand-magenta animate-pulse" />
-              <span>Backup Completo do Sistema (1 Clique)</span>
+              <span>Backup Único do Sistema (1 Clique)</span>
             </h4>
-            <p className="text-xs text-slate-300 leading-relaxed max-w-xl">
-              Exporte ou importe todos os cadastros (Clientes, Produtos, Vendas, Despesas, Status do Caixa), além das configurações da empresa (incluindo a imagem do logo e cabeçalho) em um arquivo único <strong>.json</strong>.
+            <p className="text-xs text-slate-300 leading-relaxed max-w-2xl">
+              Salva e baixa em arquivo único: todos os botões de <strong>Vendas Rápidas</strong> com preços e cores, <strong>todas as 631 vendas</strong> e orçamentos, o <strong>Logotipo da Empresa</strong> em alta resolução, dados cadastrais completos, clientes, produtos, despesas e status do caixa.
             </p>
           </div>
 
-          <div className="flex items-center gap-2.5 shrink-0 w-full sm:w-auto">
+          <div className="flex items-center gap-3 shrink-0 w-full sm:w-auto">
             <button
               type="button"
               onClick={handleExportBackup}
               disabled={exporting}
-              className="flex-1 sm:flex-none flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-black text-slate-950 bg-gradient-to-r from-brand-cyan to-cyan-400 hover:from-cyan-300 hover:to-brand-cyan shadow-lg shadow-brand-cyan/25 transition-all cursor-pointer text-xs uppercase tracking-wide disabled:opacity-50"
-              title="Exportar todos os dados, vendas, clientes, logo e status do caixa em arquivo único .json"
+              className="flex-1 sm:flex-none flex items-center justify-center gap-2 py-3 px-5 rounded-xl font-black text-slate-950 bg-gradient-to-r from-brand-cyan via-cyan-300 to-cyan-400 hover:brightness-110 active:scale-95 shadow-xl shadow-brand-cyan/30 transition-all cursor-pointer text-xs uppercase tracking-wide disabled:opacity-50"
+              title="Gerar e baixar o backup unificado completo e sincronizar no Supabase"
             >
               {exporting ? (
                 <RefreshCw className="h-4 w-4 animate-spin shrink-0" />
               ) : (
                 <Download className="h-4 w-4 shrink-0" />
               )}
-              <span>{exporting ? "Exportando..." : "Exportar Backup Completo"}</span>
+              <span>{exporting ? "Gerando Backup..." : "⚡ Fazer Backup de Tudo (1 Clique)"}</span>
             </button>
 
             <button
@@ -2650,22 +2789,24 @@ export function CompanySettings({
                     const file = ev.target.files[0];
                     await executeDirectRestore(file, false);
                     window.dispatchEvent(new CustomEvent("company_profile_updated"));
+                    window.dispatchEvent(new CustomEvent("logo_updated"));
+                    window.dispatchEvent(new CustomEvent("quick_sales_config_update"));
                     window.dispatchEvent(new CustomEvent("backup_restored_sync"));
-                    alert("Backup completo importado e restaurado com sucesso! A interface e o logotipo foram atualizados.");
+                    alert("Backup completo restaurado com sucesso! Vendas Rápidas, todas as vendas e o logotipo foram atualizados na tela.");
                   }
                 };
                 input.click();
               }}
               disabled={importing}
-              className="flex-1 sm:flex-none flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-black text-white bg-gradient-to-r from-brand-magenta via-pink-600 to-rose-600 hover:from-pink-600 hover:to-brand-magenta shadow-lg shadow-brand-magenta/30 transition-all cursor-pointer text-xs uppercase tracking-wide disabled:opacity-50"
-              title="Importar arquivo .json e restaurar automaticamente no Supabase e localStorage"
+              className="flex-1 sm:flex-none flex items-center justify-center gap-2 py-3 px-5 rounded-xl font-black text-white bg-gradient-to-r from-brand-magenta via-pink-600 to-rose-600 hover:brightness-110 active:scale-95 shadow-xl shadow-brand-magenta/35 transition-all cursor-pointer text-xs uppercase tracking-wide disabled:opacity-50"
+              title="Restaurar backup único (.json) com todas as vendas rápidas, vendas e logotipo"
             >
               {importing ? (
                 <RefreshCw className="h-4 w-4 animate-spin shrink-0" />
               ) : (
                 <Upload className="h-4 w-4 shrink-0" />
               )}
-              <span>{importing ? "Importando..." : "Importar Backup Completo"}</span>
+              <span>{importing ? "Restaurando..." : "📂 Restaurar Backup Completo"}</span>
             </button>
           </div>
         </div>
@@ -2699,21 +2840,27 @@ export function CompanySettings({
 
         {/* Mensagens de Feedback */}
         {backupSuccessMsg && (
-          <div className="bg-emerald-950/50 border border-emerald-500/30 rounded-lg p-3 text-emerald-400 font-sans text-xs animate-fadeIn">
-            <p className="font-bold flex items-center gap-1.5">✓ Operação concluída com sucesso!</p>
-            <p className="text-[11px] text-emerald-500 mt-1 whitespace-pre-line">{backupSuccessMsg}</p>
+          <div className="bg-emerald-950/60 border border-emerald-500/40 rounded-xl p-3.5 text-emerald-300 font-sans text-xs animate-fadeIn shadow-lg">
+            <p className="font-bold flex items-center gap-1.5 text-emerald-200">
+              <CheckCircle className="h-4 w-4 text-emerald-400 shrink-0" />
+              Operação concluída com sucesso!
+            </p>
+            <p className="text-[11px] text-emerald-400 mt-1 whitespace-pre-line leading-relaxed">{backupSuccessMsg}</p>
           </div>
         )}
 
         {backupError && (
-          <div className="bg-red-950/50 border border-red-500/30 rounded-lg p-3 text-red-400 font-sans text-xs animate-fadeIn">
-            <p className="font-bold">❌ Aviso: {backupError}</p>
+          <div className="bg-red-950/60 border border-red-500/40 rounded-xl p-3.5 text-red-300 font-sans text-xs animate-fadeIn shadow-lg">
+            <p className="font-bold flex items-center gap-1.5 text-red-200">
+              <AlertTriangle className="h-4 w-4 text-red-400 shrink-0" />
+              Aviso: {backupError}
+            </p>
           </div>
         )}
 
         {/* Arquivo selecionado no backup */}
         {backupFile ? (
-          <div className="p-2 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between text-slate-350 text-xs font-mono">
+          <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between text-slate-350 text-xs font-mono">
             <span className="truncate max-w-md">{backupFile.name} ({backupPreview?.type === "local" ? "Formato: Local" : "Formato: Nuvem"})</span>
             <button
               type="button"
@@ -2728,13 +2875,13 @@ export function CompanySettings({
           </div>
         ) : null}
 
-        {/* BANNER INFORMATIVO SE A TABELA MEUS_DADOS NÃO EXISTE */}
+        {/* BANNER INFORMATIVO SE A TABELA NÃO EXISTE */}
         {isTableMissing && (
           <div className="bg-amber-950/40 border border-amber-500/30 rounded-xl p-3.5 text-xs space-y-2 animate-fadeIn">
             <div className="flex items-center justify-between gap-2">
               <span className="font-bold flex items-center gap-1.5 text-amber-300">
                 <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
-                Tabela 'meus_dados' ausente no Supabase
+                Tabela 'backups_sistema' ausente no Supabase
               </span>
               <button
                 type="button"
@@ -2745,28 +2892,28 @@ export function CompanySettings({
               </button>
             </div>
             <p className="text-slate-350 text-[11px] leading-relaxed">
-              O erro <em>"Could not find the table 'public.meus_dados'"</em> indica que a tabela de sincronização ainda não foi criada no seu banco.
-              Seus <strong>Backups Locais continuam 100% disponíveis</strong> na coluna ao lado! Para ativar também a nuvem, basta rodar o comando SQL no SQL Editor do seu Supabase.
+              Para salvar backups unificados automaticamente na nuvem, basta rodar o comando SQL abaixo no <strong>SQL Editor</strong> do seu Supabase.
+              Seus <strong>Backups Locais em .json continuam funcionando 100% de imediato</strong>!
             </p>
           </div>
         )}
 
         {/* MODAL / VISUALIZADOR DO SCRIPT SQL DO SUPABASE */}
         {showSqlScriptModal && (
-          <div className="bg-slate-900/90 border border-cyan-500/40 rounded-xl p-3.5 space-y-2.5 animate-fadeIn">
+          <div className="bg-slate-900/95 border border-cyan-500/40 rounded-xl p-4 space-y-3 animate-fadeIn shadow-2xl">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
                 <Database className="h-4 w-4 text-cyan-400" />
-                Script SQL para Criar Tabela 'meus_dados' no Supabase:
+                Script SQL para Criar Nova Tabela 'backups_sistema' no Supabase:
               </span>
               <button
                 type="button"
                 onClick={() => {
-                  navigator.clipboard.writeText(MEUS_DADOS_SQL_SCRIPT);
+                  navigator.clipboard.writeText(BACKUPS_SISTEMA_SQL_SCRIPT);
                   setCopiedSql(true);
                   setTimeout(() => setCopiedSql(false), 3000);
                 }}
-                className="flex items-center gap-1.5 px-3 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-[10px] uppercase transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-[10px] uppercase transition-colors cursor-pointer shadow-md"
               >
                 {copiedSql ? (
                   <>
@@ -2776,7 +2923,7 @@ export function CompanySettings({
                 ) : (
                   <>
                     <Copy className="h-3 w-3" />
-                    <span>Copiar SQL</span>
+                    <span>Copiar Código SQL</span>
                   </>
                 )}
               </button>
@@ -2784,8 +2931,8 @@ export function CompanySettings({
             <p className="text-[10px] text-slate-400">
               Passo a passo: 1) Abra seu painel do <strong>Supabase</strong> &rarr; 2) Acesse <strong>SQL Editor</strong> no menu lateral &rarr; 3) Cole o script abaixo e clique em <strong>Run</strong>.
             </p>
-            <pre className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-[10px] text-emerald-400 font-mono overflow-x-auto max-h-40 leading-relaxed select-all custom-scrollbar">
-              {MEUS_DADOS_SQL_SCRIPT}
+            <pre className="bg-slate-950 p-3.5 rounded-lg border border-slate-800 text-[10px] text-emerald-400 font-mono overflow-x-auto max-h-52 leading-relaxed select-all custom-scrollbar">
+              {BACKUPS_SISTEMA_SQL_SCRIPT}
             </pre>
           </div>
         )}
@@ -2803,7 +2950,7 @@ export function CompanySettings({
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 leading-tight">
-                Salva o backup consolidado na nuvem para compartilhar e restaurar entre todos os computadores da empresa.
+                Salva o backup unificado na tabela <strong>backups_sistema</strong> para compartilhar e restaurar entre todos os computadores.
               </p>
 
               <div className="grid grid-cols-2 gap-3 pt-1">
@@ -2856,40 +3003,67 @@ export function CompanySettings({
                 </div>
               ) : cloudBackups.length === 0 ? (
                 <div className="p-3 rounded-lg bg-slate-900/40 border border-slate-900 text-center text-xs text-slate-500 font-mono">
-                  {isTableMissing ? "Tabela 'meus_dados' ainda não criada no Supabase." : "Nenhum backup em nuvem encontrado."}
+                  {isTableMissing ? "Tabela 'backups_sistema' ainda não criada no Supabase." : "Nenhum backup em nuvem encontrado."}
                 </div>
               ) : (
-                <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
+                <div className="max-h-56 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
                   {cloudBackups.map((bkp) => (
                     <div
                       key={bkp.id}
-                      className="p-2 rounded-lg bg-slate-900/70 border border-slate-800 hover:border-slate-700 flex items-center justify-between gap-2 transition-all"
+                      className="p-2.5 rounded-lg bg-slate-900/70 border border-slate-800 hover:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-all"
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
-                          <Database className="h-3 w-3 text-brand-magenta shrink-0" />
-                          <span className="text-[10px] font-bold text-slate-200 truncate block font-mono">
+                          <Database className="h-3.5 w-3.5 text-brand-magenta shrink-0" />
+                          <span className="text-[11px] font-bold text-slate-200 truncate block font-mono">
                             {bkp.titulo}
                           </span>
                         </div>
-                        <span className="text-[9px] text-slate-400 block font-mono mt-0.5">
-                          {new Date(bkp.created_at).toLocaleString("pt-BR", {
-                            day: "2-digit",
-                            month: "2-digit",
-                            year: "numeric",
-                            hour: "2-digit",
-                            minute: "2-digit"
-                          })}
-                          {bkp.valor ? ` • ${(Number(bkp.valor) / 1024).toFixed(1)} KB` : ""}
-                        </span>
+                        
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                          <span className="text-[9px] text-slate-400 font-mono">
+                            {new Date(bkp.created_at).toLocaleString("pt-BR", {
+                              day: "2-digit",
+                              month: "2-digit",
+                              year: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit"
+                            })}
+                            {bkp.valor ? ` • ${(Number(bkp.valor) / 1024).toFixed(1)} KB` : ""}
+                          </span>
+
+                          {bkp.total_vendas !== undefined && bkp.total_vendas > 0 && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-950/70 text-emerald-300 border border-emerald-800/40 text-[8px] font-bold">
+                              🛒 {bkp.total_vendas} vendas
+                            </span>
+                          )}
+
+                          {bkp.total_vendas_rapidas !== undefined && bkp.total_vendas_rapidas > 0 && (
+                            <span className="px-1.5 py-0.5 rounded bg-pink-950/70 text-pink-300 border border-pink-800/40 text-[8px] font-bold">
+                              ⚡ {bkp.total_vendas_rapidas} vendas rápidas
+                            </span>
+                          )}
+
+                          {bkp.tem_logo && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-950/70 text-amber-300 border border-amber-800/40 text-[8px] font-bold">
+                              🖼️ Logo OK
+                            </span>
+                          )}
+
+                          {bkp.empresa_nome && (
+                            <span className="px-1.5 py-0.5 rounded bg-blue-950/70 text-blue-300 border border-blue-800/40 text-[8px] font-bold truncate max-w-[120px]">
+                              🏢 {bkp.empresa_nome}
+                            </span>
+                          )}
+                        </div>
                       </div>
 
-                      <div className="flex items-center gap-1 shrink-0">
+                      <div className="flex items-center gap-1 shrink-0 self-end sm:self-center">
                         <button
                           type="button"
                           onClick={() => handleRestoreCloudBackup(bkp)}
                           disabled={importing}
-                          className="px-2 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 rounded text-[9px] font-bold uppercase transition-colors cursor-pointer"
+                          className="px-2.5 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 rounded text-[9px] font-bold uppercase transition-colors cursor-pointer"
                           title="Restaurar este backup nesta máquina"
                         >
                           Restaurar

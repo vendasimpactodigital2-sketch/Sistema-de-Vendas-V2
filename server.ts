@@ -2732,6 +2732,7 @@ ${JSON.stringify(sales, null, 2)}
         expenses: 0,
         gastos_mensais: 0,
         clientes: 0,
+        vendas_rapidas_itens: 0,
         company_profile: false,
         goals: false,
         cash_register: false
@@ -3033,6 +3034,35 @@ ${JSON.stringify(sales, null, 2)}
         counts.cash_register = true;
       }
 
+      // 9. Quick Sales / Vendas Rápidas (Both quick_sales and vendas_rapidas_itens tables)
+      let rawQuickSales = Array.isArray(backupData.vendas_rapidas_itens) ? backupData.vendas_rapidas_itens :
+                          Array.isArray(backupData.quick_sales) ? backupData.quick_sales : [];
+      if (rawQuickSales.length === 0) {
+        const fromDump = parseDumpKey(`NUCLEO_QUICK_SALES_${canonicalOwnerId}`) || parseDumpKey("NUCLEO_QUICK_SALES");
+        if (Array.isArray(fromDump)) rawQuickSales = fromDump;
+      }
+      if (rawQuickSales.length > 0) {
+        const batchQS = rawQuickSales.map((qs: any) => ({
+          id: qs.id || "qs_" + Math.random().toString(36).substring(2, 9),
+          user_id: canonicalOwnerId,
+          description: qs.description || qs.descricao || qs.nome || "Item",
+          descricao: qs.descricao || qs.description || qs.nome || "Item",
+          price: Number(qs.price ?? qs.preco ?? 0),
+          preco: Number(qs.preco ?? qs.price ?? 0),
+          cost: Number(qs.cost ?? qs.custo ?? 0),
+          custo: Number(qs.custo ?? qs.cost ?? 0),
+          gradient: qs.gradient || qs.cor || "from-purple-600 via-fuchsia-600 to-pink-500",
+          cor: qs.cor || qs.gradient || "from-purple-600 via-fuchsia-600 to-pink-500",
+          created_at: qs.created_at || new Date().toISOString()
+        }));
+
+        await Promise.allSettled([
+          supabase.from("quick_sales").upsert(batchQS),
+          supabase.from("vendas_rapidas_itens").upsert(batchQS)
+        ]);
+        counts.vendas_rapidas_itens = batchQS.length;
+      }
+
       // BROADCAST REALTIME SYNC ACROSS ALL COMPUTERS AND TERMINALS
       const targets = Array.from(new Set([canonicalOwnerId, userId, ...(companyUserIds || [])]));
       targets.forEach((targetId: string) => {
@@ -3041,12 +3071,16 @@ ${JSON.stringify(sales, null, 2)}
         broadcastSyncEvent(targetId, "sales_updated", { count: counts.sales });
         broadcastSyncEvent(targetId, "expenses_updated", { count: counts.expenses });
         broadcastSyncEvent(targetId, "clients_updated", { count: counts.clientes });
+        broadcastSyncEvent(targetId, "quick_sales_config_update", { count: counts.vendas_rapidas_itens });
+        broadcastSyncEvent(targetId, "company_profile_updated", { timestamp: Date.now() });
       });
       broadcastSyncEvent("global", "backup_restored", { counts, timestamp: Date.now() });
       broadcastSyncEvent("global", "products_updated", { count: counts.produtos });
       broadcastSyncEvent("global", "sales_updated", { count: counts.sales });
       broadcastSyncEvent("global", "expenses_updated", { count: counts.expenses });
       broadcastSyncEvent("global", "clients_updated", { count: counts.clientes });
+      broadcastSyncEvent("global", "quick_sales_config_update", { count: counts.vendas_rapidas_itens });
+      broadcastSyncEvent("global", "company_profile_updated", { timestamp: Date.now() });
 
       return res.json({ success: true, counts });
     } catch (err: any) {
@@ -3055,7 +3089,7 @@ ${JSON.stringify(sales, null, 2)}
     }
   });
 
-  // Cloud Backups API (uses service_role to bypass client RLS and ensure sync across all computers)
+  // Cloud Backups API (supports backups_sistema primary table with meus_dados fallback)
   app.get("/api/backups", async (req, res) => {
     try {
       const supabase = getSupabaseClient();
@@ -3063,6 +3097,22 @@ ${JSON.stringify(sales, null, 2)}
         return res.json({ success: true, backups: [] });
       }
 
+      // 1. Try modern backups_sistema table
+      const { data: sysData, error: sysError } = await supabase
+        .from("backups_sistema")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(100);
+
+      if (!sysError && sysData) {
+        const formatted = sysData.map((b: any) => ({
+          ...b,
+          descricao: typeof b.dados_completos === "object" ? JSON.stringify(b.dados_completos) : (b.descricao || "")
+        }));
+        return res.json({ success: true, backups: formatted, tableMissing: false, tableUsed: "backups_sistema" });
+      }
+
+      // 2. Fallback to meus_dados table
       const { data, error } = await supabase
         .from("meus_dados")
         .select("*")
@@ -3070,12 +3120,12 @@ ${JSON.stringify(sales, null, 2)}
         .limit(100);
 
       if (error) {
-        console.warn("[Server GET /api/backups] meus_dados query notice:", error.message);
+        console.warn("[Server GET /api/backups] Notice on both tables:", error.message);
         const isTableMissing = error.message?.includes("meus_dados") || error.message?.includes("schema cache") || (error as any).code === "PGRST205" || (error as any).code === "42P01";
         return res.json({ success: true, backups: [], tableMissing: isTableMissing });
       }
 
-      return res.json({ success: true, backups: data || [], tableMissing: false });
+      return res.json({ success: true, backups: data || [], tableMissing: false, tableUsed: "meus_dados" });
     } catch (err: any) {
       console.error("[Server GET /api/backups Exception]:", err);
       return res.status(500).json({ error: err.message, backups: [] });
@@ -3098,29 +3148,74 @@ ${JSON.stringify(sales, null, 2)}
       const effectiveUserId = userId || UNIFIED_EMPRESA_ID;
 
       const descStr = typeof descricao === "string" ? descricao : JSON.stringify(descricao);
-      const payload = {
-        titulo,
-        descricao: descStr,
-        valor: valor || descStr.length,
-        user_id: effectiveUserId
-      };
+      let parsedObj: any = null;
+      try {
+        parsedObj = typeof descricao === "string" ? JSON.parse(descricao) : descricao;
+      } catch (e) {}
 
-      const { data, error } = await supabase
-        .from("meus_dados")
-        .insert(payload)
-        .select()
-        .single();
+      let savedRecord: any = null;
+      let tableUsed = "";
 
-      if (error) {
-        console.error("[Server POST /api/backups] Insert error:", error);
-        const isTableMissing = error.message?.includes("meus_dados") || error.message?.includes("schema cache") || (error as any).code === "PGRST205" || (error as any).code === "42P01";
-        return res.status(isTableMissing ? 200 : 500).json({ 
-          success: false, 
-          tableMissing: isTableMissing, 
-          error: isTableMissing 
-            ? "Tabela 'meus_dados' não encontrada no banco Supabase. Execute o script SQL para criá-la." 
-            : error.message 
-        });
+      // 1. Try modern backups_sistema table
+      if (parsedObj && typeof parsedObj === "object") {
+        try {
+          const sysPayload = {
+            titulo,
+            descricao: descStr,
+            tipo: "full_system_backup",
+            total_vendas: parsedObj.sales?.length || 0,
+            total_produtos: parsedObj.produtos?.length || 0,
+            total_clientes: parsedObj.clientes?.length || 0,
+            total_vendas_rapidas: parsedObj.vendas_rapidas_itens?.length || 0,
+            empresa_nome: parsedObj.company_profile?.name || parsedObj.company_profile?.tradingName || "Empresa",
+            tem_logo: !!parsedObj.company_profile?.logo,
+            dados_completos: parsedObj,
+            user_id: effectiveUserId
+          };
+
+          const { data: sysData, error: sysError } = await supabase
+            .from("backups_sistema")
+            .insert(sysPayload)
+            .select()
+            .single();
+
+          if (!sysError && sysData) {
+            savedRecord = { ...sysData, descricao: descStr };
+            tableUsed = "backups_sistema";
+          }
+        } catch (sysErr) {
+          // Fallback to meus_dados below
+        }
+      }
+
+      // 2. Fallback to meus_dados table
+      if (!savedRecord) {
+        const payload = {
+          titulo,
+          descricao: descStr,
+          valor: valor || descStr.length,
+          user_id: effectiveUserId
+        };
+
+        const { data, error } = await supabase
+          .from("meus_dados")
+          .insert(payload)
+          .select()
+          .single();
+
+        if (error) {
+          console.error("[Server POST /api/backups] Insert error on meus_dados:", error);
+          const isTableMissing = error.message?.includes("meus_dados") || error.message?.includes("schema cache") || (error as any).code === "PGRST205" || (error as any).code === "42P01";
+          return res.status(isTableMissing ? 200 : 500).json({ 
+            success: false, 
+            tableMissing: isTableMissing, 
+            error: isTableMissing 
+              ? "Tabelas 'backups_sistema' e 'meus_dados' não encontradas no banco Supabase. Execute o script SQL para criá-las." 
+              : error.message 
+          });
+        }
+        savedRecord = data;
+        tableUsed = "meus_dados";
       }
 
       // Broadcast to all computers logged into the system
@@ -3135,11 +3230,11 @@ ${JSON.stringify(sales, null, 2)}
       }
 
       targets.forEach((t) => {
-        broadcastSyncEvent(t, "cloud_backups_updated", { backup: data, timestamp: Date.now() });
-        broadcastSyncEvent(t, "backup_sync", { backup: data, timestamp: Date.now() });
+        broadcastSyncEvent(t, "cloud_backups_updated", { backup: savedRecord, timestamp: Date.now() });
+        broadcastSyncEvent(t, "backup_sync", { backup: savedRecord, timestamp: Date.now() });
       });
 
-      return res.json({ success: true, backup: data, tableMissing: false });
+      return res.json({ success: true, backup: savedRecord, tableMissing: false, tableUsed });
     } catch (err: any) {
       console.error("[Server POST /api/backups Exception]:", err);
       return res.status(500).json({ error: err.message });
@@ -3156,19 +3251,11 @@ ${JSON.stringify(sales, null, 2)}
         return res.status(500).json({ error: "Supabase não configurado" });
       }
 
-      const { error } = await supabase
-        .from("meus_dados")
-        .delete()
-        .eq("id", id);
-
-      if (error) {
-        const isTableMissing = error.message?.includes("meus_dados") || error.message?.includes("schema cache") || (error as any).code === "PGRST205" || (error as any).code === "42P01";
-        return res.status(isTableMissing ? 200 : 500).json({ 
-          success: false, 
-          tableMissing: isTableMissing, 
-          error: isTableMissing ? "Tabela 'meus_dados' não encontrada no Supabase." : error.message 
-        });
-      }
+      // Try deleting from backups_sistema and meus_dados
+      await Promise.allSettled([
+        supabase.from("backups_sistema").delete().eq("id", id),
+        supabase.from("meus_dados").delete().eq("id", id)
+      ]);
 
       const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
       broadcastSyncEvent("global", "cloud_backups_updated", { deletedId: id, timestamp: Date.now() });

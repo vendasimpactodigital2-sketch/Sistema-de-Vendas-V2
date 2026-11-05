@@ -1905,6 +1905,8 @@ export async function dbExportAllData(ownerId: string): Promise<{
   gastos_mensais: any[];
   clientes: any[];
   vendas_rapidas_itens: any[];
+  quick_sales?: any[];
+  reminders?: any[];
   cash_register: any | null;
   sessoes_caixa: any[];
   caixa_status: any[];
@@ -1940,7 +1942,9 @@ export async function dbExportAllData(ownerId: string): Promise<{
       goalsRemote,
       sessoesCaixaRemote,
       vendasRapidasRemote,
-      caixaStatusRemote
+      quickSalesRemote,
+      caixaStatusRemote,
+      salesViaApi
     ] = await Promise.all([
       fetchTableSafe("produtos"),
       fetchTableSafe("sales"),
@@ -1951,7 +1955,9 @@ export async function dbExportAllData(ownerId: string): Promise<{
       fetchTableSafe("goals", true),
       fetchTableSafe("sessoes_caixa"),
       fetchTableSafe("vendas_rapidas_itens"),
-      fetchTableSafe("caixa_status")
+      fetchTableSafe("quick_sales"),
+      fetchTableSafe("caixa_status"),
+      dbGetSales(ownerId).catch(() => null)
     ]);
 
     // 2. Extract and merge local storage data so offline or un-synced data is NEVER lost
@@ -1965,6 +1971,7 @@ export async function dbExportAllData(ownerId: string): Promise<{
     let localCompany: any = null;
     let localGoals: any = null;
     let localCashRegister: any = null;
+    let localReminders: any[] = [];
     const localStorageDump: Record<string, string> = {};
 
     try {
@@ -2016,13 +2023,20 @@ export async function dbExportAllData(ownerId: string): Promise<{
       if (localStorageDump["NUCLEO_GOALS"]) {
         localGoals = JSON.parse(localStorageDump["NUCLEO_GOALS"]);
       }
+      if (localStorageDump["NUCLEO_CUSTOM_REMINDERS"]) {
+        try {
+          localReminders = JSON.parse(localStorageDump["NUCLEO_CUSTOM_REMINDERS"]);
+        } catch {}
+      }
       if (localStorageDump[`NUCLEO_QUICK_SALES_${ownerId}`]) {
         try {
           localQuickSales = JSON.parse(localStorageDump[`NUCLEO_QUICK_SALES_${ownerId}`]);
         } catch {}
-      } else if (localStorageDump["NUCLEO_QUICK_SALES"]) {
+      }
+      if (localStorageDump["NUCLEO_QUICK_SALES"]) {
         try {
-          localQuickSales = JSON.parse(localStorageDump["NUCLEO_QUICK_SALES"]);
+          const qs = JSON.parse(localStorageDump["NUCLEO_QUICK_SALES"]);
+          if (Array.isArray(qs)) localQuickSales = [...localQuickSales, ...qs];
         } catch {}
       }
     } catch (err) {
@@ -2030,7 +2044,7 @@ export async function dbExportAllData(ownerId: string): Promise<{
     }
 
     // 3. Intelligent Deduplication and Normalization (remote + local)
-    // Helper to deduplicate by ID
+    // Helper to deduplicate by ID or Description
     const mergeDeduplicate = (remoteList: any[], localList: any[]): any[] => {
       const map = new Map<string, any>();
       (remoteList || []).forEach(item => {
@@ -2041,7 +2055,6 @@ export async function dbExportAllData(ownerId: string): Promise<{
           if (!map.has(item.id)) {
             map.set(item.id, item);
           } else {
-            // merge properties so neither side loses data
             map.set(item.id, { ...map.get(item.id), ...item });
           }
         }
@@ -2054,12 +2067,18 @@ export async function dbExportAllData(ownerId: string): Promise<{
       (d: any) => d && d.id !== "quick_sales_config" && !d.id.startsWith("cash_register_state") && !d.id.startsWith("deletion_audit_log")
     );
 
-    const mergedSales = mergeDeduplicate(cleanSalesRemote, localSales);
+    // Merge sales from salesRawRemote, salesViaApi, and localSales
+    const combinedRemoteSales = mergeDeduplicate(cleanSalesRemote, salesViaApi || []);
+    const mergedSales = mergeDeduplicate(combinedRemoteSales, localSales);
     const mergedExpenses = mergeDeduplicate(expensesRemote || [], localExpenses);
     const mergedProducts = mergeDeduplicate(produtosRemote || [], localProducts);
     const mergedBills = mergeDeduplicate(gastosMensaisRemote || [], localBills);
     const mergedClients = mergeDeduplicate(clientesRemote || [], localClients);
-    const mergedQuickSales = mergeDeduplicate(vendasRapidasRemote || [], localQuickSales);
+    
+    // Quick sales from quick_sales table, vendas_rapidas_itens table and local storage
+    const combinedRemoteQS = mergeDeduplicate(vendasRapidasRemote || [], quickSalesRemote || []);
+    const mergedQuickSales = mergeDeduplicate(combinedRemoteQS, localQuickSales);
+
     const mergedBudgets = mergeDeduplicate(
       mergedSales.filter((s: any) => s.isBudget || s.is_budget),
       localBudgets
@@ -2068,9 +2087,25 @@ export async function dbExportAllData(ownerId: string): Promise<{
     const finalCompany = companyProfileRemote || localCompany;
     const finalGoals = goalsRemote || localGoals;
 
+    // Check IndexedDB and localStorageDump for high-resolution logo if not directly inside company_profile
+    if (finalCompany) {
+      if (!finalCompany.logo) {
+        try {
+          const { getIndexedDbItem } = await import("./utils/indexedDb");
+          const cachedLogo = await getIndexedDbItem<string>("NUCLEO_COMPANY_LOGO");
+          if (cachedLogo) {
+            finalCompany.logo = cachedLogo;
+          }
+        } catch (e) {}
+      }
+      if (!finalCompany.logo && localStorageDump["NUCLEO_COMPANY_LOGO"]) {
+        finalCompany.logo = localStorageDump["NUCLEO_COMPANY_LOGO"];
+      }
+    }
+
     return {
       backup_type: "full_system_backup",
-      schema_version: "2.0.0",
+      schema_version: "2.1.0",
       exported_at: new Date().toISOString(),
       company_profile: finalCompany,
       goals: finalGoals,
@@ -2081,6 +2116,8 @@ export async function dbExportAllData(ownerId: string): Promise<{
       gastos_mensais: mergedBills,
       clientes: mergedClients,
       vendas_rapidas_itens: mergedQuickSales,
+      quick_sales: mergedQuickSales,
+      reminders: localReminders,
       cash_register: localCashRegister,
       sessoes_caixa: sessoesCaixaRemote || [],
       caixa_status: caixaStatusRemote || [],
@@ -2668,17 +2705,47 @@ export async function dbImportAllData(
 
       try {
         localStorage.setItem(`NUCLEO_QUICK_SALES_${currentOwnerId}`, JSON.stringify(quickItemsToSave));
+        localStorage.setItem("NUCLEO_QUICK_SALES", JSON.stringify(quickItemsToSave));
       } catch {}
 
       if (supabase && quickItemsToSave.length > 0) {
         try {
           for (const itemRow of quickItemsToSave) {
-            await supabase.from("vendas_rapidas_itens").upsert(itemRow);
+            await Promise.allSettled([
+              supabase.from("vendas_rapidas_itens").upsert(itemRow),
+              supabase.from("quick_sales").upsert({
+                id: itemRow.id,
+                user_id: currentOwnerId,
+                description: itemRow.description || itemRow.descricao,
+                price: itemRow.price,
+                cost: itemRow.cost,
+                gradient: itemRow.gradient,
+                created_at: itemRow.created_at
+              })
+            ]);
           }
         } catch (e) {
           console.warn("Aviso ao restaurar vendas_rapidas_itens no Supabase:", e);
         }
       }
+    }
+
+    // 8.3 Restore Reminders if present
+    const rawReminders = (backupData as any).reminders || 
+      (backupData.localStorageDump && backupData.localStorageDump["NUCLEO_CUSTOM_REMINDERS"] ? JSON.parse(backupData.localStorageDump["NUCLEO_CUSTOM_REMINDERS"]) : null);
+    if (Array.isArray(rawReminders) && rawReminders.length > 0) {
+      try {
+        localStorage.setItem("NUCLEO_CUSTOM_REMINDERS", JSON.stringify(rawReminders));
+        window.dispatchEvent(new CustomEvent("reminders_updated"));
+      } catch (e) {}
+    }
+
+    // 8.4 Restore Company Logo into IndexedDB for persistent offline rendering
+    if (backupData.company_profile && backupData.company_profile.logo) {
+      try {
+        const { setIndexedDbItem } = await import("./utils/indexedDb");
+        await setIndexedDbItem("NUCLEO_COMPANY_LOGO", backupData.company_profile.logo);
+      } catch (e) {}
     }
 
     // 9. Instant Multi-Terminal Broadcast to all devices via realtime
@@ -2694,6 +2761,15 @@ export async function dbImportAllData(
     notifyRealtimeSync("global", "clients_updated", counts);
     notifyRealtimeSync(currentOwnerId, "quick_sales_updated", counts);
     notifyRealtimeSync("global", "quick_sales_updated", counts);
+    notifyRealtimeSync(currentOwnerId, "company_profile_updated", { timestamp: Date.now() });
+
+    try {
+      window.dispatchEvent(new CustomEvent("company_profile_updated"));
+      window.dispatchEvent(new CustomEvent("logo_updated"));
+      window.dispatchEvent(new CustomEvent("quick_sales_config_update"));
+      window.dispatchEvent(new CustomEvent("backup_restored_sync"));
+      window.dispatchEvent(new Event("storage"));
+    } catch (e) {}
 
     return {
       success: true,

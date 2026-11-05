@@ -37,7 +37,7 @@ import React, { useState, useMemo } from "react";
 import { Sale, CompanyProfile, getSaleOrderDate, isQuickSaleClient, isPendingRetiradaOrBaixa, User } from "../types";
 import { jsPDF } from "jspdf";
 import { motion, AnimatePresence } from "motion/react";
-import { parseClientImages } from "../supabase";
+import { parseClientImages, dbExportAllData, dbImportAllData } from "../supabase";
 
 interface SalesHistoryProps {
   sales: Sale[];
@@ -1084,42 +1084,98 @@ export function SalesHistory({
     window.open(url, "_blank");
   };
 
-  // Export database to JSON safety file
-  const handleExportData = () => {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(sales, null, 2));
-    const downloadAnchor = document.createElement("a");
-    downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `Backup_Vendas_${new Date().toISOString().slice(0, 10)}.json`);
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
+  // Export database to full unified JSON safety file (includes Quick Sales, Logo, Company, Sales, etc.)
+  const handleExportData = async () => {
+    try {
+      const ownerId = currentUser?.owner_id || currentUser?.id || "global";
+      const fullData = await dbExportAllData(ownerId);
+      
+      const payloadToExport = fullData || {
+        backup_type: "full_system_backup",
+        exported_at: new Date().toISOString(),
+        sales: sales
+      };
+
+      const jsonStr = JSON.stringify(payloadToExport, null, 2);
+      const blob = new Blob([jsonStr], { type: "application/json" });
+      const downloadUrl = URL.createObjectURL(blob);
+      const downloadAnchor = document.createElement("a");
+      downloadAnchor.setAttribute("href", downloadUrl);
+      const dateStr = new Date().toISOString().slice(0, 10);
+      downloadAnchor.setAttribute("download", `Backup_Completo_Sistema_${dateStr}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+      URL.revokeObjectURL(downloadUrl);
+
+      // Save a copy to the cloud in background
+      try {
+        fetch("/api/backups", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            titulo: `Backup_Completo_${dateStr}.json`,
+            descricao: jsonStr,
+            valor: jsonStr.length,
+            userId: ownerId
+          })
+        }).catch(() => {});
+      } catch (e) {}
+    } catch (e) {
+      // Fallback: direct sales export
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(sales, null, 2));
+      const downloadAnchor = document.createElement("a");
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `Backup_Vendas_${new Date().toISOString().slice(0, 10)}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+    }
   };
 
-  // Import JSON backup
+  // Import JSON backup (supports both legacy sales-only JSON and full system unified backup)
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = async (event) => {
         try {
           const parsed = JSON.parse(event.target?.result as string);
-          let salesToImport: Sale[] = [];
-          if (Array.isArray(parsed)) {
-            salesToImport = parsed;
-          } else if (parsed && typeof parsed === "object") {
-            const source = parsed.data || parsed.backup || parsed;
-            if (Array.isArray(source.sales)) salesToImport = source.sales;
-            else if (Array.isArray(source.vendas)) salesToImport = source.vendas;
-            else if (source.NUCLEO_SALES) {
-              try { salesToImport = JSON.parse(source.NUCLEO_SALES); } catch (e) {}
-            }
-          }
+          const ownerId = currentUser?.owner_id || currentUser?.id || "global";
           
-          if (salesToImport.length > 0) {
-            onImportBackup(salesToImport);
-            alert("Backup importado com sucesso! " + salesToImport.length + " vendas carregadas no sistema.");
+          const isFullBackup = parsed && typeof parsed === "object" && (
+            parsed.company_profile || parsed.vendas_rapidas_itens || parsed.quick_sales || parsed.produtos || parsed.clientes || parsed.localStorageDump
+          );
+
+          if (isFullBackup) {
+            const res = await dbImportAllData(ownerId, parsed);
+            if (Array.isArray(parsed.sales) && parsed.sales.length > 0) {
+              onImportBackup(parsed.sales);
+            }
+            alert(`✅ Backup Completo Unificado Restaurado com Sucesso!\n\n• ${res.counts.sales || parsed.sales?.length || 0} Vendas\n• ${res.counts.vendas_rapidas_itens || parsed.vendas_rapidas_itens?.length || 0} Vendas Rápidas\n• ${res.counts.produtos || 0} Produtos\n• ${res.counts.clientes || 0} Clientes\n• Dados Cadastrais e Logotipo da Empresa restaurados!`);
+            window.dispatchEvent(new CustomEvent("company_profile_updated"));
+            window.dispatchEvent(new CustomEvent("logo_updated"));
+            window.dispatchEvent(new CustomEvent("quick_sales_config_update"));
+            window.dispatchEvent(new CustomEvent("backup_restored_sync"));
           } else {
-            alert("Formato de arquivo inválido ou nenhuma venda encontrada no JSON.");
+            let salesToImport: Sale[] = [];
+            if (Array.isArray(parsed)) {
+              salesToImport = parsed;
+            } else if (parsed && typeof parsed === "object") {
+              const source = parsed.data || parsed.backup || parsed;
+              if (Array.isArray(source.sales)) salesToImport = source.sales;
+              else if (Array.isArray(source.vendas)) salesToImport = source.vendas;
+              else if (source.NUCLEO_SALES) {
+                try { salesToImport = JSON.parse(source.NUCLEO_SALES); } catch (e) {}
+              }
+            }
+            
+            if (salesToImport.length > 0) {
+              onImportBackup(salesToImport);
+              alert("Backup importado com sucesso! " + salesToImport.length + " vendas carregadas no sistema.");
+            } else {
+              alert("Formato de arquivo inválido ou nenhuma venda encontrada no JSON.");
+            }
           }
         } catch (err) {
           alert("Erro ao ler o arquivo de backup de dados.");

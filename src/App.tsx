@@ -3133,7 +3133,7 @@ export default function App() {
 
   // Listener para restauração de cópias de segurança (local ou nuvem): recarrega dados silenciosamente
   useEffect(() => {
-    const handleRestoreReload = (evt: any) => {
+    const handleRestoreReload = async (evt: any) => {
       console.log("[App] Backup restaurado detectado, atualizando dados em memória a partir do localStorage...");
       try {
         const savedSales = localStorage.getItem("NUCLEO_SALES");
@@ -3177,6 +3177,13 @@ export default function App() {
         if (savedCompany) {
           const parsed = JSON.parse(savedCompany);
           if (parsed && typeof parsed === "object") {
+            try {
+              const { getIndexedDbItem } = await import("./utils/indexedDb");
+              const idbLogo = await getIndexedDbItem<string>("NUCLEO_COMPANY_LOGO");
+              if (idbLogo && !parsed.logo) {
+                parsed.logo = idbLogo;
+              }
+            } catch (e) {}
             setCompany(parsed);
           }
         }
