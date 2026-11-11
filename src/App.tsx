@@ -1591,6 +1591,20 @@ export default function App() {
     } catch (e) {}
   };
 
+  // Auto cleanup cache on program exit / system closure
+  React.useEffect(() => {
+    const handleBeforeUnload = () => {
+      try {
+        localStorage.removeItem("NUCLEO_CASH_REGISTER_ACTIVE");
+        sessionStorage.clear();
+      } catch (e) {}
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, []);
+
   const playCloseRegisterSound = () => {
     if (!soundEnabled) return;
     try {
@@ -6045,7 +6059,6 @@ export default function App() {
         onMetasSemanaClick={() => setShowWeeklyGoalModal(true)}
         isCashRegisterOpen={isRegisterOpenForToday}
         onCashRegisterClick={() => setShowCashRegisterModal(true)}
-        onOpenDebugModal={() => setShowCashRegisterDebugModal(true)}
         dbSyncing={dbSyncing}
       />
 
