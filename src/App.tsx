@@ -45,6 +45,7 @@ import { WeeklyGoalModal } from "./components/WeeklyGoalModal";
 import { TrialCountdown } from "./components/TrialCountdown";
 import { WelcomeModal } from "./components/WelcomeModal";
 import { CashRegisterModal } from "./components/CashRegisterModal";
+import { CashRegisterDebugModal } from "./components/CashRegisterDebugModal";
 import { TelaDeBloqueio } from "./components/AsaasPixCheckout";
 import {
   isSupabaseConfigured,
@@ -1573,7 +1574,22 @@ export default function App() {
 
   const [showWeeklyGoalModal, setShowWeeklyGoalModal] = useState<boolean>(false);
   const [showCashRegisterModal, setShowCashRegisterModal] = useState<boolean>(false);
+  const [showCashRegisterDebugModal, setShowCashRegisterDebugModal] = useState<boolean>(false);
   const [showAutoClosePrompt, setShowAutoClosePrompt] = useState<boolean>(false);
+
+  const logCashRegisterEvent = (type: string, message: string, data?: any) => {
+    try {
+      if (!(window as any).__CASH_REGISTER_LOGS__) {
+        (window as any).__CASH_REGISTER_LOGS__ = [];
+      }
+      (window as any).__CASH_REGISTER_LOGS__.unshift({
+        timestamp: new Date().toISOString(),
+        type,
+        message,
+        data
+      });
+    } catch (e) {}
+  };
 
   const playCloseRegisterSound = () => {
     if (!soundEnabled) return;
@@ -6029,6 +6045,7 @@ export default function App() {
         onMetasSemanaClick={() => setShowWeeklyGoalModal(true)}
         isCashRegisterOpen={isRegisterOpenForToday}
         onCashRegisterClick={() => setShowCashRegisterModal(true)}
+        onOpenDebugModal={() => setShowCashRegisterDebugModal(true)}
         dbSyncing={dbSyncing}
       />
 
@@ -7884,6 +7901,16 @@ export default function App() {
 
       {/* Modal de boas-vindas para primeiro acesso */}
       <WelcomeModal currentUser={currentUser} />
+
+      {/* Cash Register Debug & Storage / Event Log Modal */}
+      <CashRegisterDebugModal
+        isOpen={showCashRegisterDebugModal}
+        onClose={() => setShowCashRegisterDebugModal(false)}
+        cashRegister={cashRegister}
+        onRefresh={() => {
+          checkGlobalRegisterStatus();
+        }}
+      />
     </div>
   );
 }

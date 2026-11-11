@@ -1,4 +1,4 @@
-import { ClipboardList, LayoutDashboard, Building2, TrendingDown, LogOut, User as UserIcon, Cloud, CloudOff, Users, UserCheck, BarChart3, Boxes, Calculator, Clock, Calendar, Fingerprint, Package, Lock, Bell, Trash2, Check, X, Search, ShieldAlert, Trophy, Wallet, RefreshCw, Sun, Moon, Headphones, Coffee, Maximize, Minimize } from "lucide-react";
+import { ClipboardList, LayoutDashboard, Building2, TrendingDown, LogOut, User as UserIcon, Cloud, CloudOff, Users, UserCheck, BarChart3, Boxes, Calculator, Clock, Calendar, Fingerprint, Package, Lock, Bell, Trash2, Check, X, Search, ShieldAlert, Trophy, Wallet, RefreshCw, Sun, Moon, Headphones, Coffee, Maximize, Minimize, Terminal } from "lucide-react";
 import React from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { User } from "../types";
@@ -31,6 +31,7 @@ interface HeaderProps {
   onCashRegisterClick?: () => void;
   dbSyncing?: boolean;
   onOpenStandby?: () => void;
+  onOpenDebugModal?: () => void;
 }
 
 function HeaderClock() {
@@ -82,7 +83,8 @@ export function Header({
   isCashRegisterOpen = false,
   onCashRegisterClick,
   dbSyncing = false,
-  onOpenStandby
+  onOpenStandby,
+  onOpenDebugModal
 }: HeaderProps) {
   const isGeneralAdmin = currentUser?.email === "sistemadevendaadm@gmail.com" || currentUser?.email === "sistemavendaadm@gmail.com" || currentUser?.email === "vendas.impactodigital2@gmail.com";
 
@@ -999,19 +1001,32 @@ export function Header({
 
           {/* 4. Caixa Aberto / Caixa Fechado Button */}
           {onCashRegisterClick && (
-            <button
-              type="button"
-              onClick={onCashRegisterClick}
-              className={`px-3 py-1.5 rounded-xl border flex items-center gap-1.5 transition-all cursor-pointer text-xs font-bold shrink-0 h-9 ${
-                isCashRegisterOpen
-                  ? "bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/35 text-emerald-400 shadow-sm shadow-emerald-500/10"
-                  : "bg-red-500/15 hover:bg-red-500/25 border-red-500/35 text-red-400"
-              }`}
-              title={isCashRegisterOpen ? "Caixa Aberto (clique para gerenciar/fechar)" : "Caixa Fechado (clique para abrir o caixa)"}
-            >
-              <Wallet className="h-4 w-4 shrink-0" />
-              <span>{isCashRegisterOpen ? "Caixa Aberto" : "Caixa Fechado"}</span>
-            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={onCashRegisterClick}
+                className={`px-3 py-1.5 rounded-xl border flex items-center gap-1.5 transition-all cursor-pointer text-xs font-bold shrink-0 h-9 ${
+                  isCashRegisterOpen
+                    ? "bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/35 text-emerald-400 shadow-sm shadow-emerald-500/10"
+                    : "bg-red-500/15 hover:bg-red-500/25 border-red-500/35 text-red-400"
+                }`}
+                title={isCashRegisterOpen ? "Caixa Aberto (clique para gerenciar/fechar)" : "Caixa Fechado (clique para abrir o caixa)"}
+              >
+                <Wallet className="h-4 w-4 shrink-0" />
+                <span>{isCashRegisterOpen ? "Caixa Aberto" : "Caixa Fechado"}</span>
+              </button>
+              {onOpenDebugModal && (
+                <button
+                  type="button"
+                  onClick={onOpenDebugModal}
+                  className="px-2.5 py-1.5 bg-slate-900/60 hover:bg-slate-800 border border-slate-705 rounded-xl text-slate-300 hover:text-white transition-all text-xs font-bold flex items-center gap-1 h-9 cursor-pointer"
+                  title="Depurar Estado do Caixa & Logs"
+                >
+                  <Terminal className="h-3.5 w-3.5 text-brand-cyan" />
+                  <span className="hidden sm:inline">Debug</span>
+                </button>
+              )}
+            </div>
           )}
 
           {/* 5. NEW: Calculadora Button */}
