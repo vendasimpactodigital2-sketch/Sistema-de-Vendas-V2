@@ -62,6 +62,11 @@ export function CashRegisterModal({
     currentUser.role === "seller" ||
     (currentUser.owner_id && currentUser.owner_id !== currentUser.id && currentUser.role !== "administrador" && !currentUser.is_admin)
   ) && !adminUnlocked;
+
+  const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+  const userId = currentUser?.id || "";
+  const companyId = currentUser?.owner_id || currentUser?.id || UNIFIED_EMPRESA_ID;
+
   // Opening states
   const [openCashInput, setOpenCashInput] = useState<string>("100.00");
   const [operatorInput, setOperatorInput] = useState<string>(activeOperatorName && activeOperatorName !== "Operador" ? activeOperatorName : (currentUser?.email || "grafica.designer16@gmail.com"));
@@ -99,8 +104,6 @@ export function CashRegisterModal({
   useEffect(() => {
     const supabase = getSupabase();
     if (!supabase) return;
-    const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
-    const companyId = currentUser?.owner_id || currentUser?.id || UNIFIED_EMPRESA_ID;
 
     // 1. Initial query from sessoes_caixa
     supabase
@@ -156,14 +159,8 @@ export function CashRegisterModal({
               onRefreshRegister?.();
             }
           } else if (status === "aberto") {
-            const openDate = getLocalDateFromISO(row?.data_abertura);
-            const todayDate = getLocalDateFromISO(new Date().toISOString());
-            if (openDate === todayDate) {
-              setCaixaDbStatus("ABERTO");
-              onRefreshRegister?.();
-            } else {
-              setCaixaDbStatus("FECHADO");
-            }
+            setCaixaDbStatus("ABERTO");
+            onRefreshRegister?.();
           }
         }
       )
@@ -176,13 +173,10 @@ export function CashRegisterModal({
         },
         (payload: any) => {
           const rowUserId = payload.new?.user_id;
-          if (rowUserId && rowUserId !== companyId) return;
+          if (rowUserId && rowUserId !== companyId && rowUserId !== UNIFIED_EMPRESA_ID && rowUserId !== userId) return;
           const st = String(payload.new?.status || "").toUpperCase();
           if (st === "FECHADO") {
-            const cur = cashRegister.currentSession;
-            if (!cur || cur.status !== "aberto") {
-              setCaixaDbStatus("FECHADO");
-            }
+            setCaixaDbStatus("FECHADO");
           } else if (st === "ABERTO") {
             setCaixaDbStatus("ABERTO");
           }
@@ -543,13 +537,17 @@ export function CashRegisterModal({
     if (supabase) {
       (async () => {
         try {
-          await supabase
-            .from("caixa_status")
-            .upsert({
-              user_id: userId,
-              status: "ABERTO",
-              updated_at: new Date().toISOString()
-            });
+          const nowIso = new Date().toISOString();
+          const targetIds = Array.from(new Set([userId, companyId, "62f892b2-3855-4ae9-8b2d-42d4b6223815"].filter(Boolean)));
+          await Promise.allSettled(
+            targetIds.map((id) =>
+              supabase.from("caixa_status").upsert({
+                user_id: id,
+                status: "ABERTO",
+                updated_at: nowIso
+              })
+            )
+          );
         } catch (err) {
           console.warn("Erro ao atualizar caixa_status:", err);
         }
@@ -640,13 +638,16 @@ export function CashRegisterModal({
 
         // 3. Atualizar caixa_status para FECHADO
         try {
-          await supabase
-            .from("caixa_status")
-            .upsert({
-              user_id: companyId,
-              status: "FECHADO",
-              updated_at: closingDate
-            });
+          const targetIds = Array.from(new Set([userId, companyId, "62f892b2-3855-4ae9-8b2d-42d4b6223815"].filter(Boolean)));
+          await Promise.allSettled(
+            targetIds.map((id) =>
+              supabase.from("caixa_status").upsert({
+                user_id: id,
+                status: "FECHADO",
+                updated_at: closingDate
+              })
+            )
+          );
         } catch (err) {
           console.warn("Erro ao atualizar caixa_status:", err);
         }

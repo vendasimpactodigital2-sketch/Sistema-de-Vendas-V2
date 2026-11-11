@@ -3558,52 +3558,41 @@ export async function dbGetCashRegister(userId: string): Promise<CashRegisterSta
         .order("data_abertura", { ascending: false })
         .limit(5);
 
+      // 2.1 Verificar fonte da verdade caixa_status prioritária
+      try {
+        const { data: statusRows } = await supabase
+          .from("caixa_status")
+          .select("status, updated_at")
+          .or(`user_id.eq.${companyId},user_id.eq.${UNIFIED_EMPRESA_ID}`)
+          .order("updated_at", { ascending: false })
+          .limit(1);
+
+        if (statusRows && statusRows.length > 0) {
+          const st = String(statusRows[0].status || "").toUpperCase().trim();
+          if (st === "FECHADO") {
+            return {
+              currentSession: null,
+              history: historyItems
+            };
+          }
+        }
+      } catch (stErr) {}
+
       if (!sessErr && openSessions && openSessions.length > 0) {
         const sessRow = openSessions.find((s: any) => isCashSessionActiveOrOpen(s));
         if (sessRow) {
-          const openDate = getLocalDateString(sessRow.data_abertura);
-          const todayDate = getLocalDateString(new Date());
-
-          if (openDate && openDate < todayDate) {
-            // Sessão do dia anterior deixada aberta: fechar formalmente no banco e registrar no histórico
-            const pastClosedDate = new Date(sessRow.data_abertura).toISOString();
-            supabase
-              .from("sessoes_caixa")
-              .update({
-                status: "fechado",
-                data_fechamento: pastClosedDate
-              })
-              .eq("id", sessRow.id)
-              .then(() => {}, () => {});
-
-            const closedPast: CashRegisterSession = {
-              id: sessRow.id,
-              status: "fechado",
-              valorAbertura: Number(sessRow.valor_abertura ?? sessRow.valor_inicial ?? 0),
-              dataAbertura: sessRow.data_abertura,
-              dataFechamento: pastClosedDate,
-              operador: sessRow.operador || "Operador",
-              observacoes: "Fechamento automático de sessão expirada do dia anterior"
-            };
-
-            return {
-              currentSession: null,
-              history: [closedPast, ...historyItems.filter(h => h.id !== closedPast.id)]
-            };
-          } else if (openDate === todayDate) {
-            // Sessão de hoje ativa e válida para o dia inteiro
-            const openState: CashRegisterState = {
-              currentSession: {
-                id: sessRow.id || sessRow.session_id || `session_${Date.now()}`,
-                status: "aberto",
-                valorAbertura: Number(sessRow.valor_abertura ?? sessRow.valor_inicial ?? sessRow.fundo_troco) || 0,
-                dataAbertura: sessRow.data_abertura || new Date().toISOString(),
-                operador: sessRow.operador || sessRow.usuario || "Operador"
-              },
-              history: historyItems
-            };
-            return openState;
-          }
+          // Sessão ativa e aberta - MANTRA DO CAIXA: O caixa só fecha quando o operador clicar manualmente em "Encerrar Caixa"!
+          const openState: CashRegisterState = {
+            currentSession: {
+              id: sessRow.id || sessRow.session_id || `session_${Date.now()}`,
+              status: "aberto",
+              valorAbertura: Number(sessRow.valor_abertura ?? sessRow.valor_inicial ?? sessRow.fundo_troco) || 0,
+              dataAbertura: sessRow.data_abertura || new Date().toISOString(),
+              operador: sessRow.operador || sessRow.usuario || "Operador"
+            },
+            history: historyItems
+          };
+          return openState;
         }
       }
 
@@ -4077,6 +4066,20 @@ export async function dbOpenGlobalCashRegister(userId: string, session: any): Pr
       }
     } catch (e) {}
 
+    // Upsert caixa_status para ABERTO
+    try {
+      await supabase.from("caixa_status").upsert({
+        user_id: effectiveUserId,
+        status: "ABERTO",
+        updated_at: nowISO
+      });
+      await supabase.from("caixa_status").upsert({
+        user_id: "62f892b2-3855-4ae9-8b2d-42d4b6223815",
+        status: "ABERTO",
+        updated_at: nowISO
+      });
+    } catch (e) {}
+
     const today = new Date();
     const yyyy = today.getFullYear();
     const mm = String(today.getMonth() + 1).padStart(2, '0');
@@ -4187,6 +4190,13 @@ export async function dbCloseGlobalCashRegister(userId: string, sessionId?: stri
         .from("caixa_status")
         .upsert({
           user_id: effectiveUserId,
+          status: "FECHADO",
+          updated_at: closingDate
+        });
+      await supabase
+        .from("caixa_status")
+        .upsert({
+          user_id: UNIFIED_EMPRESA_ID,
           status: "FECHADO",
           updated_at: closingDate
         });

@@ -3430,6 +3430,27 @@ ${JSON.stringify(sales, null, 2)}
           });
         }
 
+        // Upsert caixa_status prioritária para ABERTO
+        await Promise.allSettled([
+          supabase.from("caixa_status").upsert({
+            user_id: canonicalOwnerId,
+            status: "ABERTO",
+            updated_at: nowISO
+          }),
+          supabase.from("caixa_status").upsert({
+            user_id: UNIFIED_EMPRESA_ID,
+            status: "ABERTO",
+            updated_at: nowISO
+          }),
+          ...(userId && userId !== canonicalOwnerId ? [
+            supabase.from("caixa_status").upsert({
+              user_id: userId,
+              status: "ABERTO",
+              updated_at: nowISO
+            })
+          ] : [])
+        ]);
+
         const createPayload = (name: string, targetId: string) => ({
           user_id: targetId,
           client_name: name,
@@ -3632,13 +3653,55 @@ ${JSON.stringify(sales, null, 2)}
       parsedCandidates.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
       const latestCandidate = parsedCandidates[0];
 
-      // 0. TOP PRIORITY: Real table sessoes_caixa check
+      const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+
+      // 0. TOP PRIORITY: Check caixa_status table for authoritative operator state
       try {
-        const UNIFIED_EMPRESA_ID = "62f892b2-3855-4ae9-8b2d-42d4b6223815";
+        const { data: stRows } = await supabase
+          .from("caixa_status")
+          .select("status, updated_at")
+          .or(`user_id.eq.${canonicalOwnerId},user_id.eq.${UNIFIED_EMPRESA_ID},user_id.eq.${userId}`)
+          .order("updated_at", { ascending: false })
+          .limit(1);
+
+        if (stRows && stRows.length > 0) {
+          const st = String(stRows[0].status || "").toUpperCase().trim();
+          if (st === "FECHADO") {
+            let histItems: any[] = [];
+            try {
+              const { data: hRows } = await supabase
+                .from("historico_caixas")
+                .select("*")
+                .order("data_fechamento", { ascending: false })
+                .limit(50);
+              if (hRows && hRows.length > 0) {
+                histItems = hRows.map((h: any) => h.dados_completos_json || {
+                  id: h.id,
+                  status: "fechado",
+                  dataFechamento: h.data_fechamento,
+                  valorFechamentoReal: Number(h.saldo_final) || 0
+                });
+              }
+            } catch (hErr) {}
+
+            return res.json({
+              success: true,
+              data: {
+                currentSession: null,
+                history: histItems
+              },
+              date: new Date().toISOString()
+            });
+          }
+        }
+      } catch (stErr) {}
+
+      // 0.1 Real table sessoes_caixa check
+      try {
         const { data: sessRows } = await supabase
           .from("sessoes_caixa")
           .select("*")
-          .eq("empresa_id", UNIFIED_EMPRESA_ID)
+          .or(`empresa_id.eq.${UNIFIED_EMPRESA_ID},empresa_id.eq.${canonicalOwnerId},empresa_id.eq.${userId}`)
           .order("data_abertura", { ascending: false })
           .limit(10);
 

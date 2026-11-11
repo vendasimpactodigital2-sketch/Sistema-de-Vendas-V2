@@ -2545,12 +2545,12 @@ export function CompanySettings({
                 />
                 <div className="w-10 h-5 bg-slate-900 border border-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-400 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-brand-magenta/80 peer-checked:after:bg-white"></div>
                 <div className="ml-3 text-xs font-bold text-slate-200">
-                  Fechar caixa automaticamente ao término
+                  Lembrete de fechamento ao fim do expediente
                 </div>
               </label>
             </div>
             <p className="text-[10px] text-slate-500 leading-relaxed">
-              Ativando esta opção, o sistema fará a contabilidade sozinho e fechará o caixa de forma autônoma se os operadores esquecerem aberto no fim do dia.
+              No encerramento do horário, o sistema apresentará o resumo contábil para o operador conferir e encerrar o caixa manualmente com total segurança.
             </p>
           </div>
         </div>
