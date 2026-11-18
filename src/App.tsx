@@ -2410,15 +2410,22 @@ export default function App() {
           }
         }
 
-        // 3.2 Sync Expenses
+        // 3.2 Sync Expenses with local pending protection
         if (expensesPromiseIdx !== -1) {
           const remoteExpenses = dataResults[expensesPromiseIdx];
           if (remoteExpenses) {
-            setExpenses((prev) => {
-              const isSame = prev.length === remoteExpenses.length && prev.every((e, i) => e.id === remoteExpenses[i]?.id && e.value === remoteExpenses[i]?.value && e.date === remoteExpenses[i]?.date);
-              if (isSame) return prev;
-              localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(remoteExpenses));
-              return remoteExpenses;
+            setExpenses((prevLocalExpenses) => {
+              const remoteMap = new Map<string, any>();
+              remoteExpenses.forEach((e: any) => remoteMap.set(e.id, e));
+
+              const localPendingExpenses = prevLocalExpenses.filter((e) => !remoteMap.has(e.id));
+              const merged = [...localPendingExpenses, ...remoteExpenses];
+
+              const isSame = prevLocalExpenses.length === merged.length && prevLocalExpenses.every((e, i) => e.id === merged[i]?.id && e.value === merged[i]?.value);
+              if (isSame) return prevLocalExpenses;
+
+              localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(merged));
+              return merged;
             });
           }
         }
@@ -4582,7 +4589,11 @@ export default function App() {
     if (!requireOpenCashRegister("qualquer despesa")) {
       return;
     }
-    setExpenses((prev) => [...prev, expense]);
+    setExpenses((prev) => {
+      const updated = [...prev, expense];
+      try { localStorage.setItem("NUCLEO_EXPENSES", JSON.stringify(updated)); } catch (e) {}
+      return updated;
+    });
     playAlertSound("success");
     addToast(`Despesa registrada com sucesso: ${expense.description}! 🧾`, "success");
     if (currentUser && isSupabaseConfigured()) {
