@@ -140,6 +140,7 @@ export interface Expense {
   value: number;
   date: string; // ISO string or YYYY-MM-DD
   category: string;
+  paymentMethod?: string;
   comprovanteUrl?: string;
   receiptImage?: string;
 }

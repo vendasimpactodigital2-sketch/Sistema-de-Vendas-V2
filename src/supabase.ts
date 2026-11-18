@@ -1440,7 +1440,10 @@ export async function dbGetExpenses(userId: string): Promise<Expense[] | null> {
       description: d.description,
       value: Number(d.value),
       date: d.date,
-      category: d.category
+      category: d.category,
+      paymentMethod: d.payment_method || d.paymentMethod || "dinheiro",
+      comprovanteUrl: d.comprovante_url || d.comprovanteUrl || undefined,
+      receiptImage: d.comprovante_url || d.receiptImage || undefined
     }));
   } catch (err) {
     console.error("Supabase query expenses exception:", err);
@@ -1498,7 +1501,9 @@ export async function dbSaveExpense(userId: string, expense: Expense): Promise<b
         description: expense.description,
         value: expense.value,
         date: expense.date,
-        category: expense.category
+        category: expense.category,
+        payment_method: expense.paymentMethod || "dinheiro",
+        comprovante_url: expense.comprovanteUrl || expense.receiptImage || null
       });
 
     if (error) {

@@ -2261,7 +2261,10 @@ ${JSON.stringify(sales, null, 2)}
         description: d.description,
         value: Number(d.value),
         date: d.date,
-        category: d.category
+        category: d.category,
+        paymentMethod: d.payment_method || d.paymentMethod || "dinheiro",
+        comprovanteUrl: d.comprovante_url || d.comprovanteUrl || undefined,
+        receiptImage: d.comprovante_url || d.receiptImage || undefined
       }));
 
       return res.json({ success: true, data: mapped });
@@ -2288,7 +2291,9 @@ ${JSON.stringify(sales, null, 2)}
         description: expense.description || "Despesa",
         value: Number(expense.value) || 0,
         date: expense.date || new Date().toISOString(),
-        category: expense.category || "Outros"
+        category: expense.category || "Outros",
+        payment_method: expense.paymentMethod || "dinheiro",
+        comprovante_url: expense.comprovanteUrl || expense.receiptImage || null
       };
 
       let { error } = await supabase.from("expenses").upsert(payload);
@@ -3662,11 +3667,11 @@ ${JSON.stringify(sales, null, 2)}
           .select("status, updated_at")
           .or(`user_id.eq.${canonicalOwnerId},user_id.eq.${UNIFIED_EMPRESA_ID},user_id.eq.${userId}`)
           .order("updated_at", { ascending: false })
-          .limit(1);
+          .limit(5);
 
         if (stRows && stRows.length > 0) {
-          const st = String(stRows[0].status || "").toUpperCase().trim();
-          if (st === "FECHADO") {
+          const latestSt = String(stRows[0].status || "").toUpperCase().trim();
+          if (latestSt === "FECHADO") {
             let histItems: any[] = [];
             try {
               const { data: hRows } = await supabase
@@ -3688,7 +3693,7 @@ ${JSON.stringify(sales, null, 2)}
               success: true,
               data: {
                 currentSession: null,
-                history: histItems
+                history: histItems.length > 0 ? histItems : (latestCandidate?.state?.history || [])
               },
               date: new Date().toISOString()
             });
@@ -3696,7 +3701,7 @@ ${JSON.stringify(sales, null, 2)}
         }
       } catch (stErr) {}
 
-      // 0.1 Real table sessoes_caixa check
+      // 0.1 Real table sessoes_caixa check (Only consider open sessions opened TODAY)
       try {
         const { data: sessRows } = await supabase
           .from("sessoes_caixa")
@@ -3706,10 +3711,19 @@ ${JSON.stringify(sales, null, 2)}
           .limit(10);
 
         if (sessRows && sessRows.length > 0) {
+          const todayStr = new Date().toISOString().substring(0, 10);
           const openSess = sessRows.find((s: any) => {
             const st = String(s.status || s.situacao || "").toLowerCase().trim();
             const isClosed = st === "fechado" || st === "fechada" || st === "closed" || st === "encerrado" || !!s.data_fechamento || !!s.fechado_em;
-            return !isClosed && (st.includes("abert") || st.includes("ativ") || st.includes("open") || s.aberto === true);
+            if (isClosed) return false;
+            const isOpenStatus = st.includes("abert") || st.includes("ativ") || st.includes("open") || s.aberto === true;
+            if (!isOpenStatus) return false;
+
+            const sessDate = String(s.data_abertura || s.created_at || "").substring(0, 10);
+            if (sessDate && sessDate !== todayStr) {
+              return false; // Ignore old sessions from previous days!
+            }
+            return true;
           });
 
           if (openSess) {

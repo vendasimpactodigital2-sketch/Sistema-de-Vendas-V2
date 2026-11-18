@@ -4,13 +4,12 @@ import ReactMarkdown from "react-markdown";
 import { Header } from "./components/Header";
 import { StandbyScreen } from "./components/StandbyScreen";
 import { ClosedRegisterGate } from "./components/ClosedRegisterGate";
-import { AdminUnlockModal } from "./components/AdminUnlockModal";
+
 import { MetricsCards } from "./components/MetricsCards";
 import { SaleForm } from "./components/SaleForm";
 import { SalesHistory } from "./components/SalesHistory";
 import { DashboardCharts } from "./components/DashboardCharts";
-import { PendingSalesModal } from "./components/PendingSalesModal";
-import { ClientSearchModal } from "./components/ClientSearchModal";
+
 import { MonthlyBill } from "./components/MonthlyExpensesMeta";
 
 const CompanySettings = React.lazy(() => import("./components/CompanySettings").then(m => ({ default: m.CompanySettings })));
@@ -23,6 +22,15 @@ const MonthlyExpensesMeta = React.lazy(() => import("./components/MonthlyExpense
 const SupportPanel = React.lazy(() => import("./components/SupportPanel").then(m => ({ default: m.SupportPanel })));
 const AttendantsManager = React.lazy(() => import("./components/AttendantsManager").then(m => ({ default: m.AttendantsManager })));
 const AdminPanel = React.lazy(() => import("./components/AdminPanel").then(m => ({ default: m.AdminPanel })));
+const WeeklyGoalModal = React.lazy(() => import("./components/WeeklyGoalModal").then(m => ({ default: m.WeeklyGoalModal })));
+const PendingSalesModal = React.lazy(() => import("./components/PendingSalesModal").then(m => ({ default: m.PendingSalesModal })));
+const ClientSearchModal = React.lazy(() => import("./components/ClientSearchModal").then(m => ({ default: m.ClientSearchModal })));
+const CashRegisterModal = React.lazy(() => import("./components/CashRegisterModal").then(m => ({ default: m.CashRegisterModal })));
+const CashRegisterDebugModal = React.lazy(() => import("./components/CashRegisterDebugModal").then(m => ({ default: m.CashRegisterDebugModal })));
+const AdminUnlockModal = React.lazy(() => import("./components/AdminUnlockModal").then(m => ({ default: m.AdminUnlockModal })));
+const WelcomeModal = React.lazy(() => import("./components/WelcomeModal").then(m => ({ default: m.WelcomeModal })));
+const TrialCountdown = React.lazy(() => import("./components/TrialCountdown").then(m => ({ default: m.TrialCountdown })));
+const AdminMensalistas = React.lazy(() => import("./components/AdminMensalistas").then(m => ({ default: m.AdminMensalistas })));
 
 const LazyLoader = () => (
   <div className="flex flex-col items-center justify-center min-h-[400px] w-full p-8 rounded-2xl bg-slate-900/40 border border-slate-850/60 animate-fade-in">
@@ -38,14 +46,8 @@ const LazyLoader = () => (
 import { Sale, CompanyProfile, Expense, User, CatalogProduct, getSaleOrderDate, getSaleOperationCost, CustomReminder, CashRegisterState, CashRegisterSession, isQuickSaleClient, isPendingRetiradaOrBaixa, DeletionAuditRecord, BusinessHours } from "./types";
 import { getLocalDeletionAuditRecords, saveLocalDeletionAuditRecord, clearLocalDeletionAuditRecords, fetchDeletionAuditFromSupabase } from "./utils/deletionAudit";
 import { AuthScreen } from "./components/AuthScreen";
-import { AdminMensalistas } from "./components/AdminMensalistas";
 import { Sparkles, DollarSign, Building2, ShieldAlert, ShieldCheck, TrendingDown, RefreshCw, X, Trophy, CheckCircle, Info, AlertTriangle, Trash2, Bell, Volume2, VolumeX, Package, MapPin, Calendar, Clock, Check, Gift, Fingerprint, Eye, EyeOff, Phone, Wallet, Search, UserCheck, Sunset, BellRing, Moon, Rocket, MessageCircle, LogOut } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { WeeklyGoalModal } from "./components/WeeklyGoalModal";
-import { TrialCountdown } from "./components/TrialCountdown";
-import { WelcomeModal } from "./components/WelcomeModal";
-import { CashRegisterModal } from "./components/CashRegisterModal";
-import { CashRegisterDebugModal } from "./components/CashRegisterDebugModal";
 import { TelaDeBloqueio } from "./components/AsaasPixCheckout";
 import {
   isSupabaseConfigured,
