@@ -1492,6 +1492,16 @@ export async function dbSaveExpense(userId: string, expense: Expense): Promise<b
   const supabase = getSupabase();
   if (!supabase) return false;
 
+  const normalizeDate = (d: string) => {
+    if (!d) return new Date().toISOString().split("T")[0];
+    const trimmed = d.trim();
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(trimmed)) {
+      const [day, month, year] = trimmed.split("/");
+      return `${year}-${month}-${day}`;
+    }
+    return trimmed.includes("T") ? trimmed.split("T")[0] : trimmed;
+  };
+
   try {
     const { error } = await supabase
       .from("expenses")
@@ -1500,7 +1510,7 @@ export async function dbSaveExpense(userId: string, expense: Expense): Promise<b
         user_id: userId,
         description: expense.description,
         value: expense.value,
-        date: expense.date,
+        date: normalizeDate(expense.date),
         category: expense.category,
         payment_method: expense.paymentMethod || "dinheiro",
         comprovante_url: expense.comprovanteUrl || expense.receiptImage || null

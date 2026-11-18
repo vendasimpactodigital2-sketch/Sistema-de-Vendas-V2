@@ -2285,12 +2285,22 @@ ${JSON.stringify(sales, null, 2)}
 
       const { canonicalOwnerId } = await resolveCompanyScope(supabase, userId);
 
+      const normalizeDate = (d: string) => {
+        if (!d) return new Date().toISOString().split("T")[0];
+        const trimmed = d.trim();
+        if (/^\d{2}\/\d{2}\/\d{4}$/.test(trimmed)) {
+          const [day, month, year] = trimmed.split("/");
+          return `${year}-${month}-${day}`;
+        }
+        return trimmed.includes("T") ? trimmed.split("T")[0] : trimmed;
+      };
+
       const payload = {
         id: expense.id,
         user_id: canonicalOwnerId,
         description: expense.description || "Despesa",
         value: Number(expense.value) || 0,
-        date: expense.date || new Date().toISOString(),
+        date: normalizeDate(expense.date),
         category: expense.category || "Outros",
         payment_method: expense.paymentMethod || "dinheiro",
         comprovante_url: expense.comprovanteUrl || expense.receiptImage || null
